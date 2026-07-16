@@ -1,0 +1,467 @@
+.canvas-workspace.canvas-uiux-v4 {
+  .canvas-node-shell {
+    border-radius: 8px;
+  }
+
+  .canvas-node {
+    --canvas-node-meta-height: 39px;
+    // 锚点与 NodeResizer 位于节点边界外；内容裁切由 .canvas-node-core 负责。
+    overflow: visible;
+    border: 1px solid var(--canvas-v4-border);
+    border-radius: 8px;
+    background: var(--canvas-v4-surface);
+    box-shadow: 0 8px 24px color-mix(in srgb, var(--shadow-color, #000) 14%, transparent);
+    transition:
+      border-color var(--canvas-v4-motion-fast) ease-out,
+      box-shadow var(--canvas-v4-motion-fast) ease-out;
+
+    &:hover {
+      border-color: color-mix(in srgb, var(--border-strong) 92%, var(--primary) 8%);
+      box-shadow: var(--canvas-v4-hover-shadow);
+      transform: none;
+    }
+
+    &.canvas-node-selected {
+      border-color: color-mix(in srgb, var(--primary) 62%, var(--border-strong));
+      box-shadow: var(--canvas-v4-selected-shadow);
+    }
+  }
+
+  .canvas-node-meta-bar {
+    height: 39px;
+    min-height: 39px;
+    flex: 0 0 39px;
+    padding: 0 11px;
+    border-bottom: 1px solid var(--canvas-v4-divider);
+    background: var(--canvas-v4-surface);
+  }
+
+  .canvas-node-meta-title {
+    gap: 7px;
+    min-width: 0;
+    color: var(--text);
+  }
+
+  .canvas-node-meta-icon {
+    display: inline-flex;
+    width: 14px;
+    height: 14px;
+    flex: 0 0 14px;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-muted);
+  }
+
+  .canvas-node-kind-label {
+    min-width: 0;
+    overflow: hidden;
+    color: var(--text-muted);
+    font-size: 11px;
+    font-weight: 580;
+    letter-spacing: 0;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .canvas-node-meta-tags {
+    gap: 5px;
+  }
+
+  .canvas-node-meta-chip {
+    min-height: 18px;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    color: var(--text-faint);
+    font-size: 10px;
+    line-height: 18px;
+  }
+
+  .canvas-node-meta-chip-status.is-running {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    color: var(--primary);
+    background: transparent;
+
+    &::before {
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      background: currentColor;
+      box-shadow: 0 0 7px currentColor;
+      content: '';
+    }
+  }
+
+  .canvas-node-core,
+  .canvas-node-body {
+    padding: 0;
+    border-radius: 0;
+    background: var(--canvas-v4-surface);
+  }
+
+  .canvas-node-core {
+    overflow: hidden;
+    border-radius: 0 0 7px 7px;
+  }
+
+  .canvas-node-resize-line {
+    z-index: 9 !important;
+  }
+
+  .canvas-node-resize-handle {
+    z-index: 10 !important;
+  }
+
+  .canvas-node-body > .canvas-node-operation {
+    width: 100%;
+    margin: 0;
+    gap: 0;
+    padding: 0;
+    background: var(--canvas-v4-surface);
+  }
+
+  .canvas-operation-output-nav {
+    background: var(--canvas-v4-surface);
+  }
+
+  .canvas-operation-output-deck {
+    width: 100%;
+    margin: 0;
+    gap: 0;
+    padding: 0;
+  }
+
+  .canvas-operation-output-stage {
+    width: 100%;
+    margin: 0;
+    padding: 0;
+    background: var(--canvas-v4-surface-muted);
+  }
+
+  .canvas-operation-output-media {
+    margin: 0;
+    padding: 0;
+    border: 0;
+    background: var(--bg-sunken);
+  }
+
+  .canvas-operation-output-stage-label {
+    background: linear-gradient(
+      180deg,
+      transparent,
+      color-mix(in srgb, var(--bg-sunken) 92%, transparent)
+    );
+  }
+
+  .canvas-node-content-title {
+    display: flex;
+    box-sizing: border-box;
+    height: 45px;
+    min-width: 0;
+    min-height: 45px;
+    flex: 0 0 45px;
+    flex-direction: column;
+    gap: 3px;
+    padding: 10px 12px 11px;
+    background: var(--canvas-v4-surface);
+
+    strong,
+    span {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    strong {
+      color: var(--text-strong);
+      font-size: 12px;
+      font-weight: 640;
+      line-height: 1.35;
+    }
+
+    span {
+      color: var(--text-faint);
+      font-size: 9px;
+      line-height: 1.35;
+    }
+  }
+
+  .canvas-node-content-title-text {
+    padding: 4px 14px 4px;
+
+    strong {
+      font-size: 13px;
+    }
+  }
+
+  .canvas-node-content-title-media {
+    border-top: 1px solid var(--canvas-v4-divider);
+  }
+
+  .canvas-node-quick-footer {
+    display: flex;
+    box-sizing: border-box;
+    height: 35px;
+    min-height: 35px;
+    flex: 0 0 35px;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 0 10px;
+    border-top: 1px solid var(--canvas-v4-divider);
+    background: var(--canvas-v4-surface);
+
+    > span {
+      min-width: 0;
+      overflow: hidden;
+      color: var(--text-faint);
+      font-size: 10px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    > button {
+      flex: none;
+      padding: 3px 0;
+      border: 0;
+      background: transparent;
+      color: var(--text-muted);
+      cursor: pointer;
+      font: inherit;
+      font-size: 10px;
+      font-weight: 580;
+
+      &:hover,
+      &:focus-visible {
+        color: var(--primary);
+      }
+    }
+  }
+
+  .canvas-node-text {
+    color: var(--text);
+    font-size: 12.5px;
+    line-height: 1.66;
+    padding: 0 10px;
+    background: var(--canvas-v4-surface);
+  }
+
+  .canvas-node-text-long {
+    font-size: 13px;
+    line-height: 1.72;
+  }
+
+  .canvas-node-image-wrap,
+  .canvas-node-image,
+  .canvas-node-audio,
+  .canvas-node-task,
+  .canvas-node-group-body {
+    border-radius: 0;
+  }
+
+  .canvas-node-image {
+    background: color-mix(in srgb, var(--bg-sunken) 92%, #000);
+  }
+
+  // 统一占位图：沿用 3D 导演台的单线图标 + 两行信息 + 安静留白。
+  .canvas-node-image-placeholder,
+  .canvas-operation-empty-state,
+  .canvas-node-stage3d,
+  .canvas-node-group-body {
+    min-height: 148px;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    background:
+      radial-gradient(
+        circle at 50% 44%,
+        color-mix(in srgb, var(--text-muted) 8%, transparent),
+        transparent 58%
+      ),
+      var(--canvas-v4-surface-muted);
+    color: var(--text-faint);
+    text-align: center;
+
+    svg {
+      color: color-mix(in srgb, var(--text-muted) 82%, var(--primary) 18%);
+      stroke-width: 1.6;
+    }
+
+    > strong {
+      color: var(--text-muted);
+      font-size: 11px;
+      font-weight: 600;
+      line-height: 1.4;
+    }
+
+    > span,
+    .canvas-node-group-hint,
+    .canvas-node-task-msg {
+      color: var(--text-faint);
+      font-size: 10px;
+      line-height: 1.5;
+    }
+  }
+
+  .canvas-node-stage3d {
+    min-height: 174px;
+  }
+
+  .canvas-node-stage3d-stats {
+    gap: 10px;
+    color: var(--text-muted);
+    font-size: 11px;
+    font-weight: 560;
+  }
+
+  .canvas-node-stage3d-hint,
+  .canvas-node-vwb-hint {
+    color: var(--text-faint);
+    font-size: 10px;
+  }
+
+  .canvas-node-subview-chip {
+    border-radius: var(--canvas-v4-radius-sm);
+    background: color-mix(in srgb, var(--panel) 92%, transparent);
+    box-shadow: none;
+  }
+
+  .canvas-node-handle {
+    --canvas-node-handle-scale: 1;
+    display: flex;
+    width: 28px;
+    height: 28px;
+    align-items: center;
+    justify-content: center;
+    border: 0;
+    background: transparent;
+    box-shadow: none;
+    opacity: 1;
+
+    &::after {
+      width: 10px;
+      height: 10px;
+      border: 2px solid var(--panel);
+      border-radius: 50%;
+      background: var(--text-faint);
+      box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 10%, transparent);
+      content: '';
+      pointer-events: none;
+      transition:
+        width var(--canvas-v4-motion-fast) ease-out,
+        height var(--canvas-v4-motion-fast) ease-out,
+        background var(--canvas-v4-motion-fast) ease-out;
+    }
+  }
+
+  .canvas-node-group {
+    border-style: dashed;
+    border-color: color-mix(in srgb, var(--text-muted) 32%, transparent);
+    background: color-mix(in srgb, var(--panel) 72%, transparent);
+
+    .canvas-node-meta-bar,
+    .canvas-node-quick-footer {
+      background: color-mix(in srgb, var(--panel) 94%, var(--bg));
+    }
+  }
+
+  .canvas-node-selected .canvas-node-handle,
+  .canvas-node-handle:hover {
+    --canvas-node-handle-scale: 1;
+    background: transparent;
+    box-shadow: none;
+  }
+
+  .canvas-node-selected .canvas-node-handle::after,
+  .canvas-node-handle:hover::after {
+    width: 12px;
+    height: 12px;
+    background: var(--primary);
+  }
+
+  .canvas-node-task-running {
+    position: relative;
+    isolation: isolate;
+
+    &::before {
+      content: '';
+      position: absolute;
+      inset: -1px;
+      z-index: 8;
+      border-radius: inherit;
+      padding: 2.5px;
+      pointer-events: none;
+      background: conic-gradient(
+        from var(--canvas-running-angle, 0deg),
+        transparent 0 12%,
+        color-mix(in srgb, var(--primary) 92%, white 8%) 20%,
+        transparent 31% 58%,
+        color-mix(in srgb, var(--primary) 78%, white 22%) 68%,
+        transparent 80%
+      );
+      mask:
+        linear-gradient(#000 0 0) content-box,
+        linear-gradient(#000 0 0);
+      mask-composite: exclude;
+      animation: canvas-v4-running-border 1.45s linear infinite;
+    }
+
+    &::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      z-index: 7;
+      border-radius: inherit;
+      pointer-events: none;
+      box-shadow:
+        inset 0 0 0 1px color-mix(in srgb, var(--primary) 34%, transparent),
+        0 0 18px color-mix(in srgb, var(--primary) 10%, transparent);
+      animation: canvas-v4-running-pulse 1.25s ease-in-out infinite alternate;
+    }
+  }
+
+  .canvas-node-task-failed {
+    border-color: color-mix(in srgb, var(--danger) 56%, var(--border-strong));
+  }
+
+  .canvas-node-shot-script {
+    .canvas-node-meta-bar {
+      min-height: 42px;
+    }
+
+    .canvas-shot-script-table {
+      font-size: 12px;
+    }
+  }
+
+  .canvas-node-inline-toolbar,
+  .canvas-node-inline-panel {
+    border-color: var(--canvas-v4-divider);
+    background: var(--canvas-v4-surface);
+    box-shadow: none;
+  }
+}
+
+@property --canvas-running-angle {
+  syntax: '<angle>';
+  inherits: false;
+  initial-value: 0deg;
+}
+
+@keyframes canvas-v4-running-border {
+  to {
+    --canvas-running-angle: 360deg;
+  }
+}
+
+@keyframes canvas-v4-running-pulse {
+  from {
+    opacity: 0.42;
+  }
+  to {
+    opacity: 1;
+  }
+}
