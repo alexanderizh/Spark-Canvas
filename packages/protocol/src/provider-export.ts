@@ -5,7 +5,7 @@
  *
  * 核心设计：
  *   - version 字段允许未来 schema 演进；导入端做版本校验
- *   - 导出 payload 包含 apiKey（方便迁移备份，导入时自动恢复）
+ *   - Spark Canvas 普通导出不包含 apiKey；导入仍兼容旧备份中的可选 apiKey
  *   - 导入端对每个 profile 按 name 决定冲突处理（merge 跳过 / replace 覆盖）
  *   - 档位映射（haikuModel/sonnetModel/opusModel）随 profile 一起导出，
  *     导入时同样保留
@@ -24,7 +24,10 @@ import { ProviderMediaModelRefSchema } from './media-model-manifest.js'
 export const PROVIDER_EXPORT_VERSION = 2 as const
 
 /** 支持的版本范围：v1（不含 apiKey）和 v2（含 apiKey）均可导入 */
-export const ProviderExportVersionSchema = z.union([z.literal(1), z.literal(PROVIDER_EXPORT_VERSION)])
+export const ProviderExportVersionSchema = z.union([
+  z.literal(1),
+  z.literal(PROVIDER_EXPORT_VERSION),
+])
 
 const ProviderIconStyleSchema = z.enum(['avatar', 'mono'])
 const ProviderIconConfigSchema = z.object({
@@ -36,7 +39,7 @@ const ProviderIconConfigSchema = z.object({
  * 导出文件中单个 profile 的 schema。
  *
  * 注意：与运行时 ProviderProfile 的差别：
- *   - apiKey 随 profile 一起导出（方便迁移备份）
+ *   - apiKey 仅用于兼容旧备份导入，新导出默认省略
  *   - 不导出 keystoreRef（导入时新建）
  *   - 不导出 createdAt（导入时新生成）
  *   - provider 保留 Spark 文本模型 provider kind，避免第三方 OpenAI-compatible 配置导出后丢语义
@@ -65,7 +68,10 @@ export const ProviderExportProfileSchema = z.object({
   /** OpenAI/Codex API 风格 */
   codexApiKind: z.enum(['chat', 'responses', 'embedding']).optional(),
   /** 模型能力类型 */
-  modelType: z.enum(['image', 'text', 'multimodal', 'voice', 'video']).optional().default('multimodal'),
+  modelType: z
+    .enum(['image', 'text', 'multimodal', 'voice', 'video'])
+    .optional()
+    .default('multimodal'),
   /** 图片模型供应商类型 */
   imageProvider: z.string().min(1).max(80).nullable().optional(),
   /** 图片模型调用方式 */
@@ -80,7 +86,7 @@ export const ProviderExportProfileSchema = z.object({
   mediaDefaults: ProviderMediaDefaultsSchema.optional(),
   /** 启用的多媒体模型 manifest 引用 */
   mediaModelRefs: z.array(ProviderMediaModelRefSchema).max(200).optional(),
-  /** API Key（导出时从 Keychain 读取；导入时写入 Keychain） */
+  /** 旧备份可选 API Key（新导出省略；导入时仍可写入 Keychain） */
   apiKey: z.string().min(1).max(500).optional(),
 })
 
@@ -93,14 +99,14 @@ export type ProviderExportProfile = z.infer<typeof ProviderExportProfileSchema>
  * {
  *   "version": 2,
  *   "exportedAt": "2026-06-03T12:00:00.000Z",
- *   "exportedBy": "spark-agent",
- *   "profiles": [ { ..., "apiKey": "sk-..." }, ... ]
+ *   "exportedBy": "spark-canvas",
+ *   "profiles": [ { ... } ]
  * }
  */
 export const ProviderExportPayloadSchema = z.object({
   version: ProviderExportVersionSchema,
   exportedAt: z.string().min(1),
-  exportedBy: z.literal('spark-agent'),
+  exportedBy: z.union([z.literal('spark-canvas'), z.literal('spark-agent')]),
   profiles: z.array(ProviderExportProfileSchema).max(500),
 })
 

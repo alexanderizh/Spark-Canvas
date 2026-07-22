@@ -33,7 +33,6 @@ console.log(
 try {
   verifyRequireOnly('better-sqlite3')
   verifyRequireOnly('keytar')
-  verifyRequireOnly('node-pty')
 } catch (err) {
   fail('Electron native module ABI verification failed', err)
 }

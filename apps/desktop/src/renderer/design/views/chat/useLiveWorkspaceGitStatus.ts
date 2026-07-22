@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type {
   AgentEvent,
   SessionId,
-  WorkspaceFileChangePayload,
   WorkspaceGitStatusResponse,
 } from '@spark/protocol'
 import { useIpcInvoke, useIpcStream } from '../../hooks/useIpc'
@@ -28,9 +27,8 @@ type UseLiveWorkspaceGitStatusResult = {
 /**
  * Keeps the chat Git snapshot aligned with workspace files and Git metadata.
  *
- * File-system and agent events provide low-latency refreshes. A lightweight
- * poll while Git UI is visible covers index-only changes such as `git add`,
- * which the workspace watcher intentionally ignores.
+ * Agent events provide low-latency refreshes. A lightweight poll while Git UI
+ * is visible covers external and index-only changes such as `git add`.
  */
 export function useLiveWorkspaceGitStatus({
   workspaceId,
@@ -40,8 +38,6 @@ export function useLiveWorkspaceGitStatus({
   onBranchStateChange,
 }: UseLiveWorkspaceGitStatusOptions): UseLiveWorkspaceGitStatusResult {
   const { invoke: getGitStatus } = useIpcInvoke('workspace:git-status')
-  const { invoke: startWatch } = useIpcInvoke('workspace:watch-start')
-  const { invoke: stopWatch } = useIpcInvoke('workspace:watch-stop')
   const [gitStatus, setGitStatus] = useState<WorkspaceGitStatusResponse | null>(null)
   const workspaceIdRef = useRef(workspaceId)
   const requestVersionRef = useRef(0)
@@ -137,26 +133,6 @@ export function useLiveWorkspaceGitStatus({
       requestVersionRef.current += 1
     }
   }, [refreshSignal, requestGitStatus])
-
-  useEffect(() => {
-    if (workspaceId == null) return
-    let disposed = false
-    void startWatch({ workspaceId })
-      .then(() => {
-        if (disposed) void stopWatch({ workspaceId })
-      })
-      .catch(() => {
-        // Focus/session/manual refresh and polling remain available as fallbacks.
-      })
-    return () => {
-      disposed = true
-      void stopWatch({ workspaceId }).catch(() => {})
-    }
-  }, [startWatch, stopWatch, workspaceId])
-
-  useIpcStream('stream:workspace:file-change', (payload: WorkspaceFileChangePayload) => {
-    if (payload.workspaceId === workspaceIdRef.current) scheduleRefresh(true)
-  })
 
   useIpcStream('stream:session:agent-event', (event: AgentEvent) => {
     if (event.type !== 'file_change') return

@@ -19,7 +19,7 @@ import {
   type RefObject,
   type PointerEvent as ReactPointerEvent,
 } from 'react'
-import { Dropdown } from 'antd'
+import { Dropdown, Modal } from 'antd'
 import type {
   AgentEvent,
   ManagedAgent,
@@ -27,16 +27,20 @@ import type {
   SessionAgentAdapter,
   SessionAttachment,
   SessionListResponse,
-  SessionPermissionMode,
 } from '@spark/protocol'
 import { Button, Tooltip } from '@lobehub/ui'
 import { Icons } from '../../Icons'
 import { AvatarImage } from '../../components/AvatarImage'
 import { ProviderLogo } from '../../components/ProviderLogo'
-import { ChatPanel, type ChatPanelNodeReference } from '../../components/ChatPanel'
+import {
+  ChatPanel,
+  type ChatPanelNodeReference,
+  type ChatPanelSessionApi,
+} from '../../components/ChatPanel'
 import { SkillsPickerModal, type SkillItemForPicker } from '../../components/SkillsPickerModal'
 import { getAgentAvatarConfig, hasCustomAvatar, resolveAvatarSrc } from '../../avatar'
 import { useCanvasToolHost } from './canvas-tool-host'
+import { isRunningAgentStatus } from '../chat-session-status'
 import './CanvasAgentPicker.less'
 import type { CanvasToolHostOptions } from './canvas-tool-host'
 import {
@@ -48,10 +52,24 @@ import type { CanvasNode, CanvasSnapshot } from './canvas.types'
 import { buildSelectedNodesContext } from './canvasAgentContextBuilder'
 import {
   buildCanvasAgentModelOptions,
+  filterCanvasAgentConversationProviders,
   getCanvasAgentProviderModels,
   resolveCanvasAgentModelSelection,
   resolveCanvasAgentProviderModel,
 } from './canvas-agent-model-options'
+import {
+  CANVAS_AGENT_DRAFTS_KEY,
+  CANVAS_AGENT_PREFS_KEY,
+  DEFAULT_CANVAS_AGENT_ID,
+  LEGACY_CANVAS_AGENT_DRAFTS_KEY,
+  LEGACY_CANVAS_AGENT_PREFS_KEY,
+  filterCanvasAgentSkills,
+  filterCanvasAssistantAgents,
+  isCanvasAgentSkillId,
+  pickCanvasAssistantAgent,
+  readCanvasAgentStorageItem,
+  type CanvasAgentSkillId,
+} from './canvasAgentPolicy'
 
 interface Props {
   open: boolean
@@ -67,6 +85,8 @@ interface Props {
   onRemoveNodeRef?: (nodeId: string) => void
   /** 清空全部引用节点 */
   onClearNodeRefs?: () => void
+  /** 在画布中选中并定位节点。 */
+  onFocusNode?: (nodeId: string) => void
   /** 宽屏切换回调：父组件据此时将侧栏宽度设为屏幕一半 / 恢复原宽 */
   onWideModeChange?: (wide: boolean) => void
 }
@@ -86,9 +106,6 @@ type CanvasAgentProjectCache = {
 }
 
 const REQUIRED_CANVAS_SKILL_ID = 'builtin:canvas-studio'
-const DEFAULT_CANVAS_AGENT_ID = 'canvas-assistant-agent'
-const FALLBACK_CANVAS_AGENT_ID = 'platform-manager-agent'
-const CANVAS_AGENT_PREFS_KEY = 'spark-agent:canvas-agent-composer-prefs'
 const DEFAULT_PANEL_WIDTH = 760
 const DEFAULT_PANEL_HEIGHT = 560
 const MIN_PANEL_WIDTH = 560
@@ -108,14 +125,18 @@ const CANVAS_AGENT_ADAPTER_LABELS: Record<SessionAgentAdapter, string> = {
 
 function normalizeCanvasAdapter(
   adapter: SessionAgentAdapter | null | undefined,
-): SessionAgentAdapter {
+): 'claude-sdk' | 'codex' {
   return adapter === 'codex' ? 'codex' : 'claude-sdk'
 }
 
 function readCanvasAgentPrefs(): Omit<CanvasAgentProjectCache, 'sessionId' | 'firstTurnSent'> {
   if (typeof window === 'undefined') return {}
   try {
-    const raw = window.localStorage.getItem(CANVAS_AGENT_PREFS_KEY)
+    const raw = readCanvasAgentStorageItem(
+      window.localStorage,
+      CANVAS_AGENT_PREFS_KEY,
+      LEGACY_CANVAS_AGENT_PREFS_KEY,
+    )
     if (raw == null) return {}
     const parsed = JSON.parse(raw) as Partial<CanvasAgentProjectCache>
     if (parsed == null || typeof parsed !== 'object') return {}
@@ -133,7 +154,10 @@ function readCanvasAgentPrefs(): Omit<CanvasAgentProjectCache, 'sessionId' | 'fi
       ...(Array.isArray(parsed.selectedExtraSkillIds)
         ? {
             selectedExtraSkillIds: parsed.selectedExtraSkillIds.filter(
-              (skillId): skillId is string => typeof skillId === 'string' && skillId.length > 0,
+              (skillId): skillId is string =>
+                typeof skillId === 'string' &&
+                skillId !== REQUIRED_CANVAS_SKILL_ID &&
+                isCanvasAgentSkillId(skillId),
             ),
           }
         : {}),
@@ -156,12 +180,14 @@ function writeCanvasAgentPrefs(
   }
 }
 
-const CANVAS_AGENT_DRAFTS_KEY = 'spark-agent:canvas-agent-input-drafts'
-
 function readCanvasAgentDrafts(): Record<string, string> {
   if (typeof window === 'undefined') return {}
   try {
-    const raw = window.localStorage.getItem(CANVAS_AGENT_DRAFTS_KEY)
+    const raw = readCanvasAgentStorageItem(
+      window.localStorage,
+      CANVAS_AGENT_DRAFTS_KEY,
+      LEGACY_CANVAS_AGENT_DRAFTS_KEY,
+    )
     if (raw == null) return {}
     const parsed = JSON.parse(raw) as Record<string, unknown>
     if (parsed == null || typeof parsed !== 'object') return {}
@@ -199,19 +225,6 @@ function writeCanvasAgentDraft(projectId: string, text: string): void {
   }
 }
 
-function pickCanvasAgent(
-  agents: ManagedAgent[],
-  preferredId: string | null | undefined,
-): ManagedAgent | null {
-  return (
-    (preferredId != null ? agents.find((agent) => agent.id === preferredId) : undefined) ??
-    agents.find((agent) => agent.id === DEFAULT_CANVAS_AGENT_ID) ??
-    agents.find((agent) => agent.id === FALLBACK_CANVAS_AGENT_ID) ??
-    agents[0] ??
-    null
-  )
-}
-
 /** provider → 展示用 vendor（用于 ProviderLogo 图标） */
 function resolveProviderVendor(provider: ProviderProfile | undefined) {
   if (provider == null) return null
@@ -223,10 +236,6 @@ function resolveProviderVendor(provider: ProviderProfile | undefined) {
     desc: '',
     logoPath: '',
   }
-}
-
-function getCanvasPermissionMode(adapter: SessionAgentAdapter): SessionPermissionMode {
-  return adapter === 'codex' ? 'codex-full-access' : 'claude-bypass'
 }
 
 function resolveProviderModel(
@@ -337,6 +346,7 @@ export function CanvasAgentModal({
   nodeRefs,
   onRemoveNodeRef,
   onClearNodeRefs,
+  onFocusNode,
   onWideModeChange,
 }: Props) {
   const projectId = snapshot.project.id
@@ -363,6 +373,7 @@ export function CanvasAgentModal({
   const [panelWidth, setPanelWidth] = useState(DEFAULT_PANEL_WIDTH)
   const [panelHeight, setPanelHeight] = useState(DEFAULT_PANEL_HEIGHT)
   const [resizing, setResizing] = useState(false)
+  const [turnCheckpoints, setTurnCheckpoints] = useState<Record<string, string>>({})
   const firstTurnRef = useRef(true)
   const manualSessionChoiceRef = useRef(false)
   const appliedRuntimeSessionRef = useRef<string | null>(null)
@@ -373,16 +384,18 @@ export function CanvasAgentModal({
   draftPersistRef.current = { projectId, draftInput }
   const prevProjectIdRef = useRef(projectId)
 
-  useCanvasToolHost({
+  const canvasToolHost = useCanvasToolHost({
     sessionId,
     projectId: snapshot.project.id,
     getSnapshot: useCallback(() => snapshot, [snapshot]),
     workspace,
   })
 
-  const activeAgent = useMemo(() => pickCanvasAgent(agents, draftAgentId), [agents, draftAgentId])
+  const activeAgent = useMemo(
+    () => pickCanvasAssistantAgent(agents, draftAgentId),
+    [agents, draftAgentId],
+  )
   const adapter = draftAdapter
-  const forcedPermissionMode = useMemo(() => getCanvasPermissionMode(adapter), [adapter])
   const selectedProvider = useMemo(() => {
     const hit = providers.find((provider) => provider.id === draftProviderId)
     if (hit) return hit
@@ -396,12 +409,14 @@ export function CanvasAgentModal({
     if (modelOptions.includes(draftModelId)) return draftModelId
     return selectedProvider?.defaultModel ?? modelOptions[0] ?? ''
   }, [draftModelId, modelOptions, selectedProvider])
-  const effectiveSkillIds = useMemo(
+  const effectiveSkillIds = useMemo<CanvasAgentSkillId[]>(
     () =>
       Array.from(
-        new Set([
+        new Set<CanvasAgentSkillId>([
           REQUIRED_CANVAS_SKILL_ID,
-          ...selectedExtraSkillIds.filter((skillId) => skillId !== REQUIRED_CANVAS_SKILL_ID),
+          ...selectedExtraSkillIds
+            .filter(isCanvasAgentSkillId)
+            .filter((skillId) => skillId !== REQUIRED_CANVAS_SKILL_ID),
         ]),
       ),
     [selectedExtraSkillIds],
@@ -411,6 +426,16 @@ export function CanvasAgentModal({
     [availableSkills],
   )
   const contextSummary = useMemo(() => summarizeCanvasContext(snapshot), [snapshot])
+  const connectionLabel =
+    sessionId == null
+      ? '发送时连接'
+      : canvasToolHost.status === 'attached'
+        ? '画布已连接'
+        : canvasToolHost.status === 'attaching'
+          ? '连接中'
+          : canvasToolHost.status === 'error'
+            ? '连接断开'
+            : '等待连接'
   const fallbackAssistant = useMemo(
     () => ({
       agentId: activeAgent?.id ?? draftAgentId,
@@ -429,18 +454,29 @@ export function CanvasAgentModal({
     [fullscreen, panelHeight, panelWidth],
   )
 
-  const syncSessionSkills = useCallback(async (sid: string, skillIds: string[]) => {
-    await window.spark.invoke('skill-config:update', {
-      scope: 'session',
-      scopeRef: sid,
+  const syncSessionSkills = useCallback(async (sid: string, skillIds: CanvasAgentSkillId[]) => {
+    await window.spark.invoke('canvas:agent:session:update', {
+      sessionId: sid,
       skillIds,
-      disabledSkillIds: [],
     })
   }, [])
 
+  const chatSessionApi = useMemo<ChatPanelSessionApi>(
+    () => ({
+      getHistory: (request) =>
+        window.spark.invoke('canvas:agent:session:get-history', request),
+      cancelTurn: (request) => window.spark.invoke('canvas:agent:session:cancel', request),
+      answerQuestion: (request) =>
+        window.spark.invoke('canvas:agent:session:answer-question', request),
+    }),
+    [],
+  )
+
   const applySessionRuntimeDraft = useCallback(
     (session: CanvasAgentSessionSummary) => {
-      setDraftAgentId(session.agentId || DEFAULT_CANVAS_AGENT_ID)
+      setDraftAgentId(
+        pickCanvasAssistantAgent(agents, session.agentId)?.id ?? DEFAULT_CANVAS_AGENT_ID,
+      )
       const nextAdapter = normalizeCanvasAdapter(session.agentAdapter)
       setDraftAdapter(nextAdapter)
       const sessionProvider = providers.find(
@@ -457,22 +493,16 @@ export function CanvasAgentModal({
         setDraftModelId(resolveProviderModel(fallbackProvider, undefined))
       }
     },
-    [providers],
+    [agents, providers],
   )
 
   const refreshProjectSessions = useCallback(async () => {
-    const rootPath = snapshot.project.rootPath
-    if (!rootPath) {
-      setProjectSessions([])
-      return
-    }
     setSessionsLoading(true)
     try {
-      const wsRes = await window.spark.invoke('workspace:open', { rootPath })
-      const workspaceId = wsRes.workspace.id
+      const wsRes = await window.spark.invoke('canvas:agent:open-workspace', { projectId })
+      const workspaceId = wsRes.workspaceId
       projectWorkspaceIdRef.current = workspaceId
-      const sessionRes = await window.spark.invoke('session:list', {
-        workspaceId,
+      const sessionRes = await window.spark.invoke('canvas:agent:session:list', {
         includeArchived: false,
         limit: 50,
       })
@@ -483,7 +513,7 @@ export function CanvasAgentModal({
     } finally {
       setSessionsLoading(false)
     }
-  }, [snapshot.project.rootPath])
+  }, [projectId])
 
   const updateProjectCache = useCallback(
     (patch: CanvasAgentProjectCache) => {
@@ -510,9 +540,14 @@ export function CanvasAgentModal({
     setDraftAdapter(normalizeCanvasAdapter(prefs.draftAdapter ?? cached?.draftAdapter))
     setDraftProviderId(prefs.draftProviderId ?? cached?.draftProviderId ?? '')
     setDraftModelId(prefs.draftModelId ?? cached?.draftModelId ?? '')
-    setSelectedExtraSkillIds(prefs.selectedExtraSkillIds ?? cached?.selectedExtraSkillIds ?? [])
+    setSelectedExtraSkillIds(
+      (prefs.selectedExtraSkillIds ?? cached?.selectedExtraSkillIds ?? []).filter(
+        (skillId) => skillId !== REQUIRED_CANVAS_SKILL_ID && isCanvasAgentSkillId(skillId),
+      ),
+    )
     setDraftInput(readCanvasAgentDraft(projectId))
     setRunning(false)
+    setTurnCheckpoints({})
     firstTurnRef.current = cached?.firstTurnSent !== true
     setError(null)
     // draftInput 用于切项目时 flush 旧项目草稿，故不放入依赖
@@ -546,20 +581,22 @@ export function CanvasAgentModal({
     setError(null)
     void (async () => {
       try {
-        const [agentRes, providerRes, skillRes] = await Promise.all([
-          window.spark.invoke('agent:list', { includeDisabled: false }),
+        const [configurationRes, providerRes] = await Promise.all([
+          window.spark.invoke('canvas:agent:configuration', {}),
           window.spark.invoke('provider:list', {}),
-          window.spark.invoke('skill:list', {}),
         ])
         if (cancelled) return
-        const loadedAgents = (agentRes as { agents?: ManagedAgent[] }).agents ?? []
-        const loadedProviders = (providerRes as { profiles?: ProviderProfile[] }).profiles ?? []
-        const loadedSkills = ((skillRes as { skills?: SkillSummary[] }).skills ?? []).map(
-          (skill) => ({
+        const loadedAgents = filterCanvasAssistantAgents(
+          (configurationRes as { agents?: ManagedAgent[] }).agents ?? [],
+        )
+        const listedProviders = (providerRes as { profiles?: ProviderProfile[] }).profiles ?? []
+        const loadedProviders = filterCanvasAgentConversationProviders(listedProviders)
+        const loadedSkills = filterCanvasAgentSkills(
+          ((configurationRes as { skills?: SkillSummary[] }).skills ?? []).map((skill) => ({
             id: skill.id,
             name: skill.name,
             enabled: Boolean(skill.enabled),
-          }),
+          })),
         )
         setAgents(loadedAgents)
         setProviders(loadedProviders)
@@ -568,7 +605,7 @@ export function CanvasAgentModal({
         const prefs = readCanvasAgentPrefs()
 
         const preferredAgentId = prefs.draftAgentId ?? cached?.draftAgentId
-        const restoredAgent = pickCanvasAgent(loadedAgents, preferredAgentId)
+        const restoredAgent = pickCanvasAssistantAgent(loadedAgents, preferredAgentId)
         const restoredAgentId = restoredAgent?.id ?? DEFAULT_CANVAS_AGENT_ID
         const preferredProviderId = prefs.draftProviderId ?? cached?.draftProviderId
         const cachedProvider =
@@ -616,7 +653,7 @@ export function CanvasAgentModal({
         )
 
         if (loadedProviders.length === 0) {
-          setError('未配置任何模型供应商，请先到「Providers」中添加。')
+          setError('未配置对话模型供应商，请先到「Providers」中添加。')
         }
       } catch (err) {
         if (!cancelled) {
@@ -648,13 +685,13 @@ export function CanvasAgentModal({
     const unsubscribe = window.spark.on('stream:session:agent-event', (event: AgentEvent) => {
       const evt = event as { sessionId?: string; type?: string; status?: string }
       if (evt.sessionId !== sessionId) return
-      if (evt.type === 'agent_status') {
-        if (evt.status === 'running' || evt.status === 'thinking') {
+      if (event.type === 'agent_status') {
+        if (isRunningAgentStatus(event.status)) {
           setRunning(true)
         } else if (
-          evt.status === 'completed' ||
-          evt.status === 'cancelled' ||
-          evt.status === 'error'
+          event.status === 'completed' ||
+          event.status === 'cancelled' ||
+          event.status === 'error'
         ) {
           setRunning(false)
         }
@@ -665,18 +702,6 @@ export function CanvasAgentModal({
 
   useEffect(() => {
     if (!open) return
-    const unsubscribeCreated = window.spark.on('stream:session:created', (payload) => {
-      const created = payload.session
-      if (
-        created == null ||
-        created.archivedAt != null ||
-        !created.workspaceIds.includes(projectWorkspaceIdRef.current ?? '')
-      ) return
-      setProjectSessions((current) => [
-        created,
-        ...current.filter((session) => session.id !== created.id),
-      ])
-    })
     const unsubscribeRenamed = window.spark.on(
       'stream:session:renamed',
       (payload: { sessionId: string; title: string }) => {
@@ -691,9 +716,9 @@ export function CanvasAgentModal({
       'stream:session:agent-event',
       (event: AgentEvent) => {
         if (event.type !== 'agent_status') return
-        const status = (event as { status?: string }).status
+        const status = event.status
         const terminal = status === 'completed' || status === 'cancelled' || status === 'error'
-        const running = status === 'running' || status === 'thinking' || status === 'waiting_user'
+        const running = isRunningAgentStatus(status)
         if (!terminal && !running) return
         setProjectSessions((current) =>
           current.map((session) => {
@@ -706,7 +731,6 @@ export function CanvasAgentModal({
       },
     )
     return () => {
-      unsubscribeCreated()
       unsubscribeRenamed()
       unsubscribeAgentEvent()
     }
@@ -796,9 +820,8 @@ export function CanvasAgentModal({
       const selected = projectSessions.find((session) => session.id === nextSessionId)
       setSessionId(nextSessionId)
       setRunning(selected?.status === 'running')
-      firstTurnRef.current = selected == null
-        ? false
-        : (selected.turnCount ?? selected.messageCount) === 0
+      firstTurnRef.current =
+        selected == null ? false : (selected.turnCount ?? selected.messageCount) === 0
       if (selected != null) {
         applySessionRuntimeDraft(selected)
         appliedRuntimeSessionRef.current = providers.length > 0 ? selected.id : null
@@ -846,11 +869,9 @@ export function CanvasAgentModal({
       }
       if (sessionId != null) {
         void window.spark
-          .invoke('session:update', {
-            sessionId: sessionId as never,
-            agentId,
+          .invoke('canvas:agent:session:update', {
+            sessionId,
             agentAdapter: nextAdapter,
-            permissionMode: getCanvasPermissionMode(nextAdapter),
             ...(preferred
               ? {
                   providerProfileId: preferred.id,
@@ -879,12 +900,11 @@ export function CanvasAgentModal({
       setDraftModelId(nextModelId)
       if (sessionId != null) {
         void window.spark
-          .invoke('session:update', {
-            sessionId: sessionId as never,
+          .invoke('canvas:agent:session:update', {
+            sessionId,
             providerProfileId: selection.providerId,
             modelId: nextModelId,
             agentAdapter: nextAdapter,
-            permissionMode: getCanvasPermissionMode(nextAdapter),
           })
           .catch(() => {})
       }
@@ -942,29 +962,22 @@ export function CanvasAgentModal({
 
   const handleSend = useCallback(
     async (text: string, attachments: SessionAttachment[]) => {
-      const rootPath = snapshot.project.rootPath
-      if (!rootPath) {
-        throw new Error('画布项目未关联目录，无法启动 agent。请先保存项目到磁盘。')
-      }
       if (selectedProvider == null || effectiveModelId.length === 0) {
         throw new Error('请先选择供应商和模型。')
+      }
+      if (activeAgent == null) {
+        throw new Error('内置画布助手不可用，请重启 Spark Canvas 后重试。')
       }
 
       try {
         setCreating(true)
         let sid = sessionId
-        const isFirst = sid == null
         if (sid == null) {
-          const wsRes = await window.spark.invoke('workspace:open', { rootPath })
-          const sessionRes = await window.spark.invoke('session:create', {
+          const sessionRes = await window.spark.invoke('canvas:agent:session:create', {
             providerProfileId: selectedProvider.id,
-            workspaceId: wsRes.workspace.id,
             modelId: effectiveModelId,
-            agentId: draftAgentId,
-            agentAdapter: adapter,
-            permissionMode: forcedPermissionMode,
-            chatMode: 'agent',
-            title: `画布助手 · ${snapshot.project.title}`,
+            agentAdapter: normalizeCanvasAdapter(adapter),
+            skillIds: effectiveSkillIds,
           })
           sid = sessionRes.sessionId
           if (sessionRes.session != null) {
@@ -982,52 +995,104 @@ export function CanvasAgentModal({
           })
         }
 
-        await syncSessionSkills(sid as string, effectiveSkillIds)
+        await Promise.all([
+          syncSessionSkills(sid as string, effectiveSkillIds),
+          canvasToolHost.ensureAttached(sid as string),
+        ])
 
         let message = text
         // 以用户显式引用的节点为准（右键「添加到 Agent 对话」）；为空时不注入节点上下文
         const nodesContext = buildSelectedNodesContext(nodeRefs)
-        if (isFirst && firstTurnRef.current) {
-          firstTurnRef.current = false
-          updateProjectCache({
-            sessionId: sid as string,
-            firstTurnSent: true,
-          })
+        const shouldSendBinding = firstTurnRef.current
+        if (shouldSendBinding) {
           message = buildCanvasBindingMessage(snapshot, text, nodeRefs)
         } else if (nodesContext) {
           // 后续轮：有引用节点时注入，让 agent 能用 node id 定位用户所指节点
           message = `${nodesContext}\n\n---\n\n${text}`
         }
 
-        await window.spark.invoke('session:submit-turn', {
-          sessionId: sid as never,
+        const checkpointId = workspace.createCanvasHistoryCheckpoint()
+        setRunning(true)
+        const turnResult = await window.spark.invoke('canvas:agent:session:submit-turn', {
+          sessionId: sid as string,
           message,
           ...(attachments.length > 0 ? { attachments } : {}),
           providerProfileId: selectedProvider.id,
           modelId: effectiveModelId,
-          agentId: draftAgentId,
-          agentAdapter: adapter,
-          permissionMode: forcedPermissionMode,
-          skillId: REQUIRED_CANVAS_SKILL_ID,
+          agentAdapter: normalizeCanvasAdapter(adapter),
         })
+        if (checkpointId != null) {
+          setTurnCheckpoints((current) => ({
+            ...current,
+            [turnResult.turnId]: checkpointId,
+          }))
+        }
+        if (shouldSendBinding) {
+          firstTurnRef.current = false
+          updateProjectCache({
+            sessionId: sid as string,
+            firstTurnSent: true,
+          })
+        }
+        onClearNodeRefs?.()
+      } catch (sendError) {
+        setRunning(false)
+        throw sendError
       } finally {
         setCreating(false)
       }
     },
     [
       adapter,
-      draftAgentId,
+      activeAgent,
       effectiveModelId,
       effectiveSkillIds,
-      forcedPermissionMode,
       updateProjectCache,
       refreshProjectSessions,
       selectedProvider,
       nodeRefs,
+      onClearNodeRefs,
       sessionId,
       snapshot,
       syncSessionSkills,
+      canvasToolHost,
+      workspace,
     ],
+  )
+
+  const handleUndoTurn = useCallback(
+    async (turnId: string) => {
+      const checkpointId = turnCheckpoints[turnId]
+      if (!checkpointId) return
+      await new Promise<void>((resolve) => {
+        Modal.confirm({
+          title: '撤销本轮画布修改？',
+          content: '画布将恢复到本轮开始前；本轮执行期间产生的手动画布修改也会一并还原。',
+          okText: '恢复画布',
+          cancelText: '取消',
+          okButtonProps: { danger: true },
+          onOk: async () => {
+            try {
+              await workspace.restoreCanvasHistoryCheckpoint(checkpointId)
+              setTurnCheckpoints((current) => {
+                const next = { ...current }
+                delete next[turnId]
+                return next
+              })
+            } catch (undoError) {
+              Modal.error({
+                title: '无法撤销本轮修改',
+                content: undoError instanceof Error ? undoError.message : '画布快照恢复失败',
+              })
+            } finally {
+              resolve()
+            }
+          },
+          onCancel: () => resolve(),
+        })
+      })
+    },
+    [turnCheckpoints, workspace],
   )
 
   const selectedProjectSession = useMemo(
@@ -1122,7 +1187,6 @@ export function CanvasAgentModal({
       )}
 
       <div className="canvas-bottom-floating-head canvas-agent-head-minimal">
-        
         <div className="canvas-agent-head-composer">{headerSessionPicker}</div>
         <div className="canvas-agent-head-actions">
           <Tooltip title={fullscreen ? '恢复宽度' : '展开到半屏'}>
@@ -1131,11 +1195,13 @@ export function CanvasAgentModal({
               type="text"
               icon={fullscreen ? <Icons.Minimize size={14} /> : <Icons.Maximize size={14} />}
               aria-label={fullscreen ? '恢复宽度' : '展开到半屏'}
-              onClick={() => setFullscreen((current) => {
-                const next = !current
-                onWideModeChange?.(next)
-                return next
-              })}
+              onClick={() =>
+                setFullscreen((current) => {
+                  const next = !current
+                  onWideModeChange?.(next)
+                  return next
+                })
+              }
             />
           </Tooltip>
           <Button
@@ -1160,12 +1226,29 @@ export function CanvasAgentModal({
           agents={agents}
           fallbackAssistant={fallbackAssistant}
           persistedSessionStatus={selectedProjectSession?.status ?? null}
+          sessionApi={chatSessionApi}
           contextBadge={
             <>
               <Icons.Layers size={12} />
-              <span title={contextSummary}>
+              <span className="canvas-agent-context-copy" title={contextSummary}>
                 {snapshot.project.title} · {snapshot.board.name}
                 {nodeRefs.length > 0 && ` · 已引用 ${nodeRefs.length} 节点`}
+              </span>
+              <span
+                className={`canvas-agent-connection is-${canvasToolHost.status}`}
+                title={canvasToolHost.error ?? connectionLabel}
+              >
+                <span className="canvas-agent-connection-dot" aria-hidden="true" />
+                <span>{connectionLabel}</span>
+                {sessionId != null && canvasToolHost.status === 'error' && (
+                  <button
+                    type="button"
+                    className="canvas-agent-connection-retry"
+                    onClick={() => void canvasToolHost.reconnect().catch(() => undefined)}
+                  >
+                    重新连接
+                  </button>
+                )}
               </span>
             </>
           }
@@ -1176,6 +1259,12 @@ export function CanvasAgentModal({
           })}
           {...(onRemoveNodeRef ? { onRemoveNodeReference: onRemoveNodeRef } : {})}
           {...(onClearNodeRefs ? { onClearNodeReferences: onClearNodeRefs } : {})}
+          {...(onFocusNode ? { onFocusNodeReference: onFocusNode } : {})}
+          canUndoTurn={(turnId) => {
+            const checkpointId = turnCheckpoints[turnId]
+            return checkpointId != null && workspace.hasCanvasHistoryCheckpoint(checkpointId)
+          }}
+          onUndoTurn={handleUndoTurn}
           emptyState={
             <>
               <Icons.Sparkles size={32} />
@@ -1188,8 +1277,7 @@ export function CanvasAgentModal({
           }
           placeholder="输入消息，让 agent 操作画布..."
           toolNamePrefixFilter="mcp__spark_canvas__"
-          hideToolCalls
-          hideToolInputOutput
+          toolCallDisplay="summary"
         />
       </div>
 
@@ -1199,7 +1287,7 @@ export function CanvasAgentModal({
         selectedIds={skillPickerDraft}
         onChange={(ids) => setSkillPickerDraft(ids)}
         onConfirm={() => {
-          setSelectedExtraSkillIds(skillPickerDraft)
+          setSelectedExtraSkillIds(skillPickerDraft.filter(isCanvasAgentSkillId))
           setSkillPickerOpen(false)
         }}
         onClose={() => {
@@ -1573,11 +1661,19 @@ export function ProviderModelPickerInline({
   onChange: (providerId: string, modelId: string) => void
 }) {
   const rootRef = useRef<HTMLDivElement | null>(null)
+  const conversationalProviders = useMemo(
+    () => filterCanvasAgentConversationProviders(providers),
+    [providers],
+  )
   const selectedProvider =
-    providers.find((provider) => provider.id === selectedProviderId) ?? providers[0]
+    conversationalProviders.find((provider) => provider.id === selectedProviderId) ??
+    conversationalProviders[0]
   const vendor = resolveProviderVendor(selectedProvider)
   const label = selectedModelId || selectedProvider?.defaultModel || '选择模型'
-  const modelGroups = useMemo(() => buildCanvasAgentModelOptions(providers), [providers])
+  const modelGroups = useMemo(
+    () => buildCanvasAgentModelOptions(conversationalProviders),
+    [conversationalProviders],
+  )
   const menuHeight = Math.min(
     420,
     24 + modelGroups.reduce((sum, group) => sum + 36 + group.models.length * 34, 0),
@@ -1590,7 +1686,7 @@ export function ProviderModelPickerInline({
       trigger={openOnHover ? ['hover'] : ['click']}
       placement={placement}
       onOpenChange={(nextOpen) => {
-        if (disabled || providers.length === 0) {
+        if (disabled || conversationalProviders.length === 0) {
           onOpenChange(false)
           return
         }
@@ -1598,7 +1694,9 @@ export function ProviderModelPickerInline({
       }}
       popupRender={() => (
         <div className="composer-menu composer-dropdown-menu composer-model-menu">
-          {providers.length === 0 && <div className="composer-menu-empty">未配置</div>}
+          {conversationalProviders.length === 0 && (
+            <div className="composer-menu-empty">未配置对话模型</div>
+          )}
           {modelGroups.map(({ provider, models }) => {
             const groupVendor = resolveProviderVendor(provider)
             return (
@@ -1650,7 +1748,7 @@ export function ProviderModelPickerInline({
         <button
           type="button"
           className="composer-select-trigger"
-          disabled={disabled || providers.length === 0}
+          disabled={disabled || conversationalProviders.length === 0}
           onClick={() => {
             if (openOnHover) onOpenChange(true)
           }}

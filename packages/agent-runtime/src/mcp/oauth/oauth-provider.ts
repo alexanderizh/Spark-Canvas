@@ -1,5 +1,13 @@
-import type { OAuthClientInformationMixed, OAuthClientMetadata, OAuthTokens } from '@modelcontextprotocol/sdk/shared/auth.js'
-import type { OAuthClientProvider, OAuthDiscoveryState } from '@modelcontextprotocol/sdk/client/auth.js'
+import type {
+  OAuthClientInformationMixed,
+  OAuthClientMetadata,
+  OAuthTokens,
+} from '@modelcontextprotocol/sdk/shared/auth.js'
+import type {
+  OAuthClientProvider,
+  OAuthDiscoveryState,
+} from '@modelcontextprotocol/sdk/client/auth.js'
+import { APP_NAME } from '@spark/shared'
 import type { McpOAuthStore, SparkOAuthTokens } from './oauth-store.js'
 
 export interface SparkMcpOAuthProviderOptions {
@@ -20,20 +28,26 @@ export class SparkMcpOAuthProvider implements OAuthClientProvider {
     this.requestedScope = options.scope?.trim() || undefined
   }
 
-  get redirectUrl(): string { return this.options.redirectUrl }
+  get redirectUrl(): string {
+    return this.options.redirectUrl
+  }
 
   get clientMetadata(): OAuthClientMetadata {
     return {
-      client_name: 'Spark Agent',
+      client_name: APP_NAME,
       redirect_uris: [this.redirectUrl],
       grant_types: ['authorization_code', 'refresh_token'],
       response_types: ['code'],
-      token_endpoint_auth_method: this.options.staticClient?.clientSecret ? 'client_secret_post' : 'none',
+      token_endpoint_auth_method: this.options.staticClient?.clientSecret
+        ? 'client_secret_post'
+        : 'none',
       ...(this.requestedScope != null ? { scope: this.requestedScope } : {}),
     }
   }
 
-  state(): string { return this.options.state ?? 'spark-oauth' }
+  state(): string {
+    return this.options.state ?? 'spark-oauth'
+  }
 
   async clientInformation(): Promise<OAuthClientInformationMixed | undefined> {
     const saved = await this.options.store.getClientInformation(this.options.serverId)
@@ -42,7 +56,9 @@ export class SparkMcpOAuthProvider implements OAuthClientProvider {
     if (!clientId) return undefined
     return {
       client_id: clientId,
-      ...(this.options.staticClient?.clientSecret ? { client_secret: this.options.staticClient.clientSecret } : {}),
+      ...(this.options.staticClient?.clientSecret
+        ? { client_secret: this.options.staticClient.clientSecret }
+        : {}),
     }
   }
 
@@ -50,7 +66,9 @@ export class SparkMcpOAuthProvider implements OAuthClientProvider {
     await this.options.store.saveClientInformation(this.options.serverId, clientInformation)
   }
 
-  async tokens(): Promise<OAuthTokens | undefined> { return await this.options.store.getTokens(this.options.serverId) }
+  async tokens(): Promise<OAuthTokens | undefined> {
+    return await this.options.store.getTokens(this.options.serverId)
+  }
 
   async saveTokens(tokens: OAuthTokens): Promise<void> {
     const now = Math.floor(Date.now() / 1000)
@@ -65,7 +83,9 @@ export class SparkMcpOAuthProvider implements OAuthClientProvider {
     await this.options.onAuthorizationUrl?.(authorizationUrl)
   }
 
-  saveCodeVerifier(codeVerifier: string): void { this.verifier = codeVerifier }
+  saveCodeVerifier(codeVerifier: string): void {
+    this.verifier = codeVerifier
+  }
 
   codeVerifier(): string {
     if (this.verifier == null) throw new Error('OAuth code verifier is missing')
@@ -80,7 +100,9 @@ export class SparkMcpOAuthProvider implements OAuthClientProvider {
     return await this.options.store.getDiscoveryState(this.options.serverId)
   }
 
-  async invalidateCredentials(scope: 'all' | 'client' | 'tokens' | 'verifier' | 'discovery'): Promise<void> {
+  async invalidateCredentials(
+    scope: 'all' | 'client' | 'tokens' | 'verifier' | 'discovery',
+  ): Promise<void> {
     if (scope === 'all') await this.options.store.clearAll(this.options.serverId)
     if (scope === 'client') await this.options.store.clearClientInformation(this.options.serverId)
     if (scope === 'tokens') await this.options.store.clearTokens(this.options.serverId)

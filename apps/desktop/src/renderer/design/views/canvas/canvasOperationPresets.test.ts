@@ -12,6 +12,7 @@ import {
   parseCanvasOperationPresetModelParams,
   readBuiltinCanvasOperationPreset,
   readCanvasLastUsedPresetTarget,
+  readCanvasInheritedPresetTarget,
   readCanvasOperationPreset,
   readCanvasOperationPresetPromptPrefix,
   readCanvasOperationPresetOverrides,
@@ -24,6 +25,7 @@ import {
   writeCanvasPresetTarget,
   writeCanvasOperationPreset,
 } from './canvasOperationPresets'
+import { writeCanvasTaskDefault } from './canvasTaskDefaults'
 
 describe('canvasOperationPresets', () => {
   beforeEach(() => {
@@ -188,6 +190,34 @@ describe('canvasOperationPresets', () => {
     })
   })
 
+  it('does not inherit a generic authored prompt into a dedicated pipeline contract', () => {
+    writeCanvasOperationPreset('text_generate', {
+      prompt: '你是角色分析师，只输出 characters JSON',
+      providerProfileId: 'provider:text',
+      modelId: 'gpt-5',
+      modelParams: { workflow: 'extract_character', responseFormat: 'json' },
+    })
+
+    expect(readCanvasInheritedPresetTarget('screenplay.to_shot_script')).toMatchObject({
+      prompt: '',
+      providerProfileId: 'provider:text',
+      modelId: 'gpt-5',
+      modelParams: { workflow: 'shot_script', responseFormat: 'json' },
+    })
+  })
+
+  it('repairs contaminated last-used workflow metadata for a dedicated pipeline target', () => {
+    writeCanvasLastUsedPresetTarget('screenplay.to_shot_script', {
+      modelParams: { workflow: 'extract_character', temperature: 0.3 },
+    })
+
+    expect(readCanvasResolvedPresetTarget('screenplay.to_shot_script').modelParams).toEqual({
+      workflow: 'shot_script',
+      responseFormat: 'json',
+      temperature: 0.3,
+    })
+  })
+
   it('keeps the configured system prompt while reusing runtime selections', () => {
     writeCanvasPresetTarget('chapter.to_screenplay', {
       prompt: '预设版转剧本',
@@ -213,6 +243,96 @@ describe('canvasOperationPresets', () => {
       modelId: 'gpt-5.1',
       skillIds: [],
       modelParams: { temperature: 0.2 },
+    })
+  })
+
+  it('merges task defaults beneath node overrides and last-used runtime values', () => {
+    writeCanvasTaskDefault('text', {
+      agentId: 'agent:global',
+      providerProfileId: 'provider:global',
+      modelId: 'gpt-global',
+      skillIds: ['skill:global'],
+    })
+    writeCanvasPresetTarget('text_generate', {
+      agentId: 'agent:node',
+      modelId: 'gpt-node',
+      skillIds: [],
+    })
+    writeCanvasLastUsedPresetTarget('text_generate', {
+      modelId: 'gpt-last-used',
+    })
+
+    expect(readCanvasResolvedPresetTarget('text_generate')).toMatchObject({
+      agentId: 'agent:node',
+      providerProfileId: 'provider:global',
+      modelId: 'gpt-last-used',
+      skillIds: [],
+    })
+  })
+
+  it('exposes the inherited task default without materializing a node override', () => {
+    writeCanvasTaskDefault('image_generation', {
+      providerProfileId: 'provider:global-image',
+      modelId: 'image-global',
+      skillIds: [],
+    })
+    writeCanvasPresetTarget('image_edit', {
+      providerProfileId: 'provider:node-image',
+      modelId: 'image-node',
+      skillIds: [],
+    })
+
+    expect(readCanvasInheritedPresetTarget('image_edit')).toMatchObject({
+      providerProfileId: 'provider:global-image',
+      modelId: 'image-global',
+    })
+    expect(readCanvasPresetTarget('image_edit')).toMatchObject({
+      providerProfileId: 'provider:node-image',
+      modelId: 'image-node',
+    })
+  })
+
+  it('uses the image-understanding default for text tasks with image input', () => {
+    writeCanvasTaskDefault('text', {
+      providerProfileId: 'provider:text',
+      modelId: 'gpt-text',
+      skillIds: [],
+    })
+    writeCanvasTaskDefault('image_understanding', {
+      providerProfileId: 'provider:vision',
+      modelId: 'gpt-vision',
+      skillIds: [],
+    })
+
+    expect(readCanvasResolvedPresetTarget('text_generate', { hasImageInput: true })).toMatchObject({
+      providerProfileId: 'provider:vision',
+      modelId: 'gpt-vision',
+    })
+    expect(readCanvasResolvedPresetTarget('text_generate')).toMatchObject({
+      providerProfileId: 'provider:text',
+      modelId: 'gpt-text',
+    })
+  })
+
+  it('keeps scene extraction selections under its dedicated pipeline target', () => {
+    expect(
+      resolveCanvasPresetTarget({
+        operation: 'text_generate',
+        taskPipelineRole: 'scene',
+        workflow: 'extract_scene',
+      }),
+    ).toBe('screenplay.extract_scenes')
+
+    writeCanvasLastUsedPresetTarget('screenplay.extract_scenes', {
+      providerProfileId: 'provider:text',
+      modelId: 'gpt-5.1',
+      modelParams: { temperature: 0.4, maxTokens: 1200 },
+    })
+
+    expect(readCanvasResolvedPresetTarget('screenplay.extract_scenes')).toMatchObject({
+      providerProfileId: 'provider:text',
+      modelId: 'gpt-5.1',
+      modelParams: { temperature: 0.4, maxTokens: 1200 },
     })
   })
 
@@ -262,6 +382,17 @@ describe('canvasOperationPresets', () => {
     })
   })
 
+  it('lets an explicit duration alias replace a stale preset alias', () => {
+    writeCanvasPresetTarget('image_to_video', {
+      modelParams: { durationSeconds: 8, resolution: '720p' },
+    })
+
+    expect(mergeCanvasPresetTargetModelParams('image_to_video', { duration: 3 })).toEqual({
+      duration: 3,
+      resolution: '720p',
+    })
+  })
+
   it('resolves pipeline preset target by operation, role, and workflow', () => {
     expect(
       resolveCanvasPresetTarget({
@@ -276,5 +407,25 @@ describe('canvasOperationPresets', () => {
         workflow: 'extract_character',
       }),
     ).toBe('screenplay.extract_characters')
+    expect(
+      resolveCanvasPresetTarget({
+        operation: 'text_generate',
+        taskPipelineRole: 'prop',
+        workflow: 'extract_prop',
+      }),
+    ).toBe('screenplay.extract_props')
+    expect(
+      resolveCanvasPresetTarget({
+        operation: 'text_generate',
+        outputPipelineRole: 'shot',
+        workflow: 'extract_character',
+      }),
+    ).toBe('screenplay.to_shot_script')
+    expect(
+      resolveCanvasPresetTarget({
+        operation: 'text_generate',
+        workflow: 'shot_script',
+      }),
+    ).toBe('screenplay.to_shot_script')
   })
 })

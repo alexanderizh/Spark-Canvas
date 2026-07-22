@@ -5,8 +5,7 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AppProvider, useApp } from './AppContext'
-
-(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
+;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
 vi.mock('./components/ConfirmDialog', () => ({
   ConfirmDialog: () => null,
@@ -44,6 +43,25 @@ describe('AppContext visual tweak persistence', () => {
     vi.unstubAllGlobals()
   })
 
+  it('opens the Canvas project workspace by default', async () => {
+    function ViewHarness() {
+      const { t } = useApp()
+      return <span data-testid="view">{t.view}</span>
+    }
+
+    await act(async () => {
+      root = createRoot(container)
+      root.render(
+        <AppProvider>
+          <ViewHarness />
+        </AppProvider>,
+      )
+      await Promise.resolve()
+    })
+
+    expect(container.querySelector('[data-testid="view"]')?.textContent).toBe('canvas')
+  })
+
   it('uses the dark theme by default when no theme has been persisted', async () => {
     function ThemeHarness() {
       const { t } = useApp()
@@ -52,7 +70,11 @@ describe('AppContext visual tweak persistence', () => {
 
     await act(async () => {
       root = createRoot(container)
-      root.render(<AppProvider><ThemeHarness /></AppProvider>)
+      root.render(
+        <AppProvider>
+          <ThemeHarness />
+        </AppProvider>,
+      )
       await Promise.resolve()
     })
 
@@ -82,28 +104,31 @@ describe('AppContext visual tweak persistence', () => {
 
     function VisualTweaksHarness() {
       const { t } = useApp()
-      return (
-        <span data-testid="visual-tweaks">{`${t.theme}:${t.primary}:${t.density}`}</span>
-      )
+      return <span data-testid="visual-tweaks">{`${t.theme}:${t.primary}:${t.density}`}</span>
     }
 
     await act(async () => {
       root = createRoot(container)
-      root.render(<AppProvider><VisualTweaksHarness /></AppProvider>)
+      root.render(
+        <AppProvider>
+          <VisualTweaksHarness />
+        </AppProvider>,
+      )
       await Promise.resolve()
       await Promise.resolve()
     })
 
-    expect(container.querySelector('[data-testid="visual-tweaks"]')?.textContent)
-      .toBe('dark:#10b981:compact')
-    expect(JSON.parse(localStorage.getItem('spark-settings-appearance') ?? '{}')).toMatchObject({
+    expect(container.querySelector('[data-testid="visual-tweaks"]')?.textContent).toBe(
+      'dark:#10b981:compact',
+    )
+    expect(JSON.parse(localStorage.getItem('spark-canvas:appearance') ?? '{}')).toMatchObject({
       theme: 'dark',
       primary: '#10b981',
       density: 'compact',
       font: 'inter',
       fontSize: 16,
     })
-    expect(localStorage.getItem('spark-agent:theme')).toBe('dark')
+    expect(localStorage.getItem('spark-canvas:theme')).toBe('dark')
   })
 
   it('persists visual tweak changes without dropping existing appearance fields', async () => {
@@ -138,7 +163,11 @@ describe('AppContext visual tweak persistence', () => {
 
     await act(async () => {
       root = createRoot(container)
-      root.render(<AppProvider><VisualTweaksHarness /></AppProvider>)
+      root.render(
+        <AppProvider>
+          <VisualTweaksHarness />
+        </AppProvider>,
+      )
       await Promise.resolve()
       await Promise.resolve()
     })
@@ -151,7 +180,7 @@ describe('AppContext visual tweak persistence', () => {
     })
 
     expect(container.querySelector('[data-testid="visual-tweaks"]')?.textContent).toBe('dark')
-    expect(JSON.parse(localStorage.getItem('spark-settings-appearance') ?? '{}')).toMatchObject({
+    expect(JSON.parse(localStorage.getItem('spark-canvas:appearance') ?? '{}')).toMatchObject({
       theme: 'dark',
     })
     expect(invoke).toHaveBeenCalledWith('settings:set', {

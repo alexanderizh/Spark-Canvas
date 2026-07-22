@@ -37,7 +37,6 @@ describe('GitEnvPanel task progress', () => {
           onOpenCommit={vi.fn()}
           onOpenBranches={vi.fn()}
           onOpenReview={vi.fn()}
-          onOpenTerminal={vi.fn()}
           tasks={[
             {
               id: '1',

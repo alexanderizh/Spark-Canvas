@@ -24,8 +24,10 @@ import type {
   MediaNormalizedErrorCode,
   MediaProviderKind,
   MediaRequestCall,
+  MediaInputMetadata,
   ProviderMediaDefaults,
 } from '@spark/protocol'
+import type { MediaUploader } from './media-uploader.js'
 
 /** adapter 调用上下文：由 router 从 ProviderProfile + keystore 解析后注入 */
 export interface MediaProviderContext {
@@ -42,13 +44,27 @@ export interface MediaProviderContext {
   mediaManifestCapability?: MediaModelCapabilityManifest
   /** 透传的 provider-level extra params（来自 modelParams 的非标量字段） */
   extraParams?: Record<string, unknown>
+  /** 用户已确认画布参数预校验提醒；适配器不得重复阻断同一类参数问题。 */
+  skipParameterValidation?: boolean
   /** 可注入的 fetch（测试用 mock）；缺省走全局 fetch */
   fetch?: typeof fetch
+  /** 桌面主进程可注入的 Spark 公开文件上传回退；agent-runtime 不反向依赖 desktop。 */
+  fallbackUploader?: MediaUploader
+  /** 轮询任务拿到渠道任务 ID 后立即上报提交响应，不必等待最终产物。 */
+  onTaskSubmitted?: (submission: MediaTaskSubmission) => void
+}
+
+export interface MediaTaskSubmission {
+  requestId: string
+  response: unknown
+  /** Router 捕获的提交 HTTP 请求/响应摘要。 */
+  requestCall?: MediaRequestCall
 }
 
 export type MediaArtifactType = 'image' | 'audio' | 'video' | 'text'
 
-export interface MediaInputFile {
+export interface MediaInputFile extends MediaInputMetadata {
+  fileId?: string
   path?: string
   url?: string
   dataUrl?: string
@@ -107,6 +123,7 @@ export type MediaErrorCode =
   | 'task_failed'
   | 'task_timeout'
   | 'artifact_download_failed'
+  | 'auth_required'
 
 export class MediaProviderError extends Error {
   readonly code: MediaErrorCode
@@ -144,8 +161,5 @@ export type { MediaErrorContract }
 export interface MediaProviderAdapter {
   readonly id: MediaProviderKind
   supports(capability: MediaCapabilityId): boolean
-  invoke(
-    input: MediaGenerateInput,
-    context: MediaProviderContext,
-  ): Promise<MediaGenerateOutput>
+  invoke(input: MediaGenerateInput, context: MediaProviderContext): Promise<MediaGenerateOutput>
 }

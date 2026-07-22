@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 import { getCanvasWindowPlatformClass, readCanvasWindowProjectId } from './canvasWindowParams'
@@ -17,5 +19,13 @@ describe('getCanvasWindowPlatformClass', () => {
     expect(getCanvasWindowPlatformClass('darwin')).toBe('platform-darwin')
     expect(getCanvasWindowPlatformClass('win32')).toBe('platform-win32')
     expect(getCanvasWindowPlatformClass('linux')).toBe('platform-linux')
+  })
+})
+
+describe('Canvas window runtime boundary', () => {
+  it('does not mount the old platform session sidebar provider', () => {
+    const source = readFileSync(join(__dirname, 'CanvasWindowApp.tsx'), 'utf8')
+
+    expect(source).not.toContain('SessionSidebarProvider')
   })
 })

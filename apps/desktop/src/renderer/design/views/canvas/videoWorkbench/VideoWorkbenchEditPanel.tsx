@@ -27,8 +27,14 @@ interface Props {
     operation: string,
     params: Record<string, unknown>,
   ) => Promise<{ success: boolean; result?: unknown; error?: string }>
-  /** 转码/裁剪产物生成后的回调（用于刷新产物列表） */
-  onOutput?: (summary: string, outputPath: string, type: WorkbenchOutput['type']) => void
+  /** 一次处理生成的全部产物，批量回写可避免分段结果互相覆盖。 */
+  onOutputs?: (
+    outputs: Array<{
+      summary: string
+      outputPath: string
+      type: WorkbenchOutput['type']
+    }>,
+  ) => void
 }
 
 export function VideoWorkbenchEditPanel({
@@ -39,7 +45,7 @@ export function VideoWorkbenchEditPanel({
   probeFailed,
   fallbackDuration,
   onProcess,
-  onOutput,
+  onOutputs,
 }: Props): ReactElement {
   const duration = probe?.durationSec ?? fallbackDuration ?? 0
 
@@ -84,17 +90,19 @@ export function VideoWorkbenchEditPanel({
       params: Record<string, unknown>,
       label: string,
       successMsg: string,
-      outputSummary: string,
-      outputType: WorkbenchOutput['type'],
-      extractPath: (r: unknown) => string,
+      extractOutputs: (result: unknown) => Array<{
+        summary: string
+        outputPath: string
+        type: WorkbenchOutput['type']
+      }>,
     ): Promise<void> => {
       setDoingLabel(label)
       try {
         const res = await onProcess(operation, params)
         if (res.success && res.result) {
-          const path = extractPath(res.result)
+          const outputs = extractOutputs(res.result)
           if (successMsg) message.success(successMsg)
-          if (path) onOutput?.(outputSummary, path, outputType)
+          if (outputs.length > 0) onOutputs?.(outputs)
         } else {
           message.error(res.error ?? `${label}失败`)
         }
@@ -104,7 +112,7 @@ export function VideoWorkbenchEditPanel({
         setDoingLabel('')
       }
     },
-    [onProcess, onOutput],
+    [onProcess, onOutputs],
   )
 
   const handleTranscode = (): Promise<void> => {
@@ -121,9 +129,18 @@ export function VideoWorkbenchEditPanel({
       { format: tcFormat, videoCodec: tcCodec, crf: tcCrf, ...(resolution ? { resolution } : {}) },
       tcFormat === 'gif' ? '生成 GIF' : `转码 ${label}`,
       `已转码为 ${label}`,
-      `转码 ${label}${tcScale !== 100 ? ` ${tcScale}%` : ''}`,
-      'transcode',
-      (r) => (r as { path: string }).path,
+      (result) => {
+        const outputPath = (result as { path: string }).path
+        return outputPath
+          ? [
+              {
+                summary: `转码 ${label}${tcScale !== 100 ? ` ${tcScale}%` : ''}`,
+                outputPath,
+                type: 'transcode',
+              },
+            ]
+          : []
+      },
     )
   }
 
@@ -132,39 +149,31 @@ export function VideoWorkbenchEditPanel({
       'segment',
       { segmentSec: segSec },
       '分割',
-      '', // 成功消息在 extractPath 后动态生成
-      `分割 × ${segSec}s`,
-      'concat',
-      (r) => {
-        const paths = (r as { paths: string[] }).paths
+      '', // 成功消息根据实际产物数量生成
+      (result) => {
+        const paths = (result as { paths: string[] }).paths
         message.success(`已分割为 ${paths.length} 段（每段 ${segSec}s）`)
-        return paths[0] ?? ''
+        return paths.map((outputPath, index) => ({
+          summary: `分割 ${index + 1}/${paths.length} · ${segSec}s`,
+          outputPath,
+          type: 'segment' as const,
+        }))
       },
     )
 
   const handleSpeed = (): Promise<void> => {
     const label = speedFactor >= 1 ? `${speedFactor}x 加速` : `${speedFactor}x 慢放`
-    return runOp(
-      'adjustSpeed',
-      { factor: speedFactor },
-      `变速`,
-      `已${label}`,
-      `变速 ${label}`,
-      'effect',
-      (r) => (r as { path: string }).path,
-    )
+    return runOp('adjustSpeed', { factor: speedFactor }, `变速`, `已${label}`, (result) => {
+      const outputPath = (result as { path: string }).path
+      return outputPath ? [{ summary: `变速 ${label}`, outputPath, type: 'effect' }] : []
+    })
   }
 
   const handleReverse = (): Promise<void> =>
-    runOp(
-      'reverse',
-      { reverseAudio: true },
-      '倒放',
-      '已生成倒放视频',
-      '倒放',
-      'effect',
-      (r) => (r as { path: string }).path,
-    )
+    runOp('reverse', { reverseAudio: true }, '倒放', '已生成倒放视频', (result) => {
+      const outputPath = (result as { path: string }).path
+      return outputPath ? [{ summary: '倒放', outputPath, type: 'effect' }] : []
+    })
 
   const handleCrop = (): Promise<void> => {
     if (resolvedCropW <= 0 || resolvedCropH <= 0) {
@@ -176,9 +185,18 @@ export function VideoWorkbenchEditPanel({
       { w: resolvedCropW, h: resolvedCropH, x: cropX, y: cropY },
       '画面裁剪',
       `已裁剪画面为 ${resolvedCropW}×${resolvedCropH}`,
-      `画面裁剪 ${resolvedCropW}×${resolvedCropH}`,
-      'effect',
-      (r) => (r as { path: string }).path,
+      (result) => {
+        const outputPath = (result as { path: string }).path
+        return outputPath
+          ? [
+              {
+                summary: `画面裁剪 ${resolvedCropW}×${resolvedCropH}`,
+                outputPath,
+                type: 'effect',
+              },
+            ]
+          : []
+      },
     )
   }
 

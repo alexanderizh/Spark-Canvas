@@ -1,9 +1,9 @@
 /**
- * FfmpegStatusCard — 设置-完整性面板中的 FFmpeg 检测与下载卡片。
+ * FfmpegStatusCard — Spark Canvas 视频处理环境状态。
  *
  * 展示：
  *   - ffmpeg/ffprobe 安装状态（版本、来源：managed/system）
- *   - 「下载 FFmpeg」按钮（从自建 minio 仓库下载，带进度）
+ *   - 已批准托管版本的按需下载入口
  *   - 下载进度条（订阅 stream:ffmpeg:install-progress）
  *   - 最近错误信息
  *
@@ -35,9 +35,12 @@ export function FfmpegStatusCard(): ReactElement {
   }
 
   useEffect(() => {
-    void window.spark.invoke('ffmpeg:status', {}).then(setStatus).catch((err: unknown) => {
-      console.warn('[ffmpeg] failed to load status:', err)
-    })
+    void window.spark
+      .invoke('ffmpeg:status', {})
+      .then(setStatus)
+      .catch((err: unknown) => {
+        console.warn('[ffmpeg] failed to load status:', err)
+      })
     const unsubStatus = window.spark?.on('stream:ffmpeg:status', (payload: Status) => {
       setStatus(payload)
     })
@@ -109,6 +112,7 @@ export function FfmpegStatusCard(): ReactElement {
   const progressLabel = progressPercent != null ? `${Math.round(progressPercent)}%` : '准备中'
   const isInstallActive =
     progress != null && progress.state !== 'done' && progress.state !== 'error'
+  const canInstallManaged = status.managedInstallAvailable
 
   return (
     <div className="settings-section ffmpeg-settings">
@@ -116,12 +120,17 @@ export function FfmpegStatusCard(): ReactElement {
         <div>
           <h2>视频处理 (FFmpeg)</h2>
           <div className="lede">
-            画布视频工作台依赖 FFmpeg 进行本地关键帧提取、剪辑与转码。不内置在安装包中，
-            首次使用时按需下载（约 50-150MB，视平台而定），也可使用系统已安装的 FFmpeg。
+            画布视频工作台使用 FFmpeg 完成本地关键帧提取、剪辑与转码。兼容的系统版本可直接使用，
+            托管版本通过发布校验后可在这里按需下载。
           </div>
         </div>
         <div className="ffmpeg-header-actions">
-          <Button size="middle" type="text" onClick={handleRefresh} icon={<Icons.Refresh size={14} />}>
+          <Button
+            size="middle"
+            type="text"
+            onClick={handleRefresh}
+            icon={<Icons.Refresh size={14} />}
+          >
             重新检查
           </Button>
         </div>
@@ -147,15 +156,17 @@ export function FfmpegStatusCard(): ReactElement {
       <div className="ffmpeg-card">
         <div className="ffmpeg-row">
           <div className="ffmpeg-row-main">
-            <div className="ffmpeg-row-icon"><Icons.Film size={18} /></div>
+            <div className="ffmpeg-row-icon">
+              <Icons.Film size={18} />
+            </div>
             <div>
               <div className="settings-card-title">FFmpeg 二进制</div>
               <div className="settings-card-desc">
                 {status.ffmpegReady
                   ? status.ffmpegSource === 'managed'
                     ? `内置版本 ${status.ffmpegVersion ?? ''}，已下载到本地应用目录`
-                    : `检测到系统 PATH 中的 FFmpeg ${status.ffmpegVersion ?? ''}（建议使用内置版本以保证功能一致）`
-                  : 'FFmpeg 尚未安装。下载后将用于画布视频工作台的关键帧提取、剪辑、转码等本地处理。'}
+                    : `检测到系统 PATH 中的 FFmpeg ${status.ffmpegVersion ?? ''}，视频处理已就绪`
+                  : (status.managedInstallMessage ?? 'FFmpeg 尚未就绪。')}
               </div>
             </div>
           </div>
@@ -165,17 +176,19 @@ export function FfmpegStatusCard(): ReactElement {
               size="middle"
               type={status.ffmpegReady ? 'default' : 'primary'}
               onClick={handleInstall}
-              disabled={installing}
+              disabled={installing || !canInstallManaged}
               loading={installing}
               icon={<Icons.Download size={14} />}
             >
               {installing
                 ? progressLabel
-                : status.ffmpegSource === 'managed'
-                  ? '重新下载'
-                  : status.ffmpegSource === 'system'
-                    ? '下载内置版本'
-                    : '下载 FFmpeg'}
+                : !canInstallManaged
+                  ? '托管版待发布'
+                  : status.ffmpegSource === 'managed'
+                    ? '重新下载'
+                    : status.ffmpegSource === 'system'
+                      ? '下载内置版本'
+                      : '下载 FFmpeg'}
             </Button>
           </div>
           {(progress != null || installing) && (
@@ -189,7 +202,10 @@ export function FfmpegStatusCard(): ReactElement {
                   progressPercent == null && isInstallActive ? ' indeterminate' : ''
                 }`}
               >
-                <div className="ffmpeg-progress-fill" style={{ width: `${progressPercent ?? 36}%` }} />
+                <div
+                  className="ffmpeg-progress-fill"
+                  style={{ width: `${progressPercent ?? 36}%` }}
+                />
               </div>
               {progress?.logLine != null && (
                 <div className="ffmpeg-progress-log" title={progress.logLine}>
@@ -202,7 +218,9 @@ export function FfmpegStatusCard(): ReactElement {
 
         <div className="ffmpeg-row">
           <div className="ffmpeg-row-main">
-            <div className="ffmpeg-row-icon"><Icons.Image size={18} /></div>
+            <div className="ffmpeg-row-icon">
+              <Icons.Image size={18} />
+            </div>
             <div>
               <div className="settings-card-title">FFprobe（元数据探测）</div>
               <div className="settings-card-desc">

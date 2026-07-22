@@ -48,55 +48,55 @@ export function AuthGate({ variant = 'full' }: AuthGateProps): React.ReactElemen
           <aside className="auth-brand-side" aria-hidden="true">
             <div className="auth-brand-mark">
               <img src={sparkLogo} alt="" className="auth-brand-logo" draggable={false} />
-              <span className="auth-brand-name">SparkWork</span>
+              <span className="auth-brand-name">Spark Canvas</span>
             </div>
 
             <div className="auth-brand-headline">
               <div className="auth-brand-eyebrow">
                 <span className="auth-brand-eyebrow-line" />
-                {auth.flow === 'login' ? 'Welcome back' : 'Get started'}
+                {auth.flow === 'login' ? 'Video workbench' : 'Start creating'}
               </div>
               <h1 className="auth-brand-h">
                 {auth.flow === 'login' ? (
                   <>
-                    让 AI <span className="auth-brand-accent">真正</span>
+                    把灵感变成
                     <br />
-                    为你工作
+                    <span className="auth-brand-accent">可制作的镜头</span>
                   </>
                 ) : (
                   <>
-                    几秒创建
+                    开始你的
                     <br />
-                    <span className="auth-brand-accent">你的账号</span>
+                    <span className="auth-brand-accent">视频创作</span>
                   </>
                 )}
               </h1>
               <p className="auth-brand-sub">
                 {auth.flow === 'login'
-                  ? '登录后即可使用平台模型，也可接入你已有的第三方模型。'
-                  : '注册即享平台模型额度，密钥安全保存在本机。'}
+                  ? '登录后可使用 Spark 平台模型、账户额度与上传服务；本地项目和第三方模型不受登录限制。'
+                  : '注册后可使用 Spark 平台模型额度，第三方模型密钥仍只保存在本机。'}
               </p>
 
               <div className="auth-brand-features">
                 <div className="auth-brand-feat">
                   <Icons.Zap size={18} />
                   <div className="auth-brand-feat-text">
-                    <strong>3 分钟开箱即用</strong>
-                    <span>无需复杂配置</span>
+                    <strong>项目化视频创作</strong>
+                    <span>画布、素材和任务集中管理</span>
                   </div>
                 </div>
                 <div className="auth-brand-feat">
                   <Icons.Lock size={18} />
                   <div className="auth-brand-feat-text">
-                    <strong>密钥本机安全存储</strong>
-                    <span>不上传云端</span>
+                    <strong>模型密钥本机存储</strong>
+                    <span>BYOK 无需登录即可使用</span>
                   </div>
                 </div>
                 <div className="auth-brand-feat">
                   <Icons.Sparkles size={18} />
                   <div className="auth-brand-feat-text">
-                    <strong>可随时扩展能力</strong>
-                    <span>技能 / 工作流 / MCP</span>
+                    <strong>本地视频处理</strong>
+                    <span>关键帧、剪辑与转码</span>
                   </div>
                 </div>
               </div>
@@ -104,7 +104,7 @@ export function AuthGate({ variant = 'full' }: AuthGateProps): React.ReactElemen
 
             <div className="auth-brand-foot">
               <span className="auth-brand-dot" />
-              <span>开箱即用，无需复杂配置</span>
+              <span>为 AI 影视与短剧生产而设计</span>
             </div>
           </aside>
         )}
@@ -141,10 +141,9 @@ export function AuthGate({ variant = 'full' }: AuthGateProps): React.ReactElemen
               showIcon
               message={
                 <div className="auth-keytar-warn">
-                  <div>本地凭证库不可用（keytar 加载失败），登录态不会保存到下次启动。</div>
+                  <div>系统凭据库暂不可用，登录状态只能保留到本次运行结束。</div>
                   <div className="auth-keytar-warn-fix">
-                    请在仓库根目录执行 <code>pnpm --filter @spark/desktop rebuild keytar</code> 或
-                    <code> npx electron-rebuild -f -w keytar</code> 重新编译原生模块后重启应用。
+                    可继续使用本地项目和已配置的第三方模型；重启后需要重新登录。
                   </div>
                 </div>
               }

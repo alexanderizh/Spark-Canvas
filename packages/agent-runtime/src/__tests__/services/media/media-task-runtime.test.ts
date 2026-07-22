@@ -7,6 +7,7 @@ import type {
 } from '@spark/storage'
 import { MediaTaskRuntimeService } from '../../../services/media/media-task-runtime.service.js'
 import type { MediaTaskRouterLike } from '../../../services/media/media-task-runtime.service.js'
+import type { MediaInputFile } from '../../../services/media/media-adapter.types.js'
 import { MediaProviderError } from '../../../services/media/media-adapter.types.js'
 
 describe('MediaTaskRuntimeService', () => {
@@ -41,6 +42,104 @@ describe('MediaTaskRuntimeService', () => {
     expect(service.materialize(record.id)?.[0]?.filePath).toBe('/tmp/out.png')
   })
 
+  it('persists only input metadata while passing complete files to the provider in memory', async () => {
+    const signedUrl =
+      'https://uploads.spark.example/owners/user-1/reference.png?X-Amz-Credential=credential&X-Amz-Signature=secret-signature'
+    const dataUrl = 'data:image/png;base64,c2Vuc2l0aXZlLWltYWdlLWJ5dGVz'
+    const localPath = '/Users/example/private/reference.png'
+    const aiUrl = 'https://uploads.spark.example/ai/private-reference.png?token=secret-token'
+    const inputFiles: Array<MediaInputFile & { aiUrl?: string }> = [
+      {
+        type: 'image',
+        role: 'reference',
+        mimeType: 'image/png',
+        url: signedUrl,
+        dataUrl,
+        path: localPath,
+        aiUrl,
+      },
+    ]
+    let invokedInputFiles: MediaInputFile[] | undefined
+    const service = new MediaTaskRuntimeService(createRepo(), {
+      async invoke(input) {
+        invokedInputFiles = input.inputFiles
+        return {
+          providerProfileId: 'provider-1',
+          output: {
+            provider: 'apimart',
+            model: 'gpt-image-2',
+            mode: 'sync',
+            assets: [],
+          },
+        }
+      },
+    })
+
+    const record = await service.submit(
+      {
+        operation: 'image_edit',
+        prompt: 'clean up',
+        inputFiles,
+        outputDir: '/tmp/media',
+      },
+      { providers: [] },
+    )
+
+    expect(invokedInputFiles).toBe(inputFiles)
+    expect(invokedInputFiles?.[0]).toMatchObject({
+      url: signedUrl,
+      dataUrl,
+      path: localPath,
+      aiUrl,
+    })
+    expect(record.inputFiles).toEqual([{ type: 'image', role: 'reference', mimeType: 'image/png' }])
+    const persisted = JSON.stringify(service.inquire(record.id)?.inputFiles)
+    expect(persisted).not.toContain('secret-signature')
+    expect(persisted).not.toContain('c2Vuc2l0aXZlLWltYWdlLWJ5dGVz')
+    expect(persisted).not.toContain('/Users/example')
+    expect(persisted).not.toContain('aiUrl')
+    expect(persisted).not.toContain('secret-token')
+  })
+
+  it('persists only a redacted provider response diagnostic', async () => {
+    const secretBase64 = 'cHJpdmF0ZS1yZXNwb25zZS1ieXRlcw=='
+    const service = new MediaTaskRuntimeService(createRepo(), {
+      async invoke() {
+        return {
+          providerProfileId: 'provider-1',
+          output: {
+            provider: 'apimart',
+            model: 'gpt-image-2',
+            mode: 'sync',
+            assets: [],
+            rawResponse: {
+              id: 'req-safe',
+              apiKey: 'provider-secret',
+              outputUrl: 'https://cdn.example.test/out.png?signature=secret-signature',
+              imageBase64: secretBase64,
+            },
+          },
+        }
+      },
+    })
+
+    const record = await service.submit(
+      { operation: 'text_to_image', prompt: 'hello', outputDir: '/tmp/media' },
+      { providers: [] },
+    )
+
+    expect(record.rawResponse).toMatchObject({
+      id: 'req-safe',
+      apiKey: '[REDACTED]',
+      outputUrl: 'https://cdn.example.test/out.png?[REDACTED]',
+    })
+    const persisted = JSON.stringify(service.inquire(record.id)?.rawResponse)
+    expect(persisted).not.toContain('provider-secret')
+    expect(persisted).not.toContain('secret-signature')
+    expect(persisted).not.toContain(secretBase64)
+    expect(persisted).not.toContain('preview')
+  })
+
   it('persists provider errors as failed tasks', async () => {
     const service = new MediaTaskRuntimeService(createRepo(), {
       async invoke() {
@@ -58,28 +157,72 @@ describe('MediaTaskRuntimeService', () => {
     expect(service.materialize(record.id)).toBeNull()
   })
 
-  it('returns immediately for background submit and emits completion updates', async () => {
+  it('forwards the fallback uploader to the media router', async () => {
+    const fallbackUploader = {
+      canHandle: () => true,
+      upload: async () => ({
+        provider: 'apimart' as const,
+        publicUrl: 'https://example.com/ref.png',
+      }),
+    }
+    let receivedUploader: unknown
     const service = new MediaTaskRuntimeService(createRepo(), {
-      async invoke() {
+      async invoke(_input, options) {
+        receivedUploader = options.fallbackUploader
         return {
           providerProfileId: 'provider-1',
           output: {
             provider: 'apimart',
             model: 'gpt-image-2',
             mode: 'sync',
-            requestId: 'req-bg',
+            assets: [],
+          },
+        }
+      },
+    })
+
+    const record = await service.submit(
+      { operation: 'image_edit', prompt: 'hello', outputDir: '/tmp/media' },
+      { providers: [], fallbackUploader },
+    )
+
+    expect(record.status).toBe('succeeded')
+    expect(receivedUploader).toBe(fallbackUploader)
+  })
+
+  it('returns immediately for background submit and emits completion updates', async () => {
+    const service = new MediaTaskRuntimeService(createRepo(), {
+      async invoke(_input, options) {
+        options.onTaskSubmitted?.({
+          requestId: 'provider-task-bg',
+          response: { task_id: 'provider-task-bg', status: 'queued' },
+          requestCall: {
+            method: 'POST',
+            url: 'https://provider.example/tasks',
+            response: { status: 200, body: { task_id: 'provider-task-bg' } },
+          },
+        })
+        return {
+          providerProfileId: 'provider-1',
+          output: {
+            provider: 'apimart',
+            model: 'gpt-image-2',
+            mode: 'async',
+            requestId: 'provider-task-bg',
             assets: [{ type: 'image', filePath: '/tmp/bg.png', mimeType: 'image/png' }],
           },
         }
       },
     })
     const statuses: string[] = []
+    const submittedResponses: unknown[] = []
     const completed = new Promise<void>((resolve) => {
       service.submitBackground(
         { operation: 'text_to_image', prompt: 'hello', outputDir: '/tmp/media' },
         { providers: [], providerProfileId: 'provider-1' },
         (record) => {
           statuses.push(record.status)
+          if (record.submitResponse != null) submittedResponses.push(record.submitResponse)
           if (record.status === 'succeeded') resolve()
         },
       )
@@ -90,8 +233,12 @@ describe('MediaTaskRuntimeService', () => {
 
     await completed
 
-    expect(statuses).toEqual(['running', 'succeeded'])
-    expect(service.inquire('media-task-1')?.requestId).toBe('req-bg')
+    expect(statuses).toEqual(['running', 'running', 'succeeded'])
+    expect(submittedResponses).toEqual([
+      { task_id: 'provider-task-bg', status: 'queued' },
+      { task_id: 'provider-task-bg', status: 'queued' },
+    ])
+    expect(service.inquire('media-task-1')?.requestId).toBe('provider-task-bg')
   })
 
   it('cancels pending or running tasks', () => {
@@ -201,8 +348,12 @@ function createRepo(): MediaGenerationTaskRepository {
       if (!existing) return null
       const row: MediaGenerationTaskRow = {
         ...existing,
-        provider_profile_id: params.providerProfileId !== undefined ? params.providerProfileId : existing.provider_profile_id,
-        provider_kind: params.providerKind !== undefined ? params.providerKind : existing.provider_kind,
+        provider_profile_id:
+          params.providerProfileId !== undefined
+            ? params.providerProfileId
+            : existing.provider_profile_id,
+        provider_kind:
+          params.providerKind !== undefined ? params.providerKind : existing.provider_kind,
         manifest_id: params.manifestId !== undefined ? params.manifestId : existing.manifest_id,
         model_id: params.modelId !== undefined ? params.modelId : existing.model_id,
         capability: params.capability !== undefined ? params.capability : existing.capability,
@@ -210,9 +361,13 @@ function createRepo(): MediaGenerationTaskRepository {
         mode: params.mode !== undefined ? params.mode : existing.mode,
         request_id: params.requestId !== undefined ? params.requestId : existing.request_id,
         assets_json: params.assetsJson ?? existing.assets_json,
-        raw_response_json: params.rawResponseJson !== undefined ? params.rawResponseJson : existing.raw_response_json,
+        raw_response_json:
+          params.rawResponseJson !== undefined
+            ? params.rawResponseJson
+            : existing.raw_response_json,
         error_code: params.errorCode !== undefined ? params.errorCode : existing.error_code,
-        error_message: params.errorMessage !== undefined ? params.errorMessage : existing.error_message,
+        error_message:
+          params.errorMessage !== undefined ? params.errorMessage : existing.error_message,
         submitted_at: params.submittedAt !== undefined ? params.submittedAt : existing.submitted_at,
         completed_at: params.completedAt !== undefined ? params.completedAt : existing.completed_at,
         updated_at: now(),
@@ -222,7 +377,13 @@ function createRepo(): MediaGenerationTaskRepository {
     },
     cancel(id: string): MediaGenerationTaskRow | null {
       const row = rows.get(id)
-      if (!row || row.status === 'succeeded' || row.status === 'failed' || row.status === 'cancelled') return row ?? null
+      if (
+        !row ||
+        row.status === 'succeeded' ||
+        row.status === 'failed' ||
+        row.status === 'cancelled'
+      )
+        return row ?? null
       return this.update(id, { status: 'cancelled', completedAt: now() })
     },
   }

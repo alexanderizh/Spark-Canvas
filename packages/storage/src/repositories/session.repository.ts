@@ -15,8 +15,7 @@
 
 import { BaseRepository } from './base.repository.js'
 import type { SparkDatabase } from '../database.js'
-
-const DEFAULT_AGENT_ID = 'platform-manager-agent'
+import { CANVAS_ASSISTANT_AGENT_ID } from '@spark/shared/constants'
 
 /** Session 表行类型 */
 export interface SessionRow {
@@ -67,6 +66,8 @@ export interface CreateSessionParams {
 export interface ListSessionsParams {
   projectId?: string
   workspaceId?: string
+  surface?: 'canvas'
+  agentId?: string
   status?: string
   includeArchived?: boolean
   limit?: number
@@ -103,7 +104,7 @@ export class SessionRepository extends BaseRepository {
       params.providerProfileId ?? null,
       params.modelId ?? null,
       params.agentAdapter ?? 'codex',
-      params.agentId ?? DEFAULT_AGENT_ID,
+      params.agentId ?? CANVAS_ASSISTANT_AGENT_ID,
       params.permissionMode ?? 'codex-default',
       params.chatMode ?? 'agent',
       params.reasoningEffort ?? 'max',
@@ -167,7 +168,10 @@ export class SessionRepository extends BaseRepository {
   }
 
   /** 更新会话生命周期状态 */
-  updateLifecycle(id: string, params: { pinnedAt?: string | null; archivedAt?: string | null }): void {
+  updateLifecycle(
+    id: string,
+    params: { pinnedAt?: string | null; archivedAt?: string | null },
+  ): void {
     const fields: string[] = []
     const values: unknown[] = []
 
@@ -254,7 +258,16 @@ export class SessionRepository extends BaseRepository {
 
   /** 查询会话列表 */
   list(params: ListSessionsParams = {}): { sessions: SessionRow[]; total: number } {
-    const { projectId, workspaceId, status, includeArchived = false, limit = 50, offset = 0 } = params
+    const {
+      projectId,
+      workspaceId,
+      surface,
+      agentId,
+      status,
+      includeArchived = false,
+      limit = 50,
+      offset = 0,
+    } = params
 
     // 动态构建 WHERE 子句（参数化，防止 SQL 注入）
     const conditions: string[] = []
@@ -267,6 +280,27 @@ export class SessionRepository extends BaseRepository {
     if (status != null) {
       conditions.push('status = ?')
       args.push(status)
+    }
+    if (workspaceId != null) {
+      conditions.push(`EXISTS (
+        SELECT 1
+        FROM json_each(
+          CASE WHEN json_valid(workspace_ids_json) THEN workspace_ids_json ELSE '[]' END
+        ) AS workspace
+        WHERE workspace.value = ?
+      )`)
+      args.push(workspaceId)
+    }
+    if (surface != null) {
+      conditions.push(`json_extract(
+        CASE WHEN json_valid(metadata_json) THEN metadata_json ELSE '{}' END,
+        '$.surface'
+      ) = ?`)
+      args.push(surface)
+    }
+    if (agentId != null) {
+      conditions.push('agent_id = ?')
+      args.push(agentId)
     }
     if (!includeArchived) {
       conditions.push('archived_at IS NULL')
@@ -286,15 +320,7 @@ export class SessionRepository extends BaseRepository {
     )
     const sessions = listStmt.all(...args, limit, offset) as SessionRow[]
 
-    // 如果指定了 workspaceId，在内存中过滤（workspace_ids_json 是 JSON 数组）
-    const filtered = workspaceId != null
-      ? sessions.filter((s) => {
-          const wsIds = this.fromJson<string[]>(s.workspace_ids_json, [])
-          return wsIds.includes(workspaceId)
-        })
-      : sessions
-
-    return { sessions: filtered, total: countRow.count }
+    return { sessions, total: countRow.count }
   }
 
   /** 获取 workspace_ids_json 解析后的数组 */

@@ -22,13 +22,15 @@ describe('resolveProfileMediaModels', () => {
       modelId: 'studio-video-v1',
       displayName: 'Studio Video',
       domains: ['video'],
-      capabilities: [{
-        id: 'video.generate',
-        label: '文生视频',
-        input: { required: ['prompt'] },
-        output: { types: ['video'], mimeTypes: ['video/mp4'] },
-        paramSchema: { type: 'object', properties: { duration: { type: 'integer' } } },
-      }],
+      capabilities: [
+        {
+          id: 'video.generate',
+          label: '文生视频',
+          input: { required: ['prompt'] },
+          output: { types: ['video'], mimeTypes: ['video/mp4'] },
+          paramSchema: { type: 'object', properties: { duration: { type: 'integer' } } },
+        },
+      ],
       invocation: {
         mode: 'async_polling',
         endpoint: '/jobs',
@@ -75,7 +77,11 @@ describe('resolveProfileMediaModels', () => {
         modelIds: ['gpt-image-2', 'gpt-image-1', 'imagen-4.0-apimart', 'gpt-image-2-official'],
         mediaCapabilities: ['image.generate', 'image.edit'],
         mediaModelRefs: [
-          { manifestId: 'custom:gpt-image-2-official', modelId: 'gpt-image-2-official', enabled: true },
+          {
+            manifestId: 'custom:gpt-image-2-official',
+            modelId: 'gpt-image-2-official',
+            enabled: true,
+          },
         ],
       },
       catalog,
@@ -99,7 +105,11 @@ describe('resolveProfileMediaModels', () => {
         defaultModel: 'gpt-image-2',
         modelIds: ['gpt-image-2', 'gpt-image-1', 'imagen-4.0-apimart'],
         mediaModelRefs: [
-          { manifestId: 'custom:gpt-image-2-official', modelId: 'gpt-image-2-official', enabled: true },
+          {
+            manifestId: 'custom:gpt-image-2-official',
+            modelId: 'gpt-image-2-official',
+            enabled: true,
+          },
         ],
       },
       catalog,
@@ -126,6 +136,22 @@ describe('resolveProfileMediaModels', () => {
     expect(models).toHaveLength(1)
     expect(models[0]?.manifest.id).toBe('apimart:gpt-image-2')
     expect(models[0]?.synthesized).toBe(false)
+  })
+
+  it('does not synthesize a missing non-custom built-in ref', () => {
+    const models = resolveProfileMediaModels(
+      {
+        mediaProvider: 'apimart',
+        modelType: 'image',
+        mediaCapabilities: ['image.generate'],
+        mediaModelRefs: [
+          { manifestId: 'apimart:missing-built-in', modelId: 'missing-built-in', enabled: true },
+        ],
+      },
+      newCatalog(),
+    )
+
+    expect(models).toEqual([])
   })
 
   it('完全没有 mediaModelRefs 时，按 modelIds 回退（兼容旧数据）', () => {
@@ -169,13 +195,23 @@ function createRepo(): MediaModelManifestRepository {
 
   const repo = {
     ensureSchema(): void {},
-    list(filters?: { providerKind?: string; enabledOnly?: boolean; builtIn?: boolean }): MediaModelManifestRow[] {
+    list(filters?: {
+      providerKind?: string
+      enabledOnly?: boolean
+      builtIn?: boolean
+    }): MediaModelManifestRow[] {
       return [...manifests.values()]
-        .filter((row) => filters?.providerKind == null || row.provider_kind === filters.providerKind)
+        .filter(
+          (row) => filters?.providerKind == null || row.provider_kind === filters.providerKind,
+        )
         .filter((row) => filters?.enabledOnly !== true || row.enabled === 1)
-        .filter((row) => filters?.builtIn === undefined || row.built_in === (filters.builtIn ? 1 : 0))
-        .sort((left, right) =>
-          left.provider_kind.localeCompare(right.provider_kind) || left.display_name.localeCompare(right.display_name),
+        .filter(
+          (row) => filters?.builtIn === undefined || row.built_in === (filters.builtIn ? 1 : 0),
+        )
+        .sort(
+          (left, right) =>
+            left.provider_kind.localeCompare(right.provider_kind) ||
+            left.display_name.localeCompare(right.display_name),
         )
     },
     getById(id: string): MediaModelManifestRow | null {
@@ -202,7 +238,9 @@ function createRepo(): MediaModelManifestRepository {
       return row
     },
     listProviderModels(providerProfileId: string): MediaProviderModelRow[] {
-      return [...providerModels.values()].filter((row) => row.provider_profile_id === providerProfileId)
+      return [...providerModels.values()].filter(
+        (row) => row.provider_profile_id === providerProfileId,
+      )
     },
     upsertProviderModel(params: UpsertMediaProviderModelParams): MediaProviderModelRow {
       const key = `${params.providerProfileId}:${params.manifestId}`

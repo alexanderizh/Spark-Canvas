@@ -4,10 +4,9 @@
  * 把一个 Provider profile 解析成「画布 / MCP 可用的媒体模型清单」。
  *
  * 解析顺序：
- *  1. 优先按 profile.mediaModelRefs 解析。每条 ref 先查目录 manifest；查不到
- *     （典型是用户手填的自定义模型，manifestId 以 `custom:` 开头）则克隆一个同
- *     providerKind 的代表性内置 manifest 合成出来，使其仍可在画布里被选择并配置
- *     参数。真正发请求时由原生 adapter 按 modelId 调用，与此合成结果无关。
+ *  1. 优先按 profile.mediaModelRefs 解析。每条 ref 先查目录 manifest；只有
+ *     `custom:` ref 查不到时才克隆同 providerKind 的代表性内置 manifest。
+ *     非 custom ref 必须精确命中目录，避免拼写错误静默变成另一个模型契约。
  *  2. 只有当 profile 完全没有配置 mediaModelRefs 时，才回退到按 defaultModel /
  *     modelIds 猜测内置 manifest（兼容尚未迁移到 mediaModelRefs 的旧数据）。
  *
@@ -162,23 +161,22 @@ export function resolveProfileMediaModels(
   for (const ref of refs) {
     if (filters?.enabledOnly !== false && ref.enabled === false) continue
     const catalogManifest = ref.manifest == null ? catalog.describe(ref.manifestId) : null
-    const manifest =
-      ref.manifest ??
-      catalogManifest ??
-      synthesizeMediaManifestForRef(profile, ref, catalog, filters)
+    const synthesizedManifest =
+      ref.manifest == null &&
+      catalogManifest == null &&
+      ref.manifestId.startsWith(CUSTOM_MANIFEST_PREFIX)
+        ? synthesizeMediaManifestForRef(profile, ref, catalog, filters)
+        : null
+    const manifest = ref.manifest ?? catalogManifest ?? synthesizedManifest
     if (!manifest || !capabilityMatches(manifest) || !providerKindMatches(manifest)) continue
     if (seen.has(manifest.id)) continue
     seen.add(manifest.id)
-    const synthesized =
-      ref.manifest == null &&
-      catalogManifest == null &&
-      manifest.id.startsWith(CUSTOM_MANIFEST_PREFIX)
     resolved.push({
       manifest,
       effectiveModelId: ref.modelId ?? manifest.modelId,
       enabled: ref.enabled !== false,
       defaults: ref.defaults,
-      synthesized,
+      synthesized: synthesizedManifest != null,
     })
   }
 

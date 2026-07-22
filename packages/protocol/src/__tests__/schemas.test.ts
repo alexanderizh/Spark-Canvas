@@ -51,6 +51,99 @@ describe('IPC schemas', () => {
     })
   })
 
+  it('preserves the explicit canvas surface during session creation', () => {
+    const request = SessionCreateRequestSchema.parse({
+      providerProfileId: '00000000-0000-4000-8000-000000000001',
+      surface: 'canvas',
+    })
+
+    expect(request.surface).toBe('canvas')
+  })
+
+  it('preserves the explicit canvas surface when listing sessions', () => {
+    const request = IpcSchemaRegistry['session:list'].parse({ surface: 'canvas' })
+
+    expect(request.surface).toBe('canvas')
+  })
+
+  it('accepts only a project id when opening the Canvas Agent workspace', () => {
+    expect(
+      IpcSchemaRegistry['canvas:agent:open-workspace'].parse({ projectId: 'project-1' }),
+    ).toEqual({ projectId: 'project-1' })
+    expect(() =>
+      IpcSchemaRegistry['canvas:agent:open-workspace'].parse({
+        projectId: 'project-1',
+        rootPath: '/tmp/injected',
+      }),
+    ).toThrow()
+    expect(() =>
+      IpcSchemaRegistry['canvas:agent:open-workspace'].parse({ rootPath: '/tmp/injected' }),
+    ).toThrow()
+  })
+
+  it('registers only dedicated Canvas Agent session entrypoints for the renderer', () => {
+    const registry = IpcSchemaRegistry as Record<string, unknown>
+
+    for (const channel of [
+      'canvas:agent:configuration',
+      'canvas:agent:session:create',
+      'canvas:agent:session:list',
+      'canvas:agent:session:update',
+      'canvas:agent:session:submit-turn',
+      'canvas:agent:session:get-history',
+      'canvas:agent:session:cancel',
+      'canvas:agent:session:answer-question',
+    ]) {
+      expect(registry).toHaveProperty(channel)
+    }
+  })
+
+  it('rejects legacy Agent, Team, permission, workspace, surface, and Skill injection', () => {
+    const createSchema = IpcSchemaRegistry['canvas:agent:session:create']
+    const submitSchema = IpcSchemaRegistry['canvas:agent:session:submit-turn']
+    const listSchema = IpcSchemaRegistry['canvas:agent:session:list']
+
+    for (const injected of [
+      { agentId: 'platform-manager-agent' },
+      { permissionMode: 'claude-bypass' },
+      { reasoningEffort: 'max' },
+      { surface: 'canvas' },
+      { workspaceId: '00000000-0000-4000-8000-000000000099' },
+      { teamConfig: { enabled: true, hostAgentId: 'platform-manager-agent' } },
+    ]) {
+      expect(() => createSchema.parse({ providerProfileId: 'provider-1', ...injected })).toThrow()
+    }
+
+    for (const injected of [
+      { agentId: 'platform-manager-agent' },
+      { permissionMode: 'codex-full-access' },
+      { skillId: 'builtin:platform-manager' },
+      { teamConfig: { enabled: true, hostAgentId: 'platform-manager-agent' } },
+    ]) {
+      expect(() =>
+        submitSchema.parse({
+          sessionId: '00000000-0000-4000-8000-000000000002',
+          message: 'hello',
+          ...injected,
+        }),
+      ).toThrow()
+    }
+
+    expect(() =>
+      createSchema.parse({
+        providerProfileId: 'provider-1',
+        skillIds: ['builtin:platform-manager'],
+      }),
+    ).toThrow()
+    expect(() => listSchema.parse({ surface: 'canvas' })).toThrow()
+    expect(() =>
+      listSchema.parse({ workspaceId: '00000000-0000-4000-8000-000000000099' }),
+    ).toThrow()
+    expect(() =>
+      IpcSchemaRegistry['canvas:agent:configuration'].parse({ includeDisabled: true }),
+    ).toThrow()
+  })
+
   it('accepts all Spark reasoning efforts and rejects unknown values', () => {
     for (const reasoningEffort of ['minimal', 'low', 'medium', 'high', 'xhigh', 'max']) {
       const request = SessionCreateRequestSchema.parse({
@@ -161,6 +254,41 @@ describe('IPC schemas', () => {
     ).toThrow()
   })
 
+  it('rejects renderer-supplied refresh credentials', () => {
+    expect(IpcSchemaRegistry['auth:refresh'].parse({})).toEqual({})
+    expect(() =>
+      IpcSchemaRegistry['auth:refresh'].parse({ refreshToken: 'renderer-secret' }),
+    ).toThrow()
+  })
+
+  it('keeps video probe read-only and rejects request ids that can escape artifact paths', () => {
+    expect(
+      IpcSchemaRegistry['video:probe'].parse({
+        operation: 'probe',
+        input: '/tmp/source.mp4',
+        params: {},
+        requestId: 'probe_source-1',
+      }),
+    ).toMatchObject({ operation: 'probe', requestId: 'probe_source-1' })
+
+    expect(() =>
+      IpcSchemaRegistry['video:probe'].parse({
+        operation: 'segment',
+        input: '/tmp/source.mp4',
+        params: { segmentSec: 2 },
+        requestId: 'write-through-probe',
+      }),
+    ).toThrow()
+    expect(() =>
+      IpcSchemaRegistry['video:process'].parse({
+        operation: 'segment',
+        input: '/tmp/source.mp4',
+        params: { segmentSec: 2 },
+        requestId: '../../outside',
+      }),
+    ).toThrow()
+  })
+
   it('accepts auto router provider ids for routing model profile cards', () => {
     const create = IpcSchemaRegistry['model:create'].parse({
       providerId: 'codex-auto-router',
@@ -235,6 +363,26 @@ describe('IPC schemas', () => {
     }
   })
 
+  it('records documented prompt units and overflow behavior for Bailian image models', () => {
+    const qwen = BUILTIN_MEDIA_MODEL_MANIFESTS.find(
+      (manifest) => manifest.id === 'bailian:qwen-image-2.0',
+    )
+    const wan = BUILTIN_MEDIA_MODEL_MANIFESTS.find(
+      (manifest) => manifest.id === 'bailian:wan2.7-image',
+    )
+
+    expect(qwen?.safety).toMatchObject({
+      maxPromptLength: 1300,
+      promptLengthUnit: 'tokens',
+      promptOverflowBehavior: 'truncate',
+    })
+    expect(wan?.safety).toMatchObject({
+      maxPromptLength: 5000,
+      promptLengthUnit: 'characters',
+      promptOverflowBehavior: 'truncate',
+    })
+  })
+
   it('Seedance 2.0 image_to_video exposes reference-image input roles', () => {
     const seedance2Ids = [
       'volcengine:doubao-seedance-2-0-260128',
@@ -247,7 +395,7 @@ describe('IPC schemas', () => {
       expect(manifest, `missing manifest ${id}`).toBeDefined()
       const capability = manifest!.capabilities.find((item) => item.id === 'video.image_to_video')
       expect(capability, `missing image_to_video for ${id}`).toBeDefined()
-      expect(capability!.label).toContain('参考图')
+      expect(capability!.label).toContain('多模态参考')
       expect(capability!.input.maxImages).toBe(9)
       expect(inferRolePolicy(capability!).imageRoles).toEqual([
         'first_frame',
@@ -261,11 +409,11 @@ describe('IPC schemas', () => {
     const seedreamIds = [
       'doubao-seedream-4-0-250828',
       'doubao-seedream-4-5-251128',
+      'doubao-seedream-5-0-pro-260628',
       'doubao-seedream-5-0-260128',
       'doubao-seedream-5-0-lite-260128',
     ]
-    const findM = (id: string) =>
-      BUILTIN_MEDIA_MODEL_MANIFESTS.find((m) => m.modelId === id)
+    const findM = (id: string) => BUILTIN_MEDIA_MODEL_MANIFESTS.find((m) => m.modelId === id)
 
     // 4 个 manifest 都通过 schema + 语义校验
     for (const modelId of seedreamIds) {
@@ -278,7 +426,8 @@ describe('IPC schemas', () => {
     }
 
     const lite = findM('doubao-seedream-5-0-lite-260128')!
-    const five = findM('doubao-seedream-5-0-260128')!
+    const liteAlias = findM('doubao-seedream-5-0-260128')!
+    const pro = findM('doubao-seedream-5-0-pro-260628')!
     const fourFive = findM('doubao-seedream-4-5-251128')!
     const fourZero = findM('doubao-seedream-4-0-250828')!
 
@@ -295,8 +444,11 @@ describe('IPC schemas', () => {
     expect(liteSizes).toContain('3072x3072')
     expect(liteSizes).toContain('6240x2656')
 
-    // 5.0 主 / 4.5：2K/4K + 16 像素值（≥18）；不含 3K
-    for (const m of [five, fourFive]) {
+    // 5.0 Lite 的兼容 ID 与 Lite 共享 2K/3K/4K 能力。
+    expect(sizeEnumOf(liteAlias)).toEqual(liteSizes)
+
+    // 4.5：2K/4K + 16 像素值（≥18）；不含 3K
+    for (const m of [fourFive]) {
       const sizes = sizeEnumOf(m)
       expect(sizes.length).toBeGreaterThanOrEqual(18)
       expect(sizes).not.toContain('3K')
@@ -304,6 +456,13 @@ describe('IPC schemas', () => {
       expect(sizes).toContain('4K')
       expect(sizes).toContain('2048x2048')
     }
+
+    // 5.0 Pro：仅 1K/2K，直接尺寸范围也与 Lite 不同。
+    const proSizes = sizeEnumOf(pro)
+    expect(proSizes).toContain('1K')
+    expect(proSizes).toContain('2K')
+    expect(proSizes).not.toContain('3K')
+    expect(proSizes).not.toContain('4K')
 
     // 4.0：1K/2K/4K + 24 像素值（≥27）；含 1K 档
     const fourZeroSizes = sizeEnumOf(fourZero)
@@ -313,9 +472,12 @@ describe('IPC schemas', () => {
     expect(fourZeroSizes).toContain('1512x648')
 
     // size 字段全部标记 x-allow-custom: true（前端 AutoComplete 渲染）
-    for (const m of [lite, five, fourFive, fourZero]) {
-      const size = (m.capabilities[0]!.paramSchema.properties as Record<string, Record<string, unknown>>).size
+    for (const m of [lite, liteAlias, pro, fourFive, fourZero]) {
+      const size = (
+        m.capabilities[0]!.paramSchema.properties as Record<string, Record<string, unknown>>
+      ).size
       expect(size?.['x-allow-custom']).toBe(true)
+      expect(size?.pattern).toBe('^\\d+\\s*[xX]\\s*\\d+$')
     }
 
     // 默认值修正：watermark=true（文档默认）；5.0 lite outputFormat=jpeg
@@ -323,28 +485,32 @@ describe('IPC schemas', () => {
     expect(lite.capabilities[0]!.defaults?.outputFormat).toBe('jpeg')
     expect(fourZero.capabilities[0]!.defaults?.watermark).toBe(true)
 
-    // 5.0 主：独有 guidanceScale；不含 optimizePromptMode/searchEnabled/sequential
-    const fiveProps = five.capabilities[0]!.paramSchema.properties as Record<string, unknown>
-    expect(fiveProps.guidanceScale).toBeDefined()
-    expect(fiveProps.optimizePromptMode).toBeUndefined()
-    expect(fiveProps.searchEnabled).toBeUndefined()
-    expect(fiveProps.sequentialImageGeneration).toBeUndefined()
-
-    // 5.0 主 manifest 只剩 image.generate（文档明确不支持 image 输入/组图/联网搜索）
-    expect(five.capabilities.map((c) => c.id)).toEqual(['image.generate'])
-
-    // 5.0 主 forbidden searchEnabled 仍生效（paramPolicy.aliases 兜底让其通过语义校验）
-    expect(
-      five.capabilities[0]!.paramPolicy?.forbidden?.some((f) => f.name === 'searchEnabled'),
-    ).toBe(true)
+    // 5.0 Pro 支持多图编辑和 fast prompt 优化，不支持组图、流式或联网搜索。
+    const proProps = pro.capabilities[0]!.paramSchema.properties as Record<
+      string,
+      Record<string, unknown>
+    >
+    expect(proProps.optimizePromptMode?.enum).toEqual(['standard', 'fast'])
+    expect(proProps.searchEnabled).toBeUndefined()
+    expect(proProps.sequentialImageGeneration).toBeUndefined()
+    expect(proProps.seed).toBeUndefined()
+    expect(proProps.guidanceScale).toBeUndefined()
+    expect(pro.capabilities.map((c) => c.id)).toEqual(['image.generate', 'image.edit'])
+    expect(pro.capabilities.find((c) => c.id === 'image.edit')?.input.maxImages).toBe(10)
 
     // 5.0 lite / 4.5 / 4.0：含 optimizePromptMode；lite/4.5 暂不暴露 fast，4.0 支持 fast。
     for (const m of [lite, fourFive]) {
-      const props = m.capabilities[0]!.paramSchema.properties as Record<string, Record<string, unknown>>
+      const props = m.capabilities[0]!.paramSchema.properties as Record<
+        string,
+        Record<string, unknown>
+      >
       expect(props.optimizePromptMode?.enum).toEqual(['standard'])
       expect(props.stream).toBeUndefined()
     }
-    const fourZeroProps = fourZero.capabilities[0]!.paramSchema.properties as Record<string, Record<string, unknown>>
+    const fourZeroProps = fourZero.capabilities[0]!.paramSchema.properties as Record<
+      string,
+      Record<string, unknown>
+    >
     expect(fourZeroProps.optimizePromptMode?.enum).toEqual(['standard', 'fast'])
     // 当前 adapter 还不支持 SSE 解析，stream 不进入用户可配置 schema。
     expect(fourZeroProps.stream).toBeUndefined()
@@ -356,13 +522,13 @@ describe('IPC schemas', () => {
     }
 
     // invocation.response 改为 url（与默认 responseFormat=url 对齐）
-    for (const m of [lite, five, fourFive, fourZero]) {
+    for (const m of [lite, liteAlias, pro, fourFive, fourZero]) {
       expect(m.invocation.response.kind).toBe('url')
     }
 
     // docs.lastCheckedAt 已刷新
-    for (const m of [lite, five, fourFive, fourZero]) {
-      expect(m.docs.lastCheckedAt).toBe('2026-07-05')
+    for (const m of [lite, liteAlias, pro, fourFive, fourZero]) {
+      expect(m.docs.lastCheckedAt).toBe('2026-07-16')
     }
   })
 
@@ -506,7 +672,9 @@ describe('IPC schemas', () => {
         blocks: [{ kind: 'text', id: 'text-1', text: '用户输入' }],
       },
       systemPrompt: 'hidden capability',
-      relationManifest: [{ blockId: 'ref-1', sourceNodeId: 'node-1', relation: 'character', order: 0 }],
+      relationManifest: [
+        { blockId: 'ref-1', sourceNodeId: 'node-1', relation: 'character', order: 0 },
+      ],
       providerProfileId: 'provider-media-1',
       modelId: 'gpt-image-2',
       modelParams: { size: '1024x1024' },
@@ -634,5 +802,38 @@ describe('IPC schemas', () => {
     })
     expect(updateRequest.enabled).toBe(true)
     expect(updateRequest.selectedRepos?.[0]).toBe('owner/repo')
+  })
+
+  it('validates Canvas annotation save payloads', () => {
+    const request = IpcSchemaRegistry['file:save-canvas-annotation'].parse({
+      documentJson: '{"version":1,"objects":[]}',
+      suggestedBaseName: 'shot-01',
+      projectRootPath: '/tmp/canvas-project',
+      existingFilePath: '/tmp/canvas-project/assets/annotations/shot-01.spark-annotation.json',
+    })
+
+    expect(request.suggestedBaseName).toBe('shot-01')
+    expect(() =>
+      IpcSchemaRegistry['file:save-canvas-annotation'].parse({ documentJson: '' }),
+    ).toThrow()
+  })
+
+  it('validates Canvas text generation payloads', () => {
+    const request = IpcSchemaRegistry['canvas:task:generate-text'].parse({
+      operation: 'text_generate',
+      prompt: '生成一份分镜脚本',
+      projectId: 'project-1',
+      clientTaskId: 'task-1',
+      reasoningEffort: 'high',
+      skillIds: ['builtin:storyboard'],
+    })
+
+    expect(request.operation).toBe('text_generate')
+    expect(() =>
+      IpcSchemaRegistry['canvas:task:generate-text'].parse({
+        operation: 'text_to_image',
+        prompt: 'wrong channel',
+      }),
+    ).toThrow()
   })
 })

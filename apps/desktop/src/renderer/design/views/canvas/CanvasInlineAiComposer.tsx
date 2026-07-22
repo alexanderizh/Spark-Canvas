@@ -8,6 +8,7 @@ import {
   type SetStateAction,
 } from 'react'
 import { Button, Checkbox as LobeCheckbox, Input, Tag, Tooltip } from '@lobehub/ui'
+import { message } from 'antd'
 import { Icons } from '../../Icons'
 import { Select as LobeSelect } from '@lobehub/ui'
 import {
@@ -32,6 +33,12 @@ import {
 } from './canvasAgentPromptPresets'
 import { canvasApi } from './canvas.api'
 import { pruneModelParamsForCanvas } from './canvasMediaContract'
+import { CanvasTaskValidationError } from './canvasTaskSubmissionValidation'
+import {
+  readSkipCanvasParameterValidation,
+  writeSkipCanvasParameterValidation,
+} from './canvasParameterValidationPreferences'
+import { confirmCanvasTaskValidation } from './canvasTaskValidationWarning'
 import { CANVAS_CAPABILITIES, isCapabilityRecommended } from './canvas.capabilities'
 import {
   mergeCanvasOperationPresetNegativePrompt,
@@ -40,9 +47,11 @@ import {
   resolveCanvasPresetTarget,
   writeCanvasLastUsedPresetTarget,
 } from './canvasOperationPresets'
+import { filterCanvasAssistantAgents, pickCanvasAssistantAgent } from './canvasAgentPolicy'
 import { CanvasPromptEditor } from './CanvasPromptEditor'
 import { CanvasMediaInputHint } from './CanvasMediaInputHint'
 import { buildReferenceImageInputRoles } from './canvasTaskInputFiles'
+import { resolveCanvasInputTransport } from './canvasWorkspaceTaskInput'
 import { mediaModelKey } from './canvasModelPickerModel'
 import { CanvasModelPicker } from './CanvasModelPicker'
 import { CanvasParameterControl } from './CanvasParameterControl'
@@ -53,6 +62,7 @@ import {
   type CanvasParameterControlKind,
   type SchemaField,
 } from './canvasParameterPresentation'
+import { isModelParamDraftValueCompatible } from './canvasModelParamDraftState'
 import {
   readCanvasComposerAdvancedOpen,
   writeCanvasComposerAdvancedOpen,
@@ -94,6 +104,7 @@ export function CanvasInlineAiComposer({
     manifestId?: string
     modelId?: string
     modelParams?: Record<string, unknown>
+    skipParameterValidation?: boolean
     inputTransport?: CanvasInputTransport
     inputRoles?: Record<string, CanvasTaskInputRoleSelection>
     /** 文本类操作可指定专属 agent（应用内 agent 管理配置的 ManagedAgent） */
@@ -102,7 +113,7 @@ export function CanvasInlineAiComposer({
     droppedModelParams?: Array<{ name: string; reason: string; valuePreview?: string | undefined }>
     /** Contract V2 裁剪产物：非阻断性提示（如 missing_param_policy、compat_passthrough）。 */
     modelParamWarnings?: Array<{ code: string; message: string }>
-  }) => void
+  }) => Promise<void>
 }) {
   const [operation, setOperation] = useState<CanvasOperationType>('text_to_image')
   const [prompt, setPrompt] = useState('')
@@ -179,7 +190,12 @@ export function CanvasInlineAiComposer({
     void window.spark
       .invoke('agent:list', { includeDisabled: false })
       .then((res) => {
-        if (!cancelled) setAgents((res as { agents?: ManagedAgent[] }).agents ?? [])
+        if (cancelled) return
+        const nextAgents = filterCanvasAssistantAgents(
+          (res as { agents?: ManagedAgent[] }).agents ?? [],
+        )
+        setAgents(nextAgents)
+        setSelectedAgentId((current) => pickCanvasAssistantAgent(nextAgents, current)?.id ?? '')
       })
       .catch(() => {
         if (!cancelled) setAgents([])
@@ -379,15 +395,16 @@ export function CanvasInlineAiComposer({
       for (const field of parameterFields) {
         const cachedValue = readModelParamDraftValue(paramSource, field.name)
         next[field.name] =
-          cachedValue ??
-          resolveInitialModelParamDraftValue({
-            operation,
-            field,
-            fieldName: field.name,
-            presetParams: opDefaults,
-            existingParams: nodeDefaults,
-            defaultParams: mergedDefaults,
-          })
+          cachedValue && isModelParamDraftValueCompatible(field, cachedValue)
+            ? cachedValue
+            : resolveInitialModelParamDraftValue({
+                operation,
+                field,
+                fieldName: field.name,
+                presetParams: opDefaults,
+                existingParams: nodeDefaults,
+                defaultParams: mergedDefaults,
+              })
       }
       return next
     })
@@ -661,12 +678,7 @@ export function CanvasInlineAiComposer({
         negativePrompt,
         includeNegativePrompt ? projectNegativePrompt : '',
       )
-      const effectiveInputTransport =
-        inputTransport === 'auto'
-          ? selectedModel?.providerKind === 'xai'
-            ? 'base64'
-            : 'cloud_url'
-          : inputTransport
+      const effectiveInputTransport = resolveCanvasInputTransport(inputTransport)
       const videoFrameNodeIds = supportsVideoFrameRoles
         ? normalizeVideoFrameNodeIds(firstFrameNodeId, lastFrameNodeId, referenceFrameNodeIds)
         : []
@@ -692,6 +704,7 @@ export function CanvasInlineAiComposer({
         manifestId?: string
         modelId?: string
         modelParams?: Record<string, unknown>
+        skipParameterValidation?: boolean
         inputTransport?: CanvasInputTransport
         inputRoles?: Record<string, CanvasTaskInputRoleSelection>
         agentId?: string
@@ -700,6 +713,7 @@ export function CanvasInlineAiComposer({
       } = {
         operation,
         prompt: effectivePrompt,
+        ...(readSkipCanvasParameterValidation() ? { skipParameterValidation: true } : {}),
       }
       if (isTextOperation && selectedAgentId) payload.agentId = selectedAgentId
       if (effectiveNegativePrompt) payload.negativePrompt = effectiveNegativePrompt
@@ -740,6 +754,19 @@ export function CanvasInlineAiComposer({
         ...(resolvedPresetSkillIds.length > 0 ? { skillIds: resolvedPresetSkillIds } : {}),
         ...(Object.keys(modelParams).length > 0 ? { modelParams } : {}),
       })
+      try {
+        await onCreateTask(payload)
+      } catch (error) {
+        if (!(error instanceof CanvasTaskValidationError)) throw error
+        const decision = await confirmCanvasTaskValidation(error.issues)
+        if (!decision.confirmed) {
+          const paramName = validationParamName(error)
+          if (paramName) focusParameterControl(paramName)
+          return
+        }
+        if (decision.skipFutureValidation) writeSkipCanvasParameterValidation(true)
+        await onCreateTask({ ...payload, skipParameterValidation: true })
+      }
       if (saveTimerRef.current) {
         clearTimeout(saveTimerRef.current)
         saveTimerRef.current = null
@@ -747,9 +774,17 @@ export function CanvasInlineAiComposer({
       clearComposerDraft(nodeCacheKey)
       // 阻止本次关窗 flush 把已清除的草稿写回
       suppressFlushRef.current = true
-      onCreateTask(payload)
       setPrompt('')
       setNegativePrompt('')
+    } catch (error) {
+      console.error('[CanvasInlineAiComposer] Failed to create task:', error)
+      if (error instanceof CanvasTaskValidationError) {
+        const paramName = validationParamName(error)
+        if (paramName) focusParameterControl(paramName)
+        message.warning(error.message)
+      } else {
+        message.error(error instanceof Error ? error.message : '提交任务失败，请稍后重试')
+      }
     } finally {
       submittingRef.current = false
       setSubmitting(false)
@@ -860,7 +895,7 @@ export function CanvasInlineAiComposer({
                 ? '正在读取已启用模型...'
                 : supportedMediaModels.length > 0
                   ? `当前能力可用 ${supportedMediaModels.length} 个模型${selectedModel ? ` · ${selectedModel.effectiveModelId} · ${selectedModel.invocationMode}` : ''}`
-                  : '当前能力暂无已启用模型，请先到 Provider 绑定。'}
+                  : '当前能力暂无已启用模型，请返回主窗口「模型服务」配置。'}
             </div>
           </div>
         )}
@@ -961,7 +996,7 @@ export function CanvasInlineAiComposer({
               <div className="canvas-model-hint">
                 {agents.length > 0
                   ? '选中后用该 agent 的人设与绑定模型执行；不选则用通用影视创作助手。'
-                  : '未配置 agent，可继续用通用文本模型，或到「Agents」中新建专属 agent。'}
+                  : '未配置专属 Agent，可继续使用通用文本模型；模型请在主窗口「模型服务」配置。'}
               </div>
             </div>
             <div className="canvas-form-row">
@@ -1199,6 +1234,13 @@ export function CanvasInlineAiComposer({
   )
 }
 
+function validationParamName(error: CanvasTaskValidationError): string | undefined {
+  const path = error.issues[0]?.path ?? []
+  const modelParamsIndex = path.indexOf('modelParams')
+  const value = modelParamsIndex >= 0 ? path[modelParamsIndex + 1] : undefined
+  return typeof value === 'string' ? value : undefined
+}
+
 function parameterSummaryIcon(control: CanvasParameterControlKind) {
   switch (control) {
     case 'aspect-ratio':
@@ -1434,12 +1476,14 @@ export function schemaFields(schema: Record<string, unknown>): SchemaField[] {
       // manifest paramSchema 可标记 `x-allow-custom: true` 让前端用 AutoComplete 渲染
       //（既保留下拉推荐值，又允许用户在范围内输入自定义值，如 Seedream size）。
       const allowCustom = spec['x-allow-custom'] === true || spec.allowCustom === true
+      const pattern = typeof spec.pattern === 'string' ? spec.pattern : undefined
       return {
         name,
         title: typeof spec.title === 'string' ? spec.title : name,
         type,
         enumValues,
         ...(allowCustom ? { allowCustom: true } : {}),
+        ...(pattern ? { pattern } : {}),
         ...(typeof spec.description === 'string' ? { description: spec.description } : {}),
         ...(examples[0] ? { placeholder: examples[0] } : {}),
       }
@@ -1470,16 +1514,13 @@ export function nodeDefaultModelParams(
   nodes: readonly Pick<CanvasNode, 'data'>[],
   fields: readonly SchemaField[],
 ): Record<string, string> {
-  const fieldNames = new Set(fields.map((field) => field.name))
   const result: Record<string, string> = {}
   for (const node of nodes) {
     const params = node.data?.modelParams
     if (!params || typeof params !== 'object') continue
-    for (const [name, value] of Object.entries(params)) {
-      if (!fieldNames.has(name)) continue
-      if (value == null) continue
-      const str = typeof value === 'string' ? value : String(value)
-      if (str && result[name] === undefined) result[name] = str
+    for (const field of fields) {
+      const value = readModelParamDraftValue(params, field.name)
+      if (value && result[field.name] === undefined) result[field.name] = value
     }
     if (Object.keys(result).length > 0) break
   }
@@ -1509,7 +1550,7 @@ export function resolveInitialModelParamDraftValue({
   defaultParams,
 }: {
   operation: CanvasOperationType
-  field: Pick<SchemaField, 'name' | 'enumValues'>
+  field: Pick<SchemaField, 'name' | 'enumValues' | 'allowCustom' | 'pattern'>
   fieldName: string
   presetParams: Record<string, unknown>
   existingParams: Record<string, unknown>
@@ -1517,25 +1558,35 @@ export function resolveInitialModelParamDraftValue({
 }): string {
   const panoramaFieldValue =
     operation === 'panorama_360' ? derivePanoramaFieldValue(field, presetParams) : undefined
+  const compatiblePanoramaFieldValue =
+    panoramaFieldValue && isModelParamDraftValueCompatible(field, panoramaFieldValue)
+      ? panoramaFieldValue
+      : undefined
+  const presetValue = readCompatibleModelParamDraftValue(presetParams, fieldName, field)
+  const existingValue = readCompatibleModelParamDraftValue(existingParams, fieldName, field)
+  const defaultValue = readCompatibleModelParamDraftValue(defaultParams, fieldName, field)
   if (
     operation === 'panorama_360' &&
-    (fieldName === 'aspect_ratio' || fieldName === 'aspectRatio' || fieldName === 'size')
+    (isAspectRatioParam(fieldName) || fieldName === 'size')
   ) {
     return (
-      panoramaFieldValue ??
-      readModelParamDraftValue(presetParams, fieldName) ??
-      readModelParamDraftValue(existingParams, fieldName) ??
-      readModelParamDraftValue(defaultParams, fieldName) ??
+      compatiblePanoramaFieldValue ??
+      presetValue ??
+      existingValue ??
+      defaultValue ??
       ''
     )
   }
-  return (
-    readModelParamDraftValue(existingParams, fieldName) ??
-    panoramaFieldValue ??
-    readModelParamDraftValue(presetParams, fieldName) ??
-    readModelParamDraftValue(defaultParams, fieldName) ??
-    ''
-  )
+  return existingValue ?? compatiblePanoramaFieldValue ?? presetValue ?? defaultValue ?? ''
+}
+
+function readCompatibleModelParamDraftValue(
+  params: Record<string, unknown>,
+  fieldName: string,
+  field: Pick<SchemaField, 'enumValues' | 'allowCustom' | 'pattern'>,
+): string | undefined {
+  const value = readModelParamDraftValue(params, fieldName)
+  return value && isModelParamDraftValueCompatible(field, value) ? value : undefined
 }
 
 export function isModelParamCoveredByFields(
@@ -1544,7 +1595,7 @@ export function isModelParamCoveredByFields(
 ): boolean {
   const aliases = new Set(modelParamAliasCandidates(key))
   if (
-    (key === 'aspect_ratio' || key === 'aspectRatio') &&
+    isAspectRatioParam(key) &&
     fields.some((field) => field.name === 'size' && fieldCanRepresentPanoramaAspectRatio(field))
   ) {
     return true
@@ -1553,9 +1604,32 @@ export function isModelParamCoveredByFields(
 }
 
 function modelParamAliasCandidates(fieldName: string): string[] {
-  if (fieldName === 'aspect_ratio') return ['aspect_ratio', 'aspectRatio']
-  if (fieldName === 'aspectRatio') return ['aspectRatio', 'aspect_ratio']
+  const groups = [
+    ['ratio', 'aspectRatio', 'aspect_ratio'],
+    ['durationSeconds', 'duration'],
+    ['generateAudio', 'generate_audio'],
+    ['returnLastFrame', 'return_last_frame'],
+    ['promptExtend', 'prompt_extend'],
+    ['audioSetting', 'audio_setting'],
+    ['serviceTier', 'service_tier'],
+    ['cameraFixed', 'camera_fixed'],
+    ['searchEnabled', 'search_enabled', 'enable_search'],
+    ['responseFormat', 'response_format'],
+    ['outputFormat', 'output_format', 'image_format'],
+    ['sampleRate', 'sample_rate'],
+    ['bitRate', 'bit_rate'],
+    ['voiceId', 'voice_id'],
+    ['withTimestamps', 'with_timestamps'],
+    ['optimizeStreamingLatency', 'optimize_streaming_latency'],
+    ['textNormalization', 'text_normalization'],
+  ]
+  const group = groups.find((candidates) => candidates.includes(fieldName))
+  if (group) return [fieldName, ...group.filter((candidate) => candidate !== fieldName)]
   return [fieldName]
+}
+
+function isAspectRatioParam(name: string): boolean {
+  return name === 'ratio' || name === 'aspectRatio' || name === 'aspect_ratio'
 }
 
 function derivePanoramaFieldValue(
@@ -1563,10 +1637,9 @@ function derivePanoramaFieldValue(
   presetParams: Record<string, unknown>,
 ): string | undefined {
   const presetAspect =
-    readModelParamDraftValue(presetParams, 'aspect_ratio') ??
     readModelParamDraftValue(presetParams, 'aspectRatio')
   if (!presetAspect) return undefined
-  if (field.name === 'aspect_ratio' || field.name === 'aspectRatio') return presetAspect
+  if (isAspectRatioParam(field.name)) return presetAspect
   if (field.name !== 'size') return undefined
   if (field.enumValues.includes(presetAspect)) return presetAspect
   const dimensionCandidate = field.enumValues.find((value) =>
@@ -1851,6 +1924,7 @@ export function mergeSchemaFields(
   baseFields: SchemaField[],
   ...suggestedFieldGroups: SchemaField[][]
 ): SchemaField[] {
+  const hasModelSchema = baseFields.length > 0
   const dimensionFieldPolicy = imageDimensionFieldPolicy(baseFields)
   const seen = new Set<string>()
   const result: SchemaField[] = []
@@ -1872,6 +1946,9 @@ export function mergeSchemaFields(
       }
       continue
     }
+    // 模型 schema 是参数能力的唯一事实源。通用/模型建议只负责补充同名字段的展示
+    // 元数据；只有旧模型完全没有 schema 时，才允许建议字段作为兼容兜底出现。
+    if (hasModelSchema) continue
     seen.add(field.name)
     result.push(field)
   }
@@ -1885,13 +1962,13 @@ function imageDimensionFieldPolicy(fields: SchemaField[]): {
   const accepted = new Set(
     fields
       .map((field) => field.name)
-      .filter((name) => name === 'size' || name === 'aspect_ratio' || name === 'aspectRatio'),
+      .filter((name) => name === 'size' || isAspectRatioParam(name)),
   )
   return {
     accepted,
     allows: (name) =>
       accepted.size === 0 ||
-      (name !== 'size' && name !== 'aspect_ratio' && name !== 'aspectRatio') ||
+      (name !== 'size' && !isAspectRatioParam(name)) ||
       accepted.has(name),
   }
 }
@@ -2035,9 +2112,10 @@ export function updateModelParamDraftValue(
   const next = { ...draft, [fieldName]: value }
   if (value.trim().length === 0) return next
   if (fieldName === 'size') {
+    next.ratio = ''
     next.aspect_ratio = ''
     next.aspectRatio = ''
-  } else if (fieldName === 'aspect_ratio' || fieldName === 'aspectRatio') {
+  } else if (isAspectRatioParam(fieldName)) {
     next.size = ''
   }
   return next
@@ -2079,20 +2157,25 @@ export function normalizeModelParamsForSubmit(
   if (fields) {
     const policy = imageDimensionFieldPolicy(fields)
     if (policy.accepted.size > 0) {
-      for (const name of ['size', 'aspect_ratio', 'aspectRatio']) {
+      for (const name of ['size', 'ratio', 'aspect_ratio', 'aspectRatio']) {
         if (!policy.accepted.has(name)) delete next[name]
       }
     }
   }
-  const aspect = stringParam(next.aspectRatio) ?? stringParam(next.aspect_ratio)
+  const aspect =
+    stringParam(next.aspectRatio) ?? stringParam(next.aspect_ratio) ?? stringParam(next.ratio)
   const size = stringParam(next.size)
   const defaultSize = stringParam(defaults.size)
-  const defaultAspect = stringParam(defaults.aspectRatio) ?? stringParam(defaults.aspect_ratio)
+  const defaultAspect =
+    stringParam(defaults.aspectRatio) ??
+    stringParam(defaults.aspect_ratio) ??
+    stringParam(defaults.ratio)
   if (aspect && size && defaultSize && size === defaultSize) {
     delete next.size
   } else if (aspect && size && defaultAspect && aspect === defaultAspect) {
     delete next.aspectRatio
     delete next.aspect_ratio
+    delete next.ratio
   }
   return next
 }

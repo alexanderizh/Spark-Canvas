@@ -49,51 +49,326 @@ export interface VendorMeta {
    * 缺省或加载失败时，UI 应回退到 emoji + color 组合。
    */
   logoPath: string
+  /**
+   * 对应平台的购买 / 注册 / 充值入口。
+   * 模板卡片右上角会渲染一个外链小按钮，点击后由 Electron main 进程
+   * 调起系统默认浏览器。无 URL（如本地 / 自建网关）则不渲染按钮。
+   */
+  purchaseUrl?: string
 }
 
 export const VENDOR_CATALOG: VendorMeta[] = [
   /* ─── 现有 13 个 ─── */
-  { id: 'openai',           name: 'OpenAI',          emoji: 'OA',  color: '#10a37f', desc: 'GPT-5.5 / GPT-5.4 / GPT-Image',  logoPath: 'providers/openai.svg' },
-  { id: 'anthropic',        name: 'Anthropic',       emoji: 'A',   color: '#d4a574', desc: 'Claude Sonnet 4 / Opus 4 / Haiku', logoPath: 'providers/anthropic.svg' },
-  { id: 'google-gemini',    name: 'Google Gemini',   emoji: 'G',   color: '#4285f4', desc: 'Gemini 2.5 Pro / Flash', logoPath: 'providers/google-gemini.svg' },
-  { id: 'tencent-coding-plan',  name: '腾讯云 Coding Plan',  emoji: 'TX', color: '#006eff', desc: '混元 / MiniMax / Kimi / GLM 聚合', logoPath: 'providers/tencent-coding-plan.png' },
-  { id: 'aliyun-bailian-coding-plan', name: '阿里云百炼 Coding Plan', emoji: 'AL', color: '#ff6a00', desc: 'Qwen3 / GLM / Kimi / MiniMax 聚合', logoPath: 'providers/aliyun-bailian-coding-plan.svg' },
-  { id: 'bailian',         name: '阿里云百炼',       emoji: 'AL',  color: '#ff6a00', desc: 'Wan / HappyHorse / Qwen3 TTS / 多媒体聚合', logoPath: 'providers/aliyun-bailian-coding-plan.svg' },
-  { id: 'zhipu-glm-coding-plan', name: '智谱 GLM Coding Plan', emoji: 'GL', color: '#3b5cff', desc: 'GLM-5 / GLM-4.7 / GLM-4.5-air', logoPath: 'providers/zhipu-glm-coding-plan.png' },
-  { id: 'qwen-standard',    name: '通义千问',         emoji: 'QW',  color: '#6f42c1', desc: 'Qwen3 / Qwen3-Coder 系列模型', logoPath: 'providers/qwen-standard.png' },
-  { id: 'deepseek-api',     name: 'DeepSeek',        emoji: 'DS',  color: '#4d6bfe', desc: 'DeepSeek-V4 Flash / Pro', logoPath: 'providers/deepseek-api.svg' },
-  { id: 'minimax',          name: 'MiniMax',         emoji: 'MM',  color: '#6c5ce7', desc: 'MiniMax-M2.7 / M2.5 系列', logoPath: 'providers/minimax.png' },
-  { id: 'kimi',             name: 'Kimi',            emoji: 'KM',  color: '#1a1a2e', desc: 'Kimi-K2.6 / K2.5 / K2-Thinking', logoPath: 'providers/kimi.png' },
-  { id: 'siliconflow',      name: '硅基流动',        emoji: 'SF',  color: '#7c3aed', desc: 'DeepSeek / Qwen / Kimi 聚合', logoPath: 'providers/siliconflow.svg' },
-  { id: 'openrouter',       name: 'OpenRouter',      emoji: 'OR',  color: '#6d28d9', desc: 'GPT-4.1 / Claude / Gemini 聚合', logoPath: 'providers/openrouter.svg' },
-  { id: 'ollama',           name: 'Ollama',          emoji: 'OL',  color: '#6366f1', desc: '本地模型 · Llama / Qwen / DeepSeek', logoPath: 'providers/ollama.svg' },
+  {
+    id: 'openai',
+    name: 'OpenAI',
+    emoji: 'OA',
+    color: '#10a37f',
+    desc: 'GPT-5.5 / GPT-5.4 / GPT-Image',
+    logoPath: 'providers/openai.svg',
+    purchaseUrl: 'https://platform.openai.com/settings/organization/billing',
+  },
+  {
+    id: 'anthropic',
+    name: 'Anthropic',
+    emoji: 'A',
+    color: '#d4a574',
+    desc: 'Claude Sonnet 4 / Opus 4 / Haiku',
+    logoPath: 'providers/anthropic.svg',
+    purchaseUrl: 'https://console.anthropic.com/settings/billing',
+  },
+  {
+    id: 'google-gemini',
+    name: 'Google Gemini',
+    emoji: 'G',
+    color: '#4285f4',
+    desc: 'Gemini 2.5 Pro / Flash',
+    logoPath: 'providers/google-gemini.svg',
+    purchaseUrl: 'https://aistudio.google.com/apikey',
+  },
+  {
+    id: 'tencent-coding-plan',
+    name: '腾讯云 Coding Plan',
+    emoji: 'TX',
+    color: '#006eff',
+    desc: '混元 / MiniMax / Kimi / GLM 聚合',
+    logoPath: 'providers/tencent-coding-plan.png',
+    purchaseUrl: 'https://buy.cloud.tencent.com/lkeap',
+  },
+  {
+    id: 'aliyun-bailian-coding-plan',
+    name: '阿里云百炼 Coding Plan',
+    emoji: 'AL',
+    color: '#ff6a00',
+    desc: 'Qwen3 / GLM / Kimi / MiniMax 聚合',
+    logoPath: 'providers/aliyun-bailian-coding-plan.svg',
+    purchaseUrl: 'https://bailian.console.aliyun.com/',
+  },
+  {
+    id: 'bailian',
+    name: '阿里云百炼',
+    emoji: 'AL',
+    color: '#ff6a00',
+    desc: 'Wan / HappyHorse / Qwen3 TTS / 多媒体聚合',
+    logoPath: 'providers/aliyun-bailian-coding-plan.svg',
+    purchaseUrl: 'https://bailian.console.aliyun.com/',
+  },
+  {
+    id: 'zhipu-glm-coding-plan',
+    name: '智谱 GLM Coding Plan',
+    emoji: 'GL',
+    color: '#3b5cff',
+    desc: 'GLM-5 / GLM-4.7 / GLM-4.5-air',
+    logoPath: 'providers/zhipu-glm-coding-plan.png',
+    purchaseUrl: 'https://bigmodel.cn/claude-code',
+  },
+  {
+    id: 'qwen-standard',
+    name: '通义千问',
+    emoji: 'QW',
+    color: '#6f42c1',
+    desc: 'Qwen3 / Qwen3-Coder 系列模型',
+    logoPath: 'providers/qwen-standard.png',
+    purchaseUrl: 'https://bailian.console.aliyun.com/',
+  },
+  {
+    id: 'deepseek-api',
+    name: 'DeepSeek',
+    emoji: 'DS',
+    color: '#4d6bfe',
+    desc: 'DeepSeek-V4 Flash / Pro',
+    logoPath: 'providers/deepseek-api.svg',
+    purchaseUrl: 'https://platform.deepseek.com/topup',
+  },
+  {
+    id: 'minimax',
+    name: 'MiniMax',
+    emoji: 'MM',
+    color: '#6c5ce7',
+    desc: 'MiniMax-M2.7 / M2.5 系列',
+    logoPath: 'providers/minimax.png',
+    purchaseUrl: 'https://platform.minimaxi.com/user-center/basic-information/interface-key',
+  },
+  {
+    id: 'kimi',
+    name: 'Kimi',
+    emoji: 'KM',
+    color: '#1a1a2e',
+    desc: 'Kimi-K2.6 / K2.5 / K2-Thinking',
+    logoPath: 'providers/kimi.png',
+    purchaseUrl: 'https://platform.moonshot.cn/console/account',
+  },
+  {
+    id: 'siliconflow',
+    name: '硅基流动',
+    emoji: 'SF',
+    color: '#7c3aed',
+    desc: 'DeepSeek / Qwen / Kimi 聚合',
+    logoPath: 'providers/siliconflow.svg',
+    purchaseUrl: 'https://cloud.siliconflow.cn/',
+  },
+  {
+    id: 'openrouter',
+    name: 'OpenRouter',
+    emoji: 'OR',
+    color: '#6d28d9',
+    desc: 'GPT-4.1 / Claude / Gemini 聚合',
+    logoPath: 'providers/openrouter.svg',
+    purchaseUrl: 'https://openrouter.ai/keys',
+  },
+  {
+    id: 'ollama',
+    name: 'Ollama',
+    emoji: 'OL',
+    color: '#6366f1',
+    desc: '本地模型 · Llama / Qwen / DeepSeek',
+    logoPath: 'providers/ollama.svg',
+  },
 
   /* ─── 新增 15 个（图标来自 coding.mcppla.net 官方平台图标）─── */
-  { id: 'xiaomi-mimo',      name: '小米 MiMo',       emoji: 'MM',  color: '#ff6900', desc: 'MiMo-V2-Pro / V2-Omni / V2-TTS', logoPath: 'providers/xiaomi-mimo.png' },
-  { id: 'xfyun',            name: '讯飞星火',         emoji: 'SF',  color: '#1e88e5', desc: 'Spark X2 / X1.5 / Ultra / Pro', logoPath: 'providers/xfyun.png' },
-  { id: 'jdcloud',          name: '京东云 JoyBuilder', emoji: 'JD',  color: '#e1251b', desc: 'JoyAI-LLM / JoyAI-M3 / Coding Plan', logoPath: 'providers/jdcloud.png' },
-  { id: 'ctyun',            name: '天翼云息壤',       emoji: 'CT',  color: '#cf0a2c', desc: '息壤 Tokens · DeepSeek / Qwen / GLM 聚合', logoPath: 'providers/ctyun.svg' },
-  { id: 'baidu',            name: '百度千帆',         emoji: 'BD',  color: '#2932e1', desc: 'ERNIE-4.5 / Qianfan-VL / 文心系列', logoPath: 'providers/baidu.png' },
-  { id: 'volcengine',       name: '火山方舟',         emoji: 'VK',  color: '#1a73e8', desc: 'Doubao-pro / Doubao-Seed / Seedance', logoPath: 'providers/volcengine.png' },
-  { id: 'huaweicloud',      name: '华为云盘古',       emoji: 'HW',  color: '#c7000b', desc: 'Pangu-NLP-N4 718B / Pangu Pro MoE', logoPath: 'providers/huaweicloud.png' },
-  { id: 'unicom',           name: '联通云',           emoji: 'UC',  color: '#003c8f', desc: '元景 32B / 编码助手 AISP', logoPath: 'providers/unicom.png' },
-  { id: 'ucloud',           name: 'UCloud UModelVerse', emoji: 'UC', color: '#0052d9', desc: 'DeepSeek / Qwen / 文心 / 阶跃 聚合', logoPath: 'providers/ucloud.png' },
-  { id: 'infini-ai',        name: '无问芯穹 Infini-AI', emoji: 'IA', color: '#0d47a1', desc: 'DeepSeek / Qwen / 20+ 模型 · 多芯异构', logoPath: 'providers/infini-ai.png' },
-  { id: 'alaya',            name: '九章云极 Alaya Code', emoji: 'AC', color: '#ff5722', desc: 'Kimi / Qwen3.5 / GLM-5 / MiniMax 聚合', logoPath: 'providers/alaya.svg' },
-  { id: 'mthreads',         name: '摩尔线程',         emoji: 'MT',  color: '#00a86b', desc: '夸娥 GPU · Qwen / DeepSeek / MiniMax', logoPath: 'providers/mthreads.png' },
-  { id: 'kuaishou',         name: '快手可灵',         emoji: 'KS',  color: '#ff6633', desc: '可灵 Kling V1.6 / 视频生成', logoPath: 'providers/kuaishou.png' },
-  { id: 'trae',             name: 'Trae (字节)',     emoji: 'TR',  color: '#5b21b6', desc: 'Trae IDE · Doubao-1.5 / DeepSeek', logoPath: 'providers/trae.svg' },
-  { id: 'qwen-tongyi',      name: '阿里通义',         emoji: 'QY',  color: '#ff6a00', desc: 'Qwen3.5 / Qwen3-Max / Qwen-Coder', logoPath: 'providers/qwen-tongyi.png' },
+  {
+    id: 'xiaomi-mimo',
+    name: '小米 MiMo',
+    emoji: 'MM',
+    color: '#ff6900',
+    desc: 'MiMo-V2-Pro / V2-Omni / V2-TTS',
+    logoPath: 'providers/xiaomi-mimo.png',
+    purchaseUrl: 'https://platform.xiaomimimo.com/',
+  },
+  {
+    id: 'xfyun',
+    name: '讯飞星火',
+    emoji: 'SF',
+    color: '#1e88e5',
+    desc: 'Spark X2 / X1.5 / Ultra / Pro',
+    logoPath: 'providers/xfyun.png',
+    purchaseUrl: 'https://xinghuo.xfyun.cn/sparkapi',
+  },
+  {
+    id: 'jdcloud',
+    name: '京东云 JoyBuilder',
+    emoji: 'JD',
+    color: '#e1251b',
+    desc: 'JoyAI-LLM / JoyAI-M3 / Coding Plan',
+    logoPath: 'providers/jdcloud.png',
+    purchaseUrl: 'https://www.jdcloud.com/cn/products/jdcloud-joybuilder',
+  },
+  {
+    id: 'ctyun',
+    name: '天翼云息壤',
+    emoji: 'CT',
+    color: '#cf0a2c',
+    desc: '息壤 Tokens · DeepSeek / Qwen / GLM 聚合',
+    logoPath: 'providers/ctyun.svg',
+    purchaseUrl: 'https://www.ctyun.cn/h5/huiju/',
+  },
+  {
+    id: 'baidu',
+    name: '百度千帆',
+    emoji: 'BD',
+    color: '#2932e1',
+    desc: 'ERNIE-4.5 / Qianfan-VL / 文心系列',
+    logoPath: 'providers/baidu.png',
+    purchaseUrl: 'https://console.bce.baidu.com/qianfan/',
+  },
+  {
+    id: 'volcengine',
+    name: '火山方舟',
+    emoji: 'VK',
+    color: '#1a73e8',
+    desc: 'Doubao-pro / Doubao-Seed / Seedance',
+    logoPath: 'providers/volcengine.png',
+    purchaseUrl: 'https://www.volcengine.com/product/ark',
+  },
+  {
+    id: 'huaweicloud',
+    name: '华为云盘古',
+    emoji: 'HW',
+    color: '#c7000b',
+    desc: 'Pangu-NLP-N4 718B / Pangu Pro MoE',
+    logoPath: 'providers/huaweicloud.png',
+    purchaseUrl: 'https://console.huaweicloud.com/modelarts/',
+  },
+  {
+    id: 'ucloud',
+    name: 'UCloud UModelVerse',
+    emoji: 'UC',
+    color: '#0052d9',
+    desc: 'DeepSeek / Qwen / 文心 / 阶跃 聚合',
+    logoPath: 'providers/ucloud.png',
+    purchaseUrl: 'https://console.ucloud.cn/modelverse',
+  },
+  {
+    id: 'infini-ai',
+    name: '无问芯穹 Infini-AI',
+    emoji: 'IA',
+    color: '#0d47a1',
+    desc: 'DeepSeek / Qwen / 20+ 模型 · 多芯异构',
+    logoPath: 'providers/infini-ai.png',
+    purchaseUrl: 'https://cloud.infini-ai.com/genstudio',
+  },
+  {
+    id: 'alaya',
+    name: '九章云极 Alaya Code',
+    emoji: 'AC',
+    color: '#ff5722',
+    desc: 'Kimi / Qwen3.5 / GLM-5 / MiniMax 聚合',
+    logoPath: 'providers/alaya.svg',
+    purchaseUrl: 'https://www.alayacode.com/',
+  },
+  {
+    id: 'mthreads',
+    name: '摩尔线程',
+    emoji: 'MT',
+    color: '#00a86b',
+    desc: '夸娥 GPU · Qwen / DeepSeek / MiniMax',
+    logoPath: 'providers/mthreads.png',
+    purchaseUrl: 'https://www.mthreads.com/',
+  },
+  {
+    id: 'kuaishou',
+    name: '快手可灵',
+    emoji: 'KS',
+    color: '#ff6633',
+    desc: '可灵 Kling V1.6 / 视频生成',
+    logoPath: 'providers/kuaishou.png',
+    purchaseUrl: 'https://klingai.kuaishou.com/',
+  },
+  {
+    id: 'trae',
+    name: 'Trae (字节)',
+    emoji: 'TR',
+    color: '#5b21b6',
+    desc: 'Trae IDE · Doubao-1.5 / DeepSeek',
+    logoPath: 'providers/trae.svg',
+    purchaseUrl: 'https://www.trae.cn/',
+  },
+  {
+    id: 'qwen-tongyi',
+    name: '阿里通义',
+    emoji: 'QY',
+    color: '#ff6a00',
+    desc: 'Qwen3.5 / Qwen3-Max / Qwen-Coder',
+    logoPath: 'providers/qwen-tongyi.png',
+    purchaseUrl: 'https://bailian.console.aliyun.com/',
+  },
 
   /* ─── 新增（2026-06）：海外 / 自建网关 ─── */
-  { id: 'github',           name: 'GitHub Models',   emoji: 'GH',  color: '#24292f', desc: 'GitHub Models · GPT-4o / o3 / Llama / Phi', logoPath: 'providers/github.svg' },
-  { id: 'new-api',          name: 'New API 网关',    emoji: 'NA',  color: '#0ea5e9', desc: '自建 LLM 网关（One-API / New-API）· OpenAI 格式聚合', logoPath: 'providers/new-api.svg' },
+  {
+    id: 'github',
+    name: 'GitHub Models',
+    emoji: 'GH',
+    color: '#24292f',
+    desc: 'GitHub Models · GPT-4o / o3 / Llama / Phi',
+    logoPath: 'providers/github.svg',
+    purchaseUrl: 'https://github.com/marketplace/models',
+  },
+  {
+    id: 'new-api',
+    name: 'New API 网关',
+    emoji: 'NA',
+    color: '#0ea5e9',
+    desc: '自建 LLM 网关（One-API / New-API）· OpenAI 格式聚合',
+    logoPath: 'providers/new-api.svg',
+  },
 
   /* ─── 多媒体模型平台（APIMart / xAI）─── */
-  { id: 'apimart',          name: 'APIMart',         emoji: 'AM',  color: '#22c55e', desc: '图片 / 语音 / 视频聚合（GPT Image / Whisper / VEO / Sora）', logoPath: 'providers/apimart.svg' },
-  { id: 'agnes-ai',         name: 'Agnes AI',        emoji: 'AG',  color: '#2563eb', desc: 'Agnes 文本 / 图片 / 视频统一接入', logoPath: 'providers/openai.svg' },
-  { id: 'xai',              name: 'xAI',             emoji: 'xA',  color: '#0f172a', desc: 'Grok Imagine 图片 / 视频 / 语音合成', logoPath: 'providers/xai.svg' },
-  { id: 'midjourney',       name: 'Midjourney',      emoji: 'MJ',  color: '#111827', desc: 'Midjourney 外部网关（非官方 HTTP API）', logoPath: 'providers/midjourney.svg' },
+  {
+    id: 'apimart',
+    name: 'APIMart',
+    emoji: 'AM',
+    color: '#22c55e',
+    desc: '图片 / 语音 / 视频聚合（GPT Image / Whisper / VEO / Sora）',
+    logoPath: 'providers/apimart.svg',
+    purchaseUrl: 'https://apimart.ai/',
+  },
+  {
+    id: 'agnes-ai',
+    name: 'Agnes AI',
+    emoji: 'AG',
+    color: '#2563eb',
+    desc: 'Agnes 文本 / 图片 / 视频统一接入',
+    logoPath: 'providers/openai.svg',
+    purchaseUrl: 'https://agnes-ai.com/',
+  },
+  {
+    id: 'xai',
+    name: 'xAI',
+    emoji: 'xA',
+    color: '#0f172a',
+    desc: 'Grok Imagine 图片 / 视频 / 语音合成',
+    logoPath: 'providers/xai.svg',
+    purchaseUrl: 'https://console.x.ai/',
+  },
+  {
+    id: 'midjourney',
+    name: 'Midjourney',
+    emoji: 'MJ',
+    color: '#111827',
+    desc: 'Midjourney 外部网关（非官方 HTTP API）',
+    logoPath: 'providers/midjourney.svg',
+    purchaseUrl: 'https://www.midjourney.com/',
+  },
 ]
 
 export const PROVIDER_PRESETS: ProviderPreset[] = [
@@ -248,9 +523,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     apiEndpoint: 'https://api.lkeap.cloud.tencent.com/coding/anthropic',
     defaultModel: 'glm-5',
     modelIds: ['glm-5'],
-    sourceUrls: [
-      'https://cloud.tencent.com/document/product/1823/130092',
-    ],
+    sourceUrls: ['https://cloud.tencent.com/document/product/1823/130092'],
   },
   // {
   //   id: 'tencent-coding-plan-openai',
@@ -272,10 +545,15 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     apiEndpoint: 'https://api.lkeap.cloud.tencent.com/coding/v3',
     codexApiKind: 'responses',
     defaultModel: 'tc-code-latest',
-    modelIds: ['tc-code-latest', 'minimax-m2.5', 'kimi-k2.5', 'glm-5', 'hunyuan-t1', 'hunyuan-turbos'],
-    sourceUrls: [
-      'https://cloud.tencent.com/document/product/1823/130092',
+    modelIds: [
+      'tc-code-latest',
+      'minimax-m2.5',
+      'kimi-k2.5',
+      'glm-5',
+      'hunyuan-t1',
+      'hunyuan-turbos',
     ],
+    sourceUrls: ['https://cloud.tencent.com/document/product/1823/130092'],
   },
 
   /* ─── 阿里云百炼 Coding Plan ─── */
@@ -315,7 +593,18 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     apiEndpoint: 'https://coding.dashscope.aliyuncs.com/v1',
     codexApiKind: 'responses',
     defaultModel: 'qwen3.7-plus',
-    modelIds: ['qwen3.7-plus', 'qwen3.6-plus', 'qwen3.5-plus', 'qwen3-coder-plus', 'qwen3-coder-next', 'qwen3-max-2026-01-23', 'glm-5', 'glm-4.7', 'kimi-k2.5', 'MiniMax-M2.5'],
+    modelIds: [
+      'qwen3.7-plus',
+      'qwen3.6-plus',
+      'qwen3.5-plus',
+      'qwen3-coder-plus',
+      'qwen3-coder-next',
+      'qwen3-max-2026-01-23',
+      'glm-5',
+      'glm-4.7',
+      'kimi-k2.5',
+      'MiniMax-M2.5',
+    ],
     sourceUrls: [
       'https://help.aliyun.com/zh/model-studio/cline',
       'https://help.aliyun.com/zh/model-studio/coding-plan-faq',
@@ -330,8 +619,8 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     name: '智谱 GLM Coding Plan',
     provider: 'anthropic',
     apiEndpoint: 'https://open.bigmodel.cn/api/anthropic',
-    defaultModel:  'glm-5.1',
-    modelIds: ['glm-4.7','glm-5-turbo', 'glm-5.1'],
+    defaultModel: 'glm-5.1',
+    modelIds: ['glm-4.7', 'glm-5-turbo', 'glm-5.1'],
     sourceUrls: [
       'https://docs.bigmodel.cn/cn/coding-plan/tool/claude',
       'https://docs.bigmodel.cn/cn/guide/develop/claude/introduction',
@@ -387,7 +676,15 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     provider: 'openai',
     apiEndpoint: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
     defaultModel: 'qwen3.7-plus',
-    modelIds: ['qwen3.7-plus', 'qwen3.6-plus', 'qwen3.5-plus', 'qwen3-coder-plus', 'qwen-plus', 'qwen-turbo', 'qwen-max'],
+    modelIds: [
+      'qwen3.7-plus',
+      'qwen3.6-plus',
+      'qwen3.5-plus',
+      'qwen3-coder-plus',
+      'qwen-plus',
+      'qwen-turbo',
+      'qwen-max',
+    ],
     sourceUrls: [
       'https://help.aliyun.com/zh/model-studio/compatibility-of-openai-with-dashscope',
       'https://help.aliyun.com/zh/model-studio/cline',
@@ -404,9 +701,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     apiEndpoint: 'https://api.deepseek.com/anthropic',
     defaultModel: 'deepseek-v4-flash',
     modelIds: ['deepseek-v4-flash', 'deepseek-v4-pro'],
-    sourceUrls: [
-      'https://api-docs.deepseek.com/quick_start/pricing',
-    ],
+    sourceUrls: ['https://api-docs.deepseek.com/quick_start/pricing'],
   },
   {
     id: 'deepseek-api-openai',
@@ -615,7 +910,15 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     apiEndpoint: 'https://ark.cn-beijing.volces.com/api/coding/v3',
     codexApiKind: 'responses',
     defaultModel: 'glm-5.2',
-    modelIds: ['glm-5.2', 'doubao-seed-1-6-250615', 'doubao-pro-32k', 'doubao-pro-256k', 'doubao-lite-32k', 'deepseek-v3-1-250821', 'kimi-k2-250711'],
+    modelIds: [
+      'glm-5.2',
+      'doubao-seed-1-6-250615',
+      'doubao-pro-32k',
+      'doubao-pro-256k',
+      'doubao-lite-32k',
+      'deepseek-v3-1-250821',
+      'kimi-k2-250711',
+    ],
     sourceUrls: [
       'https://www.volcengine.com/docs/82379/2160841',
       'https://www.volcengine.com/docs/82379/1356615',
@@ -631,9 +934,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     apiEndpoint: 'https://ark.cn-beijing.volces.com/api/coding',
     defaultModel: 'glm-5.2',
     modelIds: ['glm-5.2', 'doubao-seed-code', 'deepseek-v4-flash', 'deepseek-v4-pro'],
-    sourceUrls: [
-      'https://www.volcengine.com/docs/82379/1356615',
-    ],
+    sourceUrls: ['https://www.volcengine.com/docs/82379/1356615'],
   },
   /* 火山方舟 Doubao-Seed-2.1：标准 OpenAI 兼容端点（/api/v3）。
      Seed 2.1 是文本/多模态理解 LLM（深度思考 + 工具调用 + 图片/视频理解），
@@ -644,11 +945,13 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     name: '火山方舟 Seed 2.1',
     provider: 'openai',
     apiEndpoint: 'https://ark.cn-beijing.volces.com/api/v3',
+    codexApiKind: 'chat',
     defaultModel: 'doubao-seed-2-1-pro',
     modelIds: ['doubao-seed-2-1-pro', 'doubao-seed-2-1-turbo', 'doubao-seed-evolving'],
     modelType: 'multimodal',
     sourceUrls: [
       'https://www.volcengine.com/docs/82379/1399009',
+      'https://console.volcengine.com/ark/region:cn-beijing/docs/82379/1569618?lang=zh',
       'https://console.volcengine.com/ark/region:ark+cn-beijing/model/detail?Id=doubao-seed-2-1-pro',
       'https://console.volcengine.com/ark/region:ark+cn-beijing/model/detail?Id=doubao-seed-2-1-turbo',
     ],
@@ -678,10 +981,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     apiEndpoint: 'https://aigw-sh22.cucloud.cn/v1',
     defaultModel: 'GLM-4.7',
     modelIds: ['GLM-4.7', 'MiniMax-M2.5'],
-    sourceUrls: [
-      'https://www.cucloud.cn/product/aisp',
-      'https://www.cucloud.cn/',
-    ],
+    sourceUrls: ['https://www.cucloud.cn/product/aisp', 'https://www.cucloud.cn/'],
   },
   // {
   //   id: 'unicom-aisp-openai',
@@ -735,10 +1035,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     apiEndpoint: 'https://api.alayacode.com/coding/anthropic',
     defaultModel: 'GLM-5',
     modelIds: ['GLM-5', 'deepseek-v4-pro'],
-    sourceUrls: [
-      'https://www.datacanvas.com/',
-      'https://www.alayacode.com/',
-    ],
+    sourceUrls: ['https://www.datacanvas.com/', 'https://www.alayacode.com/'],
   },
   // {
   //   id: 'alaya-code-openai',
@@ -793,9 +1090,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     apiEndpoint: 'https://api.trae.cn/v1',
     defaultModel: 'doubao-1.5-pro',
     modelIds: ['doubao-1.5-pro', 'doubao-1.5-thinking', 'DeepSeek-V3', 'DeepSeek-R1'],
-    sourceUrls: [
-      'https://www.trae.cn/',
-    ],
+    sourceUrls: ['https://www.trae.cn/'],
   },
   // {
   //   id: 'trae-global-openai',
@@ -832,9 +1127,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     apiEndpoint: 'https://dashscope.aliyuncs.com/apps/anthropic',
     defaultModel: 'qwen3-max',
     modelIds: ['qwen3-max', 'qwen3.5-plus', 'qwen3-coder-plus', 'qwen3-235b-a22b', 'qwen3-vl-plus'],
-    sourceUrls: [
-      'https://help.aliyun.com/zh/model-studio/claude-code',
-    ],
+    sourceUrls: ['https://help.aliyun.com/zh/model-studio/claude-code'],
   },
 
   /* ════════════════════════════════════════════════════════════════ */
@@ -850,9 +1143,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     apiEndpoint: 'https://cloud.infini-ai.com/maas/coding',
     defaultModel: 'glm-5.1',
     modelIds: ['glm-5.1'],
-    sourceUrls: [
-      'https://docs.infini-ai.com/gen-studio-coding-plan/',
-    ],
+    sourceUrls: ['https://docs.infini-ai.com/gen-studio-coding-plan/'],
   },
 
   /* ─── Kimi（月之暗面，Anthropic 协议）─── */
@@ -878,13 +1169,8 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     provider: 'anthropic',
     apiEndpoint: 'https://openrouter.ai/api',
     defaultModel: 'anthropic/claude-sonnet-4',
-    modelIds: [
-      'anthropic/claude-sonnet-4',
-      'anthropic/claude-opus-4',
-    ],
-    sourceUrls: [
-      'https://openrouter.ai/docs/cookbook/coding-agents/claude-code-integration',
-    ],
+    modelIds: ['anthropic/claude-sonnet-4', 'anthropic/claude-opus-4'],
+    sourceUrls: ['https://openrouter.ai/docs/cookbook/coding-agents/claude-code-integration'],
   },
 
   /* ─── GitHub Models（OpenAI 协议；旧 models.inference.ai.azure.com 已于 2025-07 弃用）─── */
@@ -896,9 +1182,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     apiEndpoint: 'https://models.github.ai/inference',
     defaultModel: 'gpt-4o',
     modelIds: ['gpt-4o'],
-    sourceUrls: [
-      'https://docs.github.com/github-models/prototyping-with-ai-models',
-    ],
+    sourceUrls: ['https://docs.github.com/github-models/prototyping-with-ai-models'],
   },
 
   /* ─── New API / One-API 自建网关（OpenAI 协议；endpoint 由用户自建部署决定）─── */
@@ -970,18 +1254,24 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
       'video.reference_to_video',
     ],
     mediaModelRefs: [
-      { manifestId: 'agnes:agnes-image-2.0-flash', modelId: 'agnes-image-2.0-flash', enabled: true },
-      { manifestId: 'agnes:agnes-image-2.1-flash', modelId: 'agnes-image-2.1-flash', enabled: true },
+      {
+        manifestId: 'agnes:agnes-image-2.0-flash',
+        modelId: 'agnes-image-2.0-flash',
+        enabled: true,
+      },
+      {
+        manifestId: 'agnes:agnes-image-2.1-flash',
+        modelId: 'agnes-image-2.1-flash',
+        enabled: true,
+      },
       { manifestId: 'agnes:agnes-video-v2.0', modelId: 'agnes-video-v2.0', enabled: true },
     ],
     mediaDefaults: {
       image: { size: '1024x1024', responseFormat: 'url' },
       video: { aspectRatio: '16:9', durationSeconds: 5, resolution: '720p' },
-      polling: { intervalMs: 5000, timeoutMs: 900_000 },
+      polling: { intervalMs: 5000, timeoutMs: 1_800_000 },
     },
-    sourceUrls: [
-      'https://agnes-ai.com/zh-Hans/docs/overview',
-    ],
+    sourceUrls: ['https://agnes-ai.com/zh-Hans/docs/overview'],
   },
 
   /* ─── APIMart 图片（GPT Image 2）─── */
@@ -1021,28 +1311,72 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     mediaCapabilities: ['image.generate', 'image.edit'],
     mediaModelRefs: [
       { manifestId: 'apimart:gpt-image-2', modelId: 'gpt-image-2', enabled: true },
-      { manifestId: 'apimart:gpt-image-1-official', modelId: 'gpt-image-1-official', enabled: true },
-      { manifestId: 'apimart:gpt-image-1.5-official', modelId: 'gpt-image-1.5-official', enabled: true },
+      {
+        manifestId: 'apimart:gpt-image-1-official',
+        modelId: 'gpt-image-1-official',
+        enabled: true,
+      },
+      {
+        manifestId: 'apimart:gpt-image-1.5-official',
+        modelId: 'gpt-image-1.5-official',
+        enabled: true,
+      },
       { manifestId: 'apimart:wan2.7-image', modelId: 'wan2.7-image', enabled: true },
       { manifestId: 'apimart:qwen-image-2.0', modelId: 'qwen-image-2.0', enabled: true },
       { manifestId: 'apimart:qwen-image-2.0-pro', modelId: 'qwen-image-2.0-pro', enabled: true },
-      { manifestId: 'apimart:doubao-seedream-5-0-lite', modelId: 'doubao-seedream-5-0-lite', enabled: true },
-      { manifestId: 'apimart:doubao-seedream-5-0-pro', modelId: 'doubao-seedream-5-0-pro', enabled: true },
+      {
+        manifestId: 'apimart:doubao-seedream-5-0-lite',
+        modelId: 'doubao-seedream-5-0-lite',
+        enabled: true,
+      },
+      {
+        manifestId: 'apimart:doubao-seedream-5-0-pro',
+        modelId: 'doubao-seedream-5-0-pro',
+        enabled: true,
+      },
       { manifestId: 'apimart:doubao-seedream-4-0', modelId: 'doubao-seedream-4-0', enabled: true },
       { manifestId: 'apimart:doubao-seedream-4-5', modelId: 'doubao-seedream-4-5', enabled: true },
-      { manifestId: 'apimart:gemini-3.1-flash-image-preview', modelId: 'gemini-3.1-flash-image-preview', enabled: true },
-      { manifestId: 'apimart:gemini-3-pro-image-preview', modelId: 'gemini-3-pro-image-preview', enabled: true },
-      { manifestId: 'apimart:gemini-2.5-flash-image-preview', modelId: 'gemini-2.5-flash-image-preview', enabled: true },
-      { manifestId: 'apimart:gemini-2.5-flash-image-preview-official', modelId: 'gemini-2.5-flash-image-preview-official', enabled: true },
-      { manifestId: 'apimart:gemini-3-pro-image-preview-official', modelId: 'gemini-3-pro-image-preview-official', enabled: true },
-      { manifestId: 'apimart:gemini-3.1-flash-image-preview-official', modelId: 'gemini-3.1-flash-image-preview-official', enabled: true },
+      {
+        manifestId: 'apimart:gemini-3.1-flash-image-preview',
+        modelId: 'gemini-3.1-flash-image-preview',
+        enabled: true,
+      },
+      {
+        manifestId: 'apimart:gemini-3-pro-image-preview',
+        modelId: 'gemini-3-pro-image-preview',
+        enabled: true,
+      },
+      {
+        manifestId: 'apimart:gemini-2.5-flash-image-preview',
+        modelId: 'gemini-2.5-flash-image-preview',
+        enabled: true,
+      },
+      {
+        manifestId: 'apimart:gemini-2.5-flash-image-preview-official',
+        modelId: 'gemini-2.5-flash-image-preview-official',
+        enabled: true,
+      },
+      {
+        manifestId: 'apimart:gemini-3-pro-image-preview-official',
+        modelId: 'gemini-3-pro-image-preview-official',
+        enabled: true,
+      },
+      {
+        manifestId: 'apimart:gemini-3.1-flash-image-preview-official',
+        modelId: 'gemini-3.1-flash-image-preview-official',
+        enabled: true,
+      },
       { manifestId: 'apimart:imagen-4.0-apimart', modelId: 'imagen-4.0-apimart', enabled: true },
       { manifestId: 'apimart:z-image-turbo', modelId: 'z-image-turbo', enabled: true },
-      { manifestId: 'apimart:grok-imagine-1.5-apimart', modelId: 'grok-imagine-1.5-apimart', enabled: true },
+      {
+        manifestId: 'apimart:grok-imagine-1.5-apimart',
+        modelId: 'grok-imagine-1.5-apimart',
+        enabled: true,
+      },
     ],
     mediaDefaults: {
       image: { size: '1:1', n: 1, resolution: '1k', outputFormat: 'png' },
-      polling: { intervalMs: 4000, timeoutMs: 240_000 },
+      polling: { intervalMs: 4000, timeoutMs: 600_000 },
     },
     sourceUrls: [
       'https://docs.apimart.ai/cn/api-reference/images/gpt-image-2/official',
@@ -1067,9 +1401,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     mediaApiType: 'sync',
     mediaCapabilities: ['audio.transcription'],
     mediaDefaults: { audio: { language: 'zh' } },
-    sourceUrls: [
-      'https://docs.apimart.ai/cn/api-reference/audios/whisper-1',
-    ],
+    sourceUrls: ['https://docs.apimart.ai/cn/api-reference/audios/whisper-1'],
   },
 
   /* ─── APIMart 语音合成（TTS）─── */
@@ -1086,9 +1418,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     mediaApiType: 'sync',
     mediaCapabilities: ['audio.speech'],
     mediaDefaults: { audio: { voice: 'alloy', format: 'mp3', speed: 1 } },
-    sourceUrls: [
-      'https://docs.apimart.ai/cn/api-reference/audios/speech',
-    ],
+    sourceUrls: ['https://docs.apimart.ai/cn/api-reference/audios/speech'],
   },
 
   /* ─── APIMart 视频（VEO 3）─── */
@@ -1112,11 +1442,9 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     ],
     mediaDefaults: {
       video: { aspectRatio: '16:9', durationSeconds: 8, quality: 'hd' },
-      polling: { intervalMs: 6000, timeoutMs: 600_000 },
+      polling: { intervalMs: 6000, timeoutMs: 1_800_000 },
     },
-    sourceUrls: [
-      'https://docs.apimart.ai/cn/api-reference/videos/veo3/generation',
-    ],
+    sourceUrls: ['https://docs.apimart.ai/cn/api-reference/videos/veo3/generation'],
   },
 
   /* ─── APIMart 视频（Sora 2）─── */
@@ -1138,11 +1466,9 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     ],
     mediaDefaults: {
       video: { aspectRatio: '16:9', durationSeconds: 8, quality: 'hd' },
-      polling: { intervalMs: 6000, timeoutMs: 600_000 },
+      polling: { intervalMs: 6000, timeoutMs: 1_800_000 },
     },
-    sourceUrls: [
-      'https://docs.apimart.ai/cn/api-reference/videos/sora-2/generation',
-    ],
+    sourceUrls: ['https://docs.apimart.ai/cn/api-reference/videos/sora-2/generation'],
   },
 
   /* ─── APIMart 视频（Kling / Vidu / Wan / HappyHorse / SkyReels / Pixverse / Omni 等）─── */
@@ -1209,25 +1535,59 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
       { manifestId: 'apimart:skyreels-v4-fast', modelId: 'skyreels-v4-fast', enabled: true },
       { manifestId: 'apimart:skyreels-v4-std', modelId: 'skyreels-v4-std', enabled: true },
       { manifestId: 'apimart:pixverse-v6', modelId: 'pixverse-v6', enabled: true },
-      { manifestId: 'apimart:gemini-omni-flash-preview', modelId: 'gemini-omni-flash-preview', enabled: true },
+      {
+        manifestId: 'apimart:gemini-omni-flash-preview',
+        modelId: 'gemini-omni-flash-preview',
+        enabled: true,
+      },
       { manifestId: 'apimart:Omni-Flash-Ext', modelId: 'Omni-Flash-Ext', enabled: true },
-      { manifestId: 'apimart:MiniMax-Hailuo-02-apimart', modelId: 'MiniMax-Hailuo-02', enabled: true },
-      { manifestId: 'apimart:MiniMax-Hailuo-2.3-apimart', modelId: 'MiniMax-Hailuo-2.3', enabled: true },
-      { manifestId: 'apimart:grok-imagine-1.5-video-apimart', modelId: 'grok-imagine-1.5-video-apimart', enabled: true },
-      { manifestId: 'apimart:doubao-seedance-1-5-pro-apimart', modelId: 'doubao-seedance-1-5-pro', enabled: true },
-      { manifestId: 'apimart:doubao-seedance-2-0-fast-apimart', modelId: 'doubao-seedance-2-0-fast', enabled: true },
-      { manifestId: 'apimart:doubao-seedance-2-0-mini-apimart', modelId: 'doubao-seedance-2-0-mini', enabled: true },
-      { manifestId: 'apimart:doubao-seedance-1-0-pro-fast', modelId: 'doubao-seedance-1-0-pro-fast', enabled: true },
-      { manifestId: 'apimart:doubao-seedance-1-0-pro-quality', modelId: 'doubao-seedance-1-0-pro-quality', enabled: true },
+      {
+        manifestId: 'apimart:MiniMax-Hailuo-02-apimart',
+        modelId: 'MiniMax-Hailuo-02',
+        enabled: true,
+      },
+      {
+        manifestId: 'apimart:MiniMax-Hailuo-2.3-apimart',
+        modelId: 'MiniMax-Hailuo-2.3',
+        enabled: true,
+      },
+      {
+        manifestId: 'apimart:grok-imagine-1.5-video-apimart',
+        modelId: 'grok-imagine-1.5-video-apimart',
+        enabled: true,
+      },
+      {
+        manifestId: 'apimart:doubao-seedance-1-5-pro-apimart',
+        modelId: 'doubao-seedance-1-5-pro',
+        enabled: true,
+      },
+      {
+        manifestId: 'apimart:doubao-seedance-2-0-fast-apimart',
+        modelId: 'doubao-seedance-2-0-fast',
+        enabled: true,
+      },
+      {
+        manifestId: 'apimart:doubao-seedance-2-0-mini-apimart',
+        modelId: 'doubao-seedance-2-0-mini',
+        enabled: true,
+      },
+      {
+        manifestId: 'apimart:doubao-seedance-1-0-pro-fast',
+        modelId: 'doubao-seedance-1-0-pro-fast',
+        enabled: true,
+      },
+      {
+        manifestId: 'apimart:doubao-seedance-1-0-pro-quality',
+        modelId: 'doubao-seedance-1-0-pro-quality',
+        enabled: true,
+      },
       { manifestId: 'apimart:doubao-seedance-2.0', modelId: 'doubao-seedance-2.0', enabled: true },
     ],
     mediaDefaults: {
       video: { aspectRatio: '16:9', durationSeconds: 5, resolution: '720p' },
-      polling: { intervalMs: 6000, timeoutMs: 600_000 },
+      polling: { intervalMs: 6000, timeoutMs: 1_800_000 },
     },
-    sourceUrls: [
-      'https://docs.apimart.ai/cn/api-reference/videos',
-    ],
+    sourceUrls: ['https://docs.apimart.ai/cn/api-reference/videos'],
   },
 
   /* ─── xAI 图片（Grok Imagine）─── */
@@ -1238,7 +1598,12 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     provider: 'openai',
     apiEndpoint: 'https://api.x.ai/v1',
     defaultModel: 'grok-imagine-image-quality',
-    modelIds: ['grok-imagine-image-quality', 'grok-imagine-image-quality-latest', 'grok-imagine-image-pro', 'grok-imagine-image'],
+    modelIds: [
+      'grok-imagine-image-quality',
+      'grok-imagine-image-quality-latest',
+      'grok-imagine-image-pro',
+      'grok-imagine-image',
+    ],
     modelType: 'image',
     imageProvider: 'xai',
     imageApiType: 'sync',
@@ -1246,12 +1611,16 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     mediaApiType: 'sync',
     mediaCapabilities: ['image.generate', 'image.edit'],
     mediaModelRefs: [
-      { manifestId: 'xai:grok-imagine-image', modelId: 'grok-imagine-image-quality', enabled: true },
+      {
+        manifestId: 'xai:grok-imagine-image',
+        modelId: 'grok-imagine-image-quality',
+        enabled: true,
+      },
     ],
-    mediaDefaults: { image: { aspectRatio: '1:1', n: 1, outputFormat: 'png', responseFormat: 'url' } },
-    sourceUrls: [
-      'https://docs.x.ai/developers/model-capabilities/imagine',
-    ],
+    mediaDefaults: {
+      image: { aspectRatio: '1:1', n: 1, responseFormat: 'url' },
+    },
+    sourceUrls: ['https://docs.x.ai/developers/model-capabilities/imagine'],
   },
 
   /* ─── xAI 视频（Imagine Video）─── */
@@ -1262,17 +1631,43 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     provider: 'openai',
     apiEndpoint: 'https://api.x.ai/v1',
     defaultModel: 'grok-imagine-video',
-    modelIds: ['grok-imagine-video'],
+    modelIds: [
+      'grok-imagine-video-1.5',
+      'grok-imagine-video',
+      'grok-imagine-video-1.5-preview',
+      'grok-imagine-video-1.5-2026-05-30',
+    ],
     modelType: 'video',
     mediaProvider: 'xai',
     mediaApiType: 'async',
-    mediaCapabilities: ['video.generate', 'video.image_to_video', 'video.reference_to_video', 'video.edit', 'video.extend'],
+    mediaCapabilities: [
+      'video.generate',
+      'video.image_to_video',
+      'video.reference_to_video',
+      'video.edit',
+      'video.extend',
+    ],
     mediaModelRefs: [
+      {
+        manifestId: 'xai:grok-imagine-video-1.5',
+        modelId: 'grok-imagine-video-1.5',
+        enabled: true,
+      },
       { manifestId: 'xai:grok-imagine-video', modelId: 'grok-imagine-video', enabled: true },
+      {
+        manifestId: 'xai:grok-imagine-video-1.5-preview',
+        modelId: 'grok-imagine-video-1.5-preview',
+        enabled: true,
+      },
+      {
+        manifestId: 'xai:grok-imagine-video-1.5-2026-05-30',
+        modelId: 'grok-imagine-video-1.5-2026-05-30',
+        enabled: true,
+      },
     ],
     mediaDefaults: {
       video: { aspectRatio: '16:9', durationSeconds: 8, resolution: '720p' },
-      polling: { intervalMs: 5000, timeoutMs: 600_000 },
+      polling: { intervalMs: 5000, timeoutMs: 1_800_000 },
     },
     sourceUrls: [
       'https://docs.x.ai/developers/model-capabilities/video/generation',
@@ -1289,21 +1684,22 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     provider: 'openai',
     apiEndpoint: 'https://dashscope.aliyuncs.com/api/v1/services/aigc',
     defaultModel: 'wan2.7-image-pro',
-    modelIds: ['wan2.7-image-pro', 'wan2.7-image'],
+    modelIds: ['wan2.7-image-pro', 'wan2.7-image', 'qwen-image-2.0-pro', 'qwen-image-2.0'],
     modelType: 'image',
     mediaProvider: 'bailian',
     mediaApiType: 'async',
     mediaCapabilities: ['image.generate', 'image.edit'],
     mediaModelRefs: [
       { manifestId: 'bailian:wan2.7-image-pro', modelId: 'wan2.7-image-pro', enabled: true },
+      { manifestId: 'bailian:wan2.7-image', modelId: 'wan2.7-image', enabled: true },
+      { manifestId: 'bailian:qwen-image-2.0-pro', modelId: 'qwen-image-2.0-pro', enabled: true },
+      { manifestId: 'bailian:qwen-image-2.0', modelId: 'qwen-image-2.0', enabled: true },
     ],
     mediaDefaults: {
-      image: { size: '1:1', resolution: '2K', n: 1, outputFormat: 'png' },
+      image: { size: '2K', n: 1 },
       polling: { intervalMs: 5000, timeoutMs: 600_000 },
     },
-    sourceUrls: [
-      'https://bailian.console.aliyun.com/cn-beijing/?tab=model#/model-market',
-    ],
+    sourceUrls: ['https://bailian.console.aliyun.com/cn-beijing/?tab=model#/model-market'],
   },
   {
     id: 'bailian-video-happyhorse',
@@ -1330,11 +1726,15 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
       { manifestId: 'bailian:happyhorse-1.1-i2v', modelId: 'happyhorse-1.1-i2v', enabled: true },
       { manifestId: 'bailian:happyhorse-1.0-i2v', modelId: 'happyhorse-1.0-i2v', enabled: true },
       { manifestId: 'bailian:happyhorse-1.1-r2v', modelId: 'happyhorse-1.1-r2v', enabled: true },
-      { manifestId: 'bailian:happyhorse-1.0-video-edit', modelId: 'happyhorse-1.0-video-edit', enabled: true },
+      {
+        manifestId: 'bailian:happyhorse-1.0-video-edit',
+        modelId: 'happyhorse-1.0-video-edit',
+        enabled: true,
+      },
     ],
     mediaDefaults: {
       video: { resolution: '1080P', durationSeconds: 5 },
-      polling: { intervalMs: 15000, timeoutMs: 600_000 },
+      polling: { intervalMs: 15000, timeoutMs: 1_800_000 },
     },
     sourceUrls: [
       'https://help.aliyun.com/zh/model-studio/happyhorse-text-to-video-api-reference',
@@ -1349,25 +1749,41 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     name: '阿里云百炼 Wan 视频',
     provider: 'openai',
     apiEndpoint: 'https://dashscope.aliyuncs.com/api/v1/services/aigc',
-    defaultModel: 'wan2.7-t2v',
-    modelIds: ['wan2.7-t2v', 'wan2.7-i2v-2026-04-25', 'wan2.7-r2v', 'wan2.7-videoedit'],
+    defaultModel: 'wan2.7-t2v-2026-06-12',
+    modelIds: [
+      'wan2.7-t2v-2026-06-12',
+      'wan2.7-i2v-2026-04-25',
+      'wan2.7-r2v-2026-06-12',
+      'wan2.7-videoedit',
+    ],
     modelType: 'video',
     mediaProvider: 'bailian',
     mediaApiType: 'async',
-    mediaCapabilities: ['video.generate', 'video.image_to_video', 'video.edit'],
+    mediaCapabilities: [
+      'video.generate',
+      'video.image_to_video',
+      'video.reference_to_video',
+      'video.edit',
+    ],
     mediaModelRefs: [
-      { manifestId: 'bailian:wan2.7-t2v', modelId: 'wan2.7-t2v', enabled: true },
-      { manifestId: 'bailian:wan2.7-i2v-2026-04-25', modelId: 'wan2.7-i2v-2026-04-25', enabled: true },
-      { manifestId: 'bailian:wan2.7-r2v', modelId: 'wan2.7-r2v', enabled: true },
+      { manifestId: 'bailian:wan2.7-t2v', modelId: 'wan2.7-t2v-2026-06-12', enabled: true },
+      {
+        manifestId: 'bailian:wan2.7-i2v-2026-04-25',
+        modelId: 'wan2.7-i2v-2026-04-25',
+        enabled: true,
+      },
+      { manifestId: 'bailian:wan2.7-r2v', modelId: 'wan2.7-r2v-2026-06-12', enabled: true },
       { manifestId: 'bailian:wan2.7-videoedit', modelId: 'wan2.7-videoedit', enabled: true },
     ],
     mediaDefaults: {
       video: { resolution: '1080P', durationSeconds: 5, watermark: false },
-      polling: { intervalMs: 15000, timeoutMs: 600_000 },
+      polling: { intervalMs: 15000, timeoutMs: 1_800_000 },
     },
     sourceUrls: [
-      'https://help.aliyun.com/zh/model-studio/wan-image-to-video-guide',
-      'https://help.aliyun.com/zh/model-studio/text-to-video-guide',
+      'https://help.aliyun.com/zh/model-studio/text-to-video-api-reference',
+      'https://help.aliyun.com/zh/model-studio/image-to-video-general-api-reference',
+      'https://help.aliyun.com/zh/model-studio/wan-reference-to-video-api-reference',
+      'https://help.aliyun.com/zh/model-studio/wan-video-editing-api-reference',
     ],
   },
   {
@@ -1386,9 +1802,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
       { manifestId: 'bailian:qwen3-tts-flash', modelId: 'qwen3-tts-flash', enabled: true },
     ],
     mediaDefaults: { audio: { voice: 'default', format: 'mp3', speed: 1 } },
-    sourceUrls: [
-      'https://bailian.console.aliyun.com/cn-beijing/?tab=model#/model-market',
-    ],
+    sourceUrls: ['https://bailian.console.aliyun.com/cn-beijing/?tab=model#/model-market'],
   },
 
   /* ─── 火山方舟视频（Seedance 2.0 / 2.0 Fast / 2.0 Mini / 1.5 Pro / 1.0 Pro / 1.0 Pro Fast）─── */
@@ -1413,14 +1827,44 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     modelType: 'video',
     mediaProvider: 'volcengine-ark',
     mediaApiType: 'async',
-    mediaCapabilities: ['video.generate', 'video.image_to_video', 'video.edit', 'video.extend'],
+    mediaCapabilities: [
+      'video.generate',
+      'video.image_to_video',
+      'video.reference_to_video',
+      'video.edit',
+      'video.extend',
+    ],
     mediaModelRefs: [
-      { manifestId: 'volcengine:doubao-seedance-2-0-260128', modelId: 'doubao-seedance-2-0-260128', enabled: true },
-      { manifestId: 'volcengine:doubao-seedance-2-0-fast-260128', modelId: 'doubao-seedance-2-0-fast-260128', enabled: true },
-      { manifestId: 'volcengine:doubao-seedance-2-0-mini-260615', modelId: 'doubao-seedance-2-0-mini-260615', enabled: true },
-      { manifestId: 'volcengine:doubao-seedance-1-5-pro-251215', modelId: 'doubao-seedance-1-5-pro-251215', enabled: true },
-      { manifestId: 'volcengine:doubao-seedance-1-0-pro-250528', modelId: 'doubao-seedance-1-0-pro-250528', enabled: true },
-      { manifestId: 'volcengine:doubao-seedance-1-0-pro-fast-251015', modelId: 'doubao-seedance-1-0-pro-fast-251015', enabled: true },
+      {
+        manifestId: 'volcengine:doubao-seedance-2-0-260128',
+        modelId: 'doubao-seedance-2-0-260128',
+        enabled: true,
+      },
+      {
+        manifestId: 'volcengine:doubao-seedance-2-0-fast-260128',
+        modelId: 'doubao-seedance-2-0-fast-260128',
+        enabled: true,
+      },
+      {
+        manifestId: 'volcengine:doubao-seedance-2-0-mini-260615',
+        modelId: 'doubao-seedance-2-0-mini-260615',
+        enabled: true,
+      },
+      {
+        manifestId: 'volcengine:doubao-seedance-1-5-pro-251215',
+        modelId: 'doubao-seedance-1-5-pro-251215',
+        enabled: true,
+      },
+      {
+        manifestId: 'volcengine:doubao-seedance-1-0-pro-250528',
+        modelId: 'doubao-seedance-1-0-pro-250528',
+        enabled: true,
+      },
+      {
+        manifestId: 'volcengine:doubao-seedance-1-0-pro-fast-251015',
+        modelId: 'doubao-seedance-1-0-pro-fast-251015',
+        enabled: true,
+      },
     ],
     mediaDefaults: {
       video: { aspectRatio: '智能比例', durationSeconds: 5, resolution: '720p' },
@@ -1433,18 +1877,17 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     ],
   },
 
-  /* ─── 火山方舟图片（Seedream 4.0 / 4.5 / 5.0 / 5.0 lite）─── */
+  /* ─── 火山方舟图片（Seedream 4.0 / 4.5 / 5.0 Lite / 5.0 Pro）─── */
   {
     id: 'volcengine-seedream-image',
     vendorId: 'volcengine',
     name: '火山方舟 Seedream 图片',
     provider: 'openai',
     apiEndpoint: 'https://ark.cn-beijing.volces.com/api/v3',
-    // 默认 5.0：最新主模型，支持 png 输出 + 组图，最省心。
-    // 5.0 lite（doubao-seedream-5-0-lite-260128）是更便宜、更快的版本，
-    // 额外支持联网搜索 + 深度推理；需要这些能力时切到 lite。
-    defaultModel: 'doubao-seedream-5-0-260128',
+    // 默认最新的 5.0 Pro；需要组图、流式或联网搜索时切到 5.0 Lite。
+    defaultModel: 'doubao-seedream-5-0-pro-260628',
     modelIds: [
+      'doubao-seedream-5-0-pro-260628',
       'doubao-seedream-5-0-260128',
       'doubao-seedream-5-0-lite-260128',
       'doubao-seedream-4-5-251128',
@@ -1457,19 +1900,39 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     mediaApiType: 'sync',
     mediaCapabilities: ['image.generate', 'image.edit'],
     mediaModelRefs: [
-      { manifestId: 'volcengine:doubao-seedream-5-0-260128', modelId: 'doubao-seedream-5-0-260128', enabled: true },
-      { manifestId: 'volcengine:doubao-seedream-5-0-lite-260128', modelId: 'doubao-seedream-5-0-lite-260128', enabled: true },
-      { manifestId: 'volcengine:doubao-seedream-4-5-251128', modelId: 'doubao-seedream-4-5-251128', enabled: true },
-      { manifestId: 'volcengine:doubao-seedream-4-0-250828', modelId: 'doubao-seedream-4-0-250828', enabled: true },
+      {
+        manifestId: 'volcengine:doubao-seedream-5-0-pro-260628',
+        modelId: 'doubao-seedream-5-0-pro-260628',
+        enabled: true,
+      },
+      {
+        manifestId: 'volcengine:doubao-seedream-5-0-260128',
+        modelId: 'doubao-seedream-5-0-260128',
+        enabled: true,
+      },
+      {
+        manifestId: 'volcengine:doubao-seedream-5-0-lite-260128',
+        modelId: 'doubao-seedream-5-0-lite-260128',
+        enabled: true,
+      },
+      {
+        manifestId: 'volcengine:doubao-seedream-4-5-251128',
+        modelId: 'doubao-seedream-4-5-251128',
+        enabled: true,
+      },
+      {
+        manifestId: 'volcengine:doubao-seedream-4-0-250828',
+        modelId: 'doubao-seedream-4-0-250828',
+        enabled: true,
+      },
     ],
     mediaDefaults: {
-      // output_format / response_format 仅 5.0 系列支持；adapter 已按 manifest schema
-      // 网关过滤，4.0/4.5 即使收到该默认值也不会透传给平台（避免 HTTP 400）。
-      // 这里给 5.0 系列兜底 jpeg（默认值，最稳）。
-      image: { resolution: '2K', outputFormat: 'jpeg', responseFormat: 'url' },
+      // output_format 仅 5.0 Pro/Lite 支持；adapter 按 manifest schema 过滤。
+      image: { size: '2K', outputFormat: 'jpeg', responseFormat: 'url' },
     },
     sourceUrls: [
       'https://www.volcengine.com/docs/82379/1541523',
+      'https://console.volcengine.com/ark/region:cn-beijing/docs/82379/2582774?lang=zh',
       'https://console.volcengine.com/ark/region:ark+cn-beijing/model/detail?Id=doubao-seedream-5-0',
       'https://console.volcengine.com/ark/region:ark+cn-beijing/model/detail?Id=doubao-seedream-5-0-lite',
       'https://console.volcengine.com/ark/region:ark+cn-beijing/model/detail?Id=doubao-seedream-4-5',
@@ -1490,10 +1953,9 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     mediaProvider: 'xai',
     mediaApiType: 'sync',
     mediaCapabilities: ['audio.speech'],
-    mediaDefaults: { audio: { voice: 'alloy', format: 'mp3', speed: 1 } },
-    sourceUrls: [
-      'https://docs.x.ai/developers/model-capabilities/audio/text-to-speech',
-    ],
+    mediaModelRefs: [{ manifestId: 'xai:grok-tts', modelId: 'grok-tts', enabled: true }],
+    mediaDefaults: { audio: { voice: 'eve', format: 'mp3', speed: 1 } },
+    sourceUrls: ['https://docs.x.ai/developers/model-capabilities/audio/text-to-speech'],
   },
 
   /* ─── Google Gemini / Veo / Omni ─── */
@@ -1504,7 +1966,12 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     provider: 'openai',
     apiEndpoint: 'https://generativelanguage.googleapis.com/v1beta',
     defaultModel: 'gemini-3.1-flash-image',
-    modelIds: ['gemini-3.1-flash-image', 'gemini-3.1-flash-lite-image', 'gemini-3-pro-image', 'gemini-2.5-flash-image'],
+    modelIds: [
+      'gemini-3.1-flash-image',
+      'gemini-3.1-flash-lite-image',
+      'gemini-3-pro-image',
+      'gemini-2.5-flash-image',
+    ],
     modelType: 'image',
     imageProvider: 'gemini',
     imageApiType: 'sync',
@@ -1512,15 +1979,25 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     mediaApiType: 'sync',
     mediaCapabilities: ['image.generate', 'image.edit'],
     mediaModelRefs: [
-      { manifestId: 'google:gemini-3.1-flash-image', modelId: 'gemini-3.1-flash-image', enabled: true },
-      { manifestId: 'google:gemini-3.1-flash-lite-image', modelId: 'gemini-3.1-flash-lite-image', enabled: true },
+      {
+        manifestId: 'google:gemini-3.1-flash-image',
+        modelId: 'gemini-3.1-flash-image',
+        enabled: true,
+      },
+      {
+        manifestId: 'google:gemini-3.1-flash-lite-image',
+        modelId: 'gemini-3.1-flash-lite-image',
+        enabled: true,
+      },
       { manifestId: 'google:gemini-3-pro-image', modelId: 'gemini-3-pro-image', enabled: true },
-      { manifestId: 'google:gemini-2.5-flash-image', modelId: 'gemini-2.5-flash-image', enabled: true },
+      {
+        manifestId: 'google:gemini-2.5-flash-image',
+        modelId: 'gemini-2.5-flash-image',
+        enabled: true,
+      },
     ],
     mediaDefaults: { image: { resolution: '1K', outputFormat: 'png', n: 1 } },
-    sourceUrls: [
-      'https://ai.google.dev/gemini-api/docs/image-generation',
-    ],
+    sourceUrls: ['https://ai.google.dev/gemini-api/docs/image-generation'],
   },
   {
     id: 'google-veo-video',
@@ -1541,9 +2018,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
       video: { aspectRatio: '16:9', durationSeconds: 8, resolution: '720p' },
       polling: { intervalMs: 10000, timeoutMs: 1_800_000 },
     },
-    sourceUrls: [
-      'https://ai.google.dev/gemini-api/docs/veo',
-    ],
+    sourceUrls: ['https://ai.google.dev/gemini-api/docs/veo'],
   },
   {
     id: 'google-omni-video',
@@ -1558,15 +2033,17 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     mediaApiType: 'async',
     mediaCapabilities: ['video.generate', 'video.image_to_video', 'video.edit'],
     mediaModelRefs: [
-      { manifestId: 'omni:gemini-omni-flash-preview', modelId: 'gemini-omni-flash-preview', enabled: true },
+      {
+        manifestId: 'omni:gemini-omni-flash-preview',
+        modelId: 'gemini-omni-flash-preview',
+        enabled: true,
+      },
     ],
     mediaDefaults: {
       video: { aspectRatio: '16:9', durationSeconds: 6, resolution: '720p' },
       polling: { intervalMs: 10000, timeoutMs: 1_800_000 },
     },
-    sourceUrls: [
-      'https://ai.google.dev/gemini-api/docs/models/gemini-omni-flash',
-    ],
+    sourceUrls: ['https://ai.google.dev/gemini-api/docs/models/gemini-omni-flash'],
   },
 
   /* ─── Midjourney 外部网关 ─── */
@@ -1582,17 +2059,12 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     mediaProvider: 'midjourney',
     mediaApiType: 'async',
     mediaCapabilities: ['image.generate', 'image.edit', 'image.variations'],
-    mediaModelRefs: [
-      { manifestId: 'midjourney:gateway', modelId: 'midjourney', enabled: true },
-    ],
+    mediaModelRefs: [{ manifestId: 'midjourney:gateway', modelId: 'midjourney', enabled: true }],
     mediaDefaults: {
       image: { aspectRatio: '1:1', n: 1 },
       polling: { intervalMs: 5000, timeoutMs: 900_000 },
     },
-    sourceUrls: [
-      'https://docs.midjourney.com/',
-      'https://www.midjourney.com/',
-    ],
+    sourceUrls: ['https://docs.midjourney.com/', 'https://www.midjourney.com/'],
   },
 
   /* ─── Kling 视频 ─── */
@@ -1603,7 +2075,14 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     provider: 'openai',
     apiEndpoint: 'https://api.klingai.com',
     defaultModel: 'kling-video-3.0',
-    modelIds: ['kling-video-3.0', 'kling-video-3.0-omni', 'kling-v2.6-pro', 'kling-v2.6-std', 'kling-v2.5-turbo', 'kling-video-o1'],
+    modelIds: [
+      'kling-video-3.0',
+      'kling-video-3.0-omni',
+      'kling-v2.6-pro',
+      'kling-v2.6-std',
+      'kling-v2.5-turbo',
+      'kling-video-o1',
+    ],
     modelType: 'video',
     mediaProvider: 'kling',
     mediaApiType: 'async',
@@ -1618,11 +2097,9 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     ],
     mediaDefaults: {
       video: { aspectRatio: '16:9', durationSeconds: 5 },
-      polling: { intervalMs: 5000, timeoutMs: 1_200_000 },
+      polling: { intervalMs: 5000, timeoutMs: 1_800_000 },
     },
-    sourceUrls: [
-      'https://klingapi.com/zh/docs/text-to-video',
-    ],
+    sourceUrls: ['https://klingapi.com/zh/docs/text-to-video'],
   },
 
   /* ─── MiniMax 图片 ─── */
@@ -1640,13 +2117,9 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     mediaProvider: 'minimax-hailuo',
     mediaApiType: 'sync',
     mediaCapabilities: ['image.generate'],
-    mediaModelRefs: [
-      { manifestId: 'minimax:image-01', modelId: 'image-01', enabled: true },
-    ],
+    mediaModelRefs: [{ manifestId: 'minimax:image-01', modelId: 'image-01', enabled: true }],
     mediaDefaults: { image: { aspectRatio: '1:1', n: 1, responseFormat: 'url' } },
-    sourceUrls: [
-      'https://platform.minimaxi.com/document/image_generation',
-    ],
+    sourceUrls: ['https://platform.minimaxi.com/document/image_generation'],
   },
 
   /* ─── MiniMax 语音 ─── */
@@ -1667,9 +2140,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
       { manifestId: 'minimax:speech-2.8-hd', modelId: 'speech-2.8-hd', enabled: true },
     ],
     mediaDefaults: { audio: { format: 'mp3', speed: 1 } },
-    sourceUrls: [
-      'https://platform.minimaxi.com/document/text-to-speech',
-    ],
+    sourceUrls: ['https://platform.minimaxi.com/document/text-to-speech'],
   },
 
   /* ─── MiniMax Hailuo 视频 ─── */
@@ -1690,11 +2161,9 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     ],
     mediaDefaults: {
       video: { durationSeconds: 6, resolution: '768P' },
-      polling: { intervalMs: 5000, timeoutMs: 1_200_000 },
+      polling: { intervalMs: 5000, timeoutMs: 1_800_000 },
     },
-    sourceUrls: [
-      'https://platform.minimaxi.com/document/video_generation',
-    ],
+    sourceUrls: ['https://platform.minimaxi.com/document/video_generation'],
   },
 ]
 

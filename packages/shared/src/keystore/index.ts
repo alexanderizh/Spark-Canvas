@@ -1,15 +1,15 @@
 /**
  * @module keystore
  *
- * Spark Agent 凭证存储模块 — 唯一合法的 keytar 调用入口。
+ * Spark Canvas 凭证存储模块 — 唯一合法的 keytar 调用入口。
  * macOS 敏感凭据集中存入一个 vault，并可由桌面端注入加密应用存储，
  * 避免按 Provider 条目或每次启动重复请求 Keychain 授权。
  */
 
 import keytar from 'keytar'
 import { createLogger } from '../logger/index.js'
+import { KEYCHAIN_SERVICE } from '../constants/index.js'
 
-const SERVICE_PREFIX = 'spark-agent'
 const VAULT_ACCOUNT = 'credential-vault-v1'
 const VAULT_VERSION = 1
 const USE_CONSOLIDATED_VAULT = process.platform === 'darwin'
@@ -62,13 +62,14 @@ function parseVault(raw: string | null): CredentialVault {
   if (!raw) return emptyVault()
   const parsed = JSON.parse(raw) as Partial<CredentialVault>
   if (parsed.version !== VAULT_VERSION || !parsed.secrets || typeof parsed.secrets !== 'object') {
-    throw new Error('Unsupported or invalid Spark Agent credential vault')
+    throw new Error('Unsupported or invalid Spark Canvas credential vault')
   }
   return {
     version: VAULT_VERSION,
     secrets: Object.fromEntries(
-      Object.entries(parsed.secrets).filter((entry): entry is [string, string] =>
-        typeof entry[1] === 'string'),
+      Object.entries(parsed.secrets).filter(
+        (entry): entry is [string, string] => typeof entry[1] === 'string',
+      ),
     ),
     legacyChecked: Array.isArray(parsed.legacyChecked)
       ? parsed.legacyChecked.filter((value): value is string => typeof value === 'string')
@@ -86,7 +87,7 @@ async function readVaultFromPersistenceOrKeychain(): Promise<CredentialVault> {
     if (persisted != null) return parseVault(persisted)
   }
 
-  const vault = parseVault(await keytar.getPassword(SERVICE_PREFIX, VAULT_ACCOUNT))
+  const vault = parseVault(await keytar.getPassword(KEYCHAIN_SERVICE, VAULT_ACCOUNT))
   // Keychain 只作为加密应用存储尚未建立时的一次性导入源。导入完成后，
   // 后续启动直接读取应用存储，避免开发包/签名变化反复触发 macOS 授权。
   if (vaultPersistence) {
@@ -117,7 +118,7 @@ async function persistVault(vault: CredentialVault): Promise<void> {
   if (vaultPersistence) {
     await vaultPersistence.save(serializeVault(vault))
   } else {
-    await keytar.setPassword(SERVICE_PREFIX, VAULT_ACCOUNT, serializeVault(vault))
+    await keytar.setPassword(KEYCHAIN_SERVICE, VAULT_ACCOUNT, serializeVault(vault))
   }
   vaultCache = vault
 }
@@ -133,11 +134,11 @@ function mutateVault(operation: (vault: CredentialVault) => Promise<void>): Prom
 export async function setSecret(ref: KeystoreRef, secret: string): Promise<void> {
   if (!USE_CONSOLIDATED_VAULT) {
     if (directSecretCache.has(ref) && directSecretCache.get(ref) === secret) return
-    await keytar.setPassword(SERVICE_PREFIX, ref, secret)
+    await keytar.setPassword(KEYCHAIN_SERVICE, ref, secret)
     directSecretCache.set(ref, secret)
     return
   }
-  await mutateVault(async vault => {
+  await mutateVault(async (vault) => {
     if (vault.secrets[ref] === secret && vault.legacyChecked.includes(ref)) return
     vault.secrets[ref] = secret
     if (!vault.legacyChecked.includes(ref)) vault.legacyChecked.push(ref)
@@ -150,7 +151,7 @@ export async function getSecret(ref: KeystoreRef): Promise<string | null> {
     if (directSecretCache.has(ref)) return directSecretCache.get(ref) ?? null
     const pending = directPendingReads.get(ref)
     if (pending) return pending
-    const read = keytar.getPassword(SERVICE_PREFIX, ref)
+    const read = keytar.getPassword(KEYCHAIN_SERVICE, ref)
     directPendingReads.set(ref, read)
     try {
       const secret = await read
@@ -167,12 +168,12 @@ export async function getSecret(ref: KeystoreRef): Promise<string | null> {
   // 兼容升级前每个 ref 一个 Keychain 条目的布局。首次读取后写入集中 vault；
   // 旧条目保留但不再访问，避免删除动作再次触发系统授权窗口。
   let migrated: string | null = null
-  await mutateVault(async current => {
+  await mutateVault(async (current) => {
     if (Object.hasOwn(current.secrets, ref) || current.legacyChecked.includes(ref)) {
       migrated = current.secrets[ref] ?? null
       return
     }
-    migrated = await keytar.getPassword(SERVICE_PREFIX, ref)
+    migrated = await keytar.getPassword(KEYCHAIN_SERVICE, ref)
     if (migrated != null) current.secrets[ref] = migrated
     current.legacyChecked.push(ref)
     await persistVault(current)
@@ -182,19 +183,19 @@ export async function getSecret(ref: KeystoreRef): Promise<string | null> {
 
 export async function deleteSecret(ref: KeystoreRef): Promise<boolean> {
   if (!USE_CONSOLIDATED_VAULT) {
-    const deleted = await keytar.deletePassword(SERVICE_PREFIX, ref)
+    const deleted = await keytar.deletePassword(KEYCHAIN_SERVICE, ref)
     directSecretCache.delete(ref)
     return deleted
   }
   let deleted = false
-  await mutateVault(async vault => {
+  await mutateVault(async (vault) => {
     deleted = Object.hasOwn(vault.secrets, ref)
     delete vault.secrets[ref]
     if (!vault.legacyChecked.includes(ref)) vault.legacyChecked.push(ref)
     await persistVault(vault)
   })
   // 自动迁移阶段保留旧条目以免额外弹窗；用户显式删除/退出时必须真正清理。
-  const legacyDeleted = await keytar.deletePassword(SERVICE_PREFIX, ref)
+  const legacyDeleted = await keytar.deletePassword(KEYCHAIN_SERVICE, ref)
   return deleted || legacyDeleted
 }
 
@@ -213,7 +214,7 @@ export async function preloadSecrets(refs: readonly KeystoreRef[]): Promise<void
     await loadVault()
     return
   }
-  await Promise.all(refs.map(ref => getSecret(ref)))
+  await Promise.all(refs.map((ref) => getSecret(ref)))
 }
 
 /**

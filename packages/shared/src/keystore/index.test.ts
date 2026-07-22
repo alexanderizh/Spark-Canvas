@@ -22,14 +22,17 @@ vi.mock('../logger/index.js', () => ({
 
 vi.mock('keytar', () => ({
   default: {
-    getPassword: vi.fn(async (service: string, account: string) =>
-      mocks.credentials.get(`${service}:${account}`) ?? null),
+    getPassword: vi.fn(
+      async (service: string, account: string) =>
+        mocks.credentials.get(`${service}:${account}`) ?? null,
+    ),
     setPassword: vi.fn(async (service: string, account: string, password: string) => {
       if (mocks.setPasswordError) throw mocks.setPasswordError
       mocks.credentials.set(`${service}:${account}`, password)
     }),
     deletePassword: vi.fn(async (service: string, account: string) =>
-      mocks.credentials.delete(`${service}:${account}`)),
+      mocks.credentials.delete(`${service}:${account}`),
+    ),
   },
 }))
 
@@ -52,21 +55,24 @@ describe.runIf(process.platform === 'darwin')('consolidated credential vault', (
     await keystore.setSecret('anthropic-1' as KeystoreRef, 'sk-two')
 
     expect(keytar.setPassword).toHaveBeenLastCalledWith(
-      'spark-agent',
+      'spark-canvas',
       'credential-vault-v1',
       expect.stringContaining('sk-two'),
     )
-    expect([...mocks.credentials.keys()]).toEqual(['spark-agent:credential-vault-v1'])
+    expect([...mocks.credentials.keys()]).toEqual(['spark-canvas:credential-vault-v1'])
   })
 
   it('loads the vault only once for concurrent startup preloads', async () => {
     const keytar = (await import('keytar')).default
     const keystore = await import('./index')
-    mocks.credentials.set('spark-agent:credential-vault-v1', JSON.stringify({
-      version: 1,
-      secrets: { 'openai-1': 'sk-one', 'anthropic-1': 'sk-two' },
-      legacyChecked: ['openai-1', 'anthropic-1'],
-    }))
+    mocks.credentials.set(
+      'spark-canvas:credential-vault-v1',
+      JSON.stringify({
+        version: 1,
+        secrets: { 'openai-1': 'sk-one', 'anthropic-1': 'sk-two' },
+        legacyChecked: ['openai-1', 'anthropic-1'],
+      }),
+    )
     await keystore.preloadSecrets(['openai-1', 'anthropic-1'] as KeystoreRef[])
     expect(keytar.getPassword).toHaveBeenCalledTimes(1)
   })
@@ -78,18 +84,21 @@ describe.runIf(process.platform === 'darwin')('consolidated credential vault', (
     await keystore.preloadSecrets(['openai-legacy', 'anthropic-legacy'] as KeystoreRef[])
 
     expect(keytar.getPassword).toHaveBeenCalledOnce()
-    expect(keytar.getPassword).toHaveBeenCalledWith('spark-agent', 'credential-vault-v1')
+    expect(keytar.getPassword).toHaveBeenCalledWith('spark-canvas', 'credential-vault-v1')
     expect(keytar.setPassword).not.toHaveBeenCalled()
   })
 
   it('imports the keychain vault into encrypted app persistence once', async () => {
     const keytar = (await import('keytar')).default
     const keystore = await import('./index')
-    mocks.credentials.set('spark-agent:credential-vault-v1', JSON.stringify({
-      version: 1,
-      secrets: { 'openai-1': 'sk-one' },
-      legacyChecked: ['openai-1'],
-    }))
+    mocks.credentials.set(
+      'spark-canvas:credential-vault-v1',
+      JSON.stringify({
+        version: 1,
+        secrets: { 'openai-1': 'sk-one' },
+        legacyChecked: ['openai-1'],
+      }),
+    )
     keystore.configureCredentialVaultPersistence(mocks.persistence)
 
     await keystore.preloadSecrets(['openai-1'] as KeystoreRef[])
@@ -104,11 +113,14 @@ describe.runIf(process.platform === 'darwin')('consolidated credential vault', (
   it('keeps the imported vault in memory when the encrypted app cache cannot be written', async () => {
     const keytar = (await import('keytar')).default
     const keystore = await import('./index')
-    mocks.credentials.set('spark-agent:credential-vault-v1', JSON.stringify({
-      version: 1,
-      secrets: { 'openai-1': 'sk-one' },
-      legacyChecked: ['openai-1'],
-    }))
+    mocks.credentials.set(
+      'spark-canvas:credential-vault-v1',
+      JSON.stringify({
+        version: 1,
+        secrets: { 'openai-1': 'sk-one' },
+        legacyChecked: ['openai-1'],
+      }),
+    )
     mocks.persistenceSaveError = new Error('disk full')
     keystore.configureCredentialVaultPersistence(mocks.persistence)
 
@@ -152,11 +164,14 @@ describe.runIf(process.platform === 'darwin')('consolidated credential vault', (
   it('does not write the keychain again when a cached secret is unchanged', async () => {
     const keytar = (await import('keytar')).default
     const keystore = await import('./index')
-    mocks.credentials.set('spark-agent:credential-vault-v1', JSON.stringify({
-      version: 1,
-      secrets: { 'openai-1': 'sk-one' },
-      legacyChecked: ['openai-1'],
-    }))
+    mocks.credentials.set(
+      'spark-canvas:credential-vault-v1',
+      JSON.stringify({
+        version: 1,
+        secrets: { 'openai-1': 'sk-one' },
+        legacyChecked: ['openai-1'],
+      }),
+    )
 
     await keystore.preloadSecrets(['openai-1'] as KeystoreRef[])
     await keystore.setSecret('openai-1' as KeystoreRef, 'sk-one')
@@ -182,14 +197,14 @@ describe.runIf(process.platform === 'darwin')('consolidated credential vault', (
     const keytar = (await import('keytar')).default
     const keystore = await import('./index')
     const ref = 'openai-legacy' as KeystoreRef
-    mocks.credentials.set('spark-agent:openai-legacy', 'sk-legacy')
+    mocks.credentials.set('spark-canvas:openai-legacy', 'sk-legacy')
 
     await expect(keystore.getSecret(ref)).resolves.toBe('sk-legacy')
     keystore.clearSecretCache()
     await expect(keystore.getSecret(ref)).resolves.toBe('sk-legacy')
 
     expect(keytar.getPassword).toHaveBeenCalledTimes(3) // vault + legacy, then vault only
-    expect(mocks.credentials.get('spark-agent:credential-vault-v1')).toContain('sk-legacy')
+    expect(mocks.credentials.get('spark-canvas:credential-vault-v1')).toContain('sk-legacy')
   })
 
   it('does not retry missing legacy refs after the first migration check', async () => {
@@ -205,11 +220,14 @@ describe.runIf(process.platform === 'darwin')('consolidated credential vault', (
   it('keeps the last persisted vault in memory when a write fails', async () => {
     const keystore = await import('./index')
     const ref = 'openai-1' as KeystoreRef
-    mocks.credentials.set('spark-agent:credential-vault-v1', JSON.stringify({
-      version: 1,
-      secrets: { 'openai-1': 'sk-old' },
-      legacyChecked: ['openai-1'],
-    }))
+    mocks.credentials.set(
+      'spark-canvas:credential-vault-v1',
+      JSON.stringify({
+        version: 1,
+        secrets: { 'openai-1': 'sk-old' },
+        legacyChecked: ['openai-1'],
+      }),
+    )
     await expect(keystore.getSecret(ref)).resolves.toBe('sk-old')
 
     mocks.setPasswordError = new Error('Keychain access denied')
@@ -221,12 +239,29 @@ describe.runIf(process.platform === 'darwin')('consolidated credential vault', (
     const keytar = (await import('keytar')).default
     const keystore = await import('./index')
     const ref = 'openai-legacy' as KeystoreRef
-    mocks.credentials.set('spark-agent:openai-legacy', 'sk-legacy')
+    mocks.credentials.set('spark-canvas:openai-legacy', 'sk-legacy')
     await expect(keystore.getSecret(ref)).resolves.toBe('sk-legacy')
 
     await expect(keystore.deleteSecret(ref)).resolves.toBe(true)
-    expect(keytar.deletePassword).toHaveBeenCalledWith('spark-agent', ref)
-    expect(mocks.credentials.has('spark-agent:openai-legacy')).toBe(false)
+    expect(keytar.deletePassword).toHaveBeenCalledWith('spark-canvas', ref)
+    expect(mocks.credentials.has('spark-canvas:openai-legacy')).toBe(false)
     await expect(keystore.getSecret(ref)).resolves.toBeNull()
+  })
+
+  it('does not read credentials from the old Spark Agent service', async () => {
+    const keytar = (await import('keytar')).default
+    const keystore = await import('./index')
+    mocks.credentials.set(
+      'spark-agent:credential-vault-v1',
+      JSON.stringify({
+        version: 1,
+        secrets: { 'openai-1': 'old-secret' },
+        legacyChecked: ['openai-1'],
+      }),
+    )
+
+    await expect(keystore.getSecret('openai-1' as KeystoreRef)).resolves.toBeNull()
+
+    expect(keytar.getPassword).not.toHaveBeenCalledWith('spark-agent', expect.any(String))
   })
 })

@@ -4,9 +4,18 @@ import {
   buildEntityExtractionPrompt,
   parseExtractedCharacters,
   parseExtractedScenes,
+  resolveExtractEntityKindFromWorkflow,
 } from './canvasEntityExtract'
 
 describe('canvasEntityExtract', () => {
+  it('maps every structured extraction workflow to its entity kind', () => {
+    expect(resolveExtractEntityKindFromWorkflow('extract_character')).toBe('character')
+    expect(resolveExtractEntityKindFromWorkflow('extract_scene')).toBe('scene')
+    expect(resolveExtractEntityKindFromWorkflow('extract_prop')).toBe('prop')
+    expect(resolveExtractEntityKindFromWorkflow('extract_effect')).toBe('effect')
+    expect(resolveExtractEntityKindFromWorkflow('shot_script')).toBeNull()
+  })
+
   describe('buildEntityExtractionPrompt', () => {
     it('角色抽取提示词含格式要求与剧本', () => {
       const prompt = buildEntityExtractionPrompt('character', '林岚推门进入。', '水墨写意')
@@ -20,6 +29,9 @@ describe('canvasEntityExtract', () => {
       const prompt = buildEntityExtractionPrompt('scene', '车站候车室')
       expect(prompt).toContain('抽取其中出现的全部场景')
       expect(prompt).toContain('location')
+      expect(prompt).toContain('【不要存在人物】')
+      expect(prompt).toContain('只呈现纯粹的场景')
+      expect(prompt).toContain('description、prompt、attributes 均只描述环境本身')
     })
     it('角色抽取提示词含加厚后的精细字段', () => {
       const prompt = buildEntityExtractionPrompt('character', '林岚')
@@ -180,6 +192,39 @@ describe('canvasEntityExtract', () => {
       expect(rows).toHaveLength(1)
       expect(rows[0]!.name).toBe('林岚')
       expect(rows[0]!.fields.marks).toBe('左脸旧疤')
+    })
+
+    it('从 Codex 中间说明和多个 JSON 片段中选出真正的实体结果', () => {
+      const rows = parseExtractedCharacters(
+        [
+          '我先核对输出结构 {"status":"checking"}。',
+          '```json',
+          '{"kind":"character","entities":[{"name":"林岚","description":"清瘦青年","attributes":{"appearance":"清瘦"}}]}',
+          '```',
+        ].join('\n'),
+      )
+      expect(rows).toHaveLength(1)
+      expect(rows[0]!.name).toBe('林岚')
+      expect(rows[0]!.fields.appearance).toBe('清瘦')
+    })
+
+    it('兼容常见中文字段和 characters 包装键', () => {
+      const rows = parseExtractedCharacters(
+        JSON.stringify({
+          characters: [
+            {
+              名称: '陈默',
+              描述: '神秘访客',
+              提示词: 'mysterious visitor',
+              属性: { 外貌: '高大，戴墨镜' },
+            },
+          ],
+        }),
+      )
+      expect(rows).toHaveLength(1)
+      expect(rows[0]!.name).toBe('陈默')
+      expect(rows[0]!.fields.appearance).toBe('高大，戴墨镜')
+      expect(rows[0]!.prompt).toBe('mysterious visitor')
     })
   })
 

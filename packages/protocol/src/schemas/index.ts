@@ -17,7 +17,22 @@ import {
 } from '../media-config.js'
 import { ProviderMediaModelRefSchema, MediaModelManifestSchema } from '../media-model-manifest.js'
 import { LOCAL_CLI_PROVIDER_ID, LOCAL_CODEX_CLI_PROVIDER_ID } from '../local-cli-provider.js'
-import { CLAUDE_AUTO_ROUTER_PROVIDER_ID, CODEX_AUTO_ROUTER_PROVIDER_ID } from '../auto-router-provider.js'
+import {
+  CLAUDE_AUTO_ROUTER_PROVIDER_ID,
+  CODEX_AUTO_ROUTER_PROVIDER_ID,
+} from '../auto-router-provider.js'
+import { ProviderFilesIpcSchemaRegistry } from '../provider-files.js'
+import { CanvasAgentOpenWorkspaceRequestSchema } from '../canvas-agent-workspace.js'
+import {
+  CanvasAgentConfigurationRequestSchema,
+  CanvasAgentSessionAnswerQuestionRequestSchema,
+  CanvasAgentSessionCancelRequestSchema,
+  CanvasAgentSessionCreateRequestSchema,
+  CanvasAgentSessionGetHistoryRequestSchema,
+  CanvasAgentSessionListRequestSchema,
+  CanvasAgentSessionSubmitTurnRequestSchema,
+  CanvasAgentSessionUpdateRequestSchema,
+} from '../canvas-agent-session.js'
 
 const PLATFORM_NEWAPI_PROVIDER_ID = 'spark-platform-newapi'
 
@@ -205,6 +220,7 @@ export const SessionCreateRequestSchema = z.object({
   reasoningEffort: SessionReasoningEffortSchema.optional().default('max'),
   title: z.string().max(200).optional(),
   workspaceId: z.string().uuid().optional(),
+  surface: z.literal('canvas').optional(),
 })
 
 export const SessionSendTurnRequestSchema = z.object({
@@ -261,6 +277,16 @@ export const FileSavePastedImageRequestSchema = z.object({
   projectRootPath: z.string().min(1).max(2000).optional(),
 })
 
+export const FileSaveCanvasAnnotationRequestSchema = z.object({
+  documentJson: z
+    .string()
+    .min(1)
+    .max(20 * 1024 * 1024),
+  suggestedBaseName: z.string().min(1).max(120).optional(),
+  projectRootPath: z.string().min(1).max(2000).optional(),
+  existingFilePath: z.string().min(1).max(2000).optional(),
+})
+
 export const FilePrepareImagePreviewRequestSchema = z.object({
   sourcePath: z.string().min(1),
 })
@@ -311,6 +337,7 @@ export const SessionListCheckpointsRequestSchema = z.object({
 
 export const SessionListRequestSchema = z.object({
   workspaceId: z.string().uuid().optional(),
+  surface: z.literal('canvas').optional(),
   includeArchived: z.boolean().optional().default(false),
   limit: z.number().int().min(1).max(1000).optional().default(50),
   offset: z.number().int().min(0).optional().default(0),
@@ -705,24 +732,65 @@ const CanvasPromptDocumentSchema = z.object({
   version: z.literal(2),
   blocks: z.array(CanvasPromptBlockSchema).max(2_000),
 })
+const CanvasInputBindingSchema = z.object({
+  id: z.string().min(1).max(300),
+  sourceNodeId: z.string().min(1).max(200),
+  origin: z.enum(['connection', 'manual', 'picker']),
+  kind: z.enum(['image', 'video', 'audio', 'text', 'structured', 'file']),
+  relation: CanvasPromptRelationSchema,
+  role: z.enum(['input', 'first_frame', 'last_frame', 'reference', 'mask']).optional(),
+  enabled: z.boolean(),
+  order: z.number().int().min(0),
+  promptBlockId: z.string().max(200).optional(),
+})
 const CanvasPromptTaskFieldsSchema = {
   promptDocument: CanvasPromptDocumentSchema.optional(),
-  promptSnapshot: CanvasPromptDocumentSchema.extend({ capturedAt: z.string().max(80).optional() }).optional(),
+  inputBindings: z.array(CanvasInputBindingSchema).max(128).optional(),
+  promptSnapshot: CanvasPromptDocumentSchema.extend({
+    capturedAt: z.string().max(80).optional(),
+  }).optional(),
   compiledUserText: z.string().max(100_000).optional(),
   inputSnapshots: z.array(z.record(z.unknown())).max(64).optional(),
-  relationManifest: z.array(z.object({
-    blockId: z.string().max(200),
-    sourceNodeId: z.string().max(200),
-    relation: CanvasPromptRelationSchema,
-    order: z.number().int().min(0),
-    label: z.string().max(500).optional(),
-    contentHash: z.string().max(200).optional(),
-  })).max(64).optional(),
-  promptWarnings: z.array(z.object({
-    code: z.string().max(200),
-    message: z.string().max(10_000),
-    blockId: z.string().max(200).optional(),
-  })).max(64).optional(),
+  relationManifest: z
+    .array(
+      z.object({
+        blockId: z.string().max(200),
+        sourceNodeId: z.string().max(200),
+        relation: CanvasPromptRelationSchema,
+        order: z.number().int().min(0),
+        label: z.string().max(500).optional(),
+        contentHash: z.string().max(200).optional(),
+        modelReference: z
+          .object({
+            channel: z.enum([
+              'reference_images',
+              'input_images',
+              'reference_videos',
+              'input_videos',
+              'reference_audios',
+              'input_audios',
+              'first_frame',
+              'last_frame',
+              'text',
+            ]),
+            ordinal: z.number().int().positive().optional(),
+            label: z.string().max(500),
+          })
+          .optional(),
+      }),
+    )
+    .max(64)
+    .optional(),
+  promptWarnings: z
+    .array(
+      z.object({
+        code: z.string().max(200),
+        message: z.string().max(10_000),
+        blockId: z.string().max(200).optional(),
+      }),
+    )
+    .max(64)
+    .optional(),
   systemPrompt: z.string().max(100_000).optional(),
 }
 
@@ -732,6 +800,15 @@ const CanvasPromptTaskFieldsSchema = {
  * P0-07 中的 handle 封装会用此表自动校验每个 channel 的 request payload
  */
 export const IpcSchemaRegistry = {
+  'canvas:agent:open-workspace': CanvasAgentOpenWorkspaceRequestSchema,
+  'canvas:agent:configuration': CanvasAgentConfigurationRequestSchema,
+  'canvas:agent:session:create': CanvasAgentSessionCreateRequestSchema,
+  'canvas:agent:session:list': CanvasAgentSessionListRequestSchema,
+  'canvas:agent:session:update': CanvasAgentSessionUpdateRequestSchema,
+  'canvas:agent:session:submit-turn': CanvasAgentSessionSubmitTurnRequestSchema,
+  'canvas:agent:session:get-history': CanvasAgentSessionGetHistoryRequestSchema,
+  'canvas:agent:session:cancel': CanvasAgentSessionCancelRequestSchema,
+  'canvas:agent:session:answer-question': CanvasAgentSessionAnswerQuestionRequestSchema,
   'session:create': SessionCreateRequestSchema,
   'session:send-turn': SessionSendTurnRequestSchema,
   'session:submit-turn': SessionSendTurnRequestSchema,
@@ -762,6 +839,7 @@ export const IpcSchemaRegistry = {
   'team:delete-def': TeamDeleteDefRequestSchema,
   'provider:create': ProviderCreateRequestSchema,
   'provider:get-api-key': ProviderGetApiKeyRequestSchema,
+  ...ProviderFilesIpcSchemaRegistry,
   'provider:update': ProviderUpdateRequestSchema,
   'provider:delete': ProviderDeleteRequestSchema,
   'provider:test-connection': ProviderConnectionTestRequestSchema,
@@ -798,16 +876,10 @@ export const IpcSchemaRegistry = {
   'workspace:git-commit': WorkspaceGitCommitRequestSchema,
   'workspace:git-push': WorkspaceGitPushRequestSchema,
   'workspace:create-branch': WorkspaceCreateBranchRequestSchema,
-  'workspace:watch-start': z.object({
-    workspaceId: z.string().min(1),
-    ignorePatterns: z.array(z.string()).optional(),
-  }),
-  'workspace:watch-stop': z.object({
-    workspaceId: z.string().min(1),
-  }),
   'dialog:open-directory': DialogOpenDirectoryRequestSchema,
   'dialog:open-file': DialogOpenFileRequestSchema,
   'file:save-pasted-image': FileSavePastedImageRequestSchema,
+  'file:save-canvas-annotation': FileSaveCanvasAnnotationRequestSchema,
   'file:prepare-image-preview': FilePrepareImagePreviewRequestSchema,
   'file:stat-kind': FileStatKindRequestSchema,
   'clipboard:write-text': ClipboardWriteTextRequestSchema,
@@ -1025,6 +1097,7 @@ export const IpcSchemaRegistry = {
   'log:read': z.object({
     maxLines: z.number().int().min(1).max(5000).optional(),
     levels: z.array(z.enum(['debug', 'info', 'warn', 'error'])).optional(),
+    scope: z.enum(['all', 'canvas']).optional(),
   }),
   'log:clear': z.object({}),
   'log:reveal': z.object({}),
@@ -1044,12 +1117,24 @@ export const IpcSchemaRegistry = {
     manifestId: z.string().min(1).max(160),
     providerProfileId: z.string().min(1).max(200).optional(),
     capabilityId: z.string().min(1).max(120),
+    modelId: z.string().min(1).max(200).optional(),
+    prompt: z.string().max(100_000).optional(),
+    validateSubmission: z.boolean().optional(),
     modelParams: z.record(z.unknown()),
     inputFiles: z
       .array(
         z.object({
-          type: z.string().min(1).max(40),
-          role: z.string().min(1).max(40).optional(),
+          type: z.enum(['image', 'audio', 'video', 'file']),
+          role: z.enum(['input', 'first_frame', 'last_frame', 'reference', 'mask']).optional(),
+          fileId: z.string().min(1).max(300).optional(),
+          path: z.string().max(2000).optional(),
+          url: z.string().max(4000).optional(),
+          dataUrl: z.string().max(2000).optional(),
+          mimeType: z.string().max(160).optional(),
+          sizeBytes: z.number().int().nonnegative().optional(),
+          width: z.number().int().positive().optional(),
+          height: z.number().int().positive().optional(),
+          durationMs: z.number().int().nonnegative().optional(),
         }),
       )
       .max(64)
@@ -1094,10 +1179,15 @@ export const IpcSchemaRegistry = {
     inputFiles: z
       .array(
         z.object({
+          fileId: z.string().min(1).max(300).optional(),
           path: z.string().max(2000).optional(),
           url: z.string().max(4000).optional(),
           dataUrl: z.string().max(100_000_000).optional(),
           mimeType: z.string().max(160).optional(),
+          sizeBytes: z.number().int().nonnegative().optional(),
+          width: z.number().int().positive().optional(),
+          height: z.number().int().positive().optional(),
+          durationMs: z.number().int().nonnegative().optional(),
           type: z.enum(['image', 'audio', 'video', 'file']),
           role: z.enum(['input', 'first_frame', 'last_frame', 'reference', 'mask']).optional(),
         }),
@@ -1108,8 +1198,43 @@ export const IpcSchemaRegistry = {
     manifestId: z.string().min(1).max(160).nullable().optional(),
     modelId: z.string().min(1).max(200).nullable().optional(),
     modelParams: z.record(z.unknown()).optional(),
+    skipParameterValidation: z.boolean().optional(),
     waitForCompletion: z.boolean().optional(),
     outputDir: z.string().max(2000).optional(),
+    ...CanvasPromptTaskFieldsSchema,
+  }),
+  'canvas:task:generate-text': z.object({
+    operation: z.enum(['text_generate', 'text_rewrite', 'prompt_optimize']),
+    prompt: z.string().max(100_000),
+    negativePrompt: z.string().max(100_000).optional(),
+    inputFiles: z
+      .array(
+        z.object({
+          fileId: z.string().min(1).max(300).optional(),
+          path: z.string().max(2000).optional(),
+          url: z.string().max(4000).optional(),
+          dataUrl: z.string().max(100_000_000).optional(),
+          mimeType: z.string().max(160).optional(),
+          sizeBytes: z.number().int().nonnegative().optional(),
+          width: z.number().int().positive().optional(),
+          height: z.number().int().positive().optional(),
+          durationMs: z.number().int().nonnegative().optional(),
+          type: z.enum(['image', 'audio', 'video', 'file']),
+          role: z.enum(['input', 'first_frame', 'last_frame', 'reference', 'mask']).optional(),
+        }),
+      )
+      .max(64)
+      .optional(),
+    modelParams: z.record(z.unknown()).optional(),
+    reasoningEffort: SessionReasoningEffortSchema.optional(),
+    providerProfileId: z.string().min(1).max(200).nullable().optional(),
+    modelId: z.string().min(1).max(200).nullable().optional(),
+    agentId: z.string().min(1).max(200).nullable().optional(),
+    skillIds: z.array(z.string().min(1).max(200)).max(64).optional(),
+    taskPipelineRole: z.string().min(1).max(120).nullable().optional(),
+    waitForCompletion: z.boolean().optional(),
+    projectId: z.string().min(1).max(200).optional(),
+    clientTaskId: z.string().min(1).max(200).optional(),
     ...CanvasPromptTaskFieldsSchema,
   }),
   'canvas:task:cancel-media': z.object({
@@ -1168,6 +1293,9 @@ export const IpcSchemaRegistry = {
     suggestedBaseName: z.string().min(1).max(160).optional(),
     type: z.enum(['image', 'audio', 'video', 'file']).optional(),
   }),
+  'canvas:file:grant-dropped-paths': z.object({
+    paths: z.array(z.string().min(1).max(4000)).min(1).max(64),
+  }),
   'canvas:asset:download': z.object({
     sourcePath: z.string().max(4000).optional(),
     sourceUrl: z.string().max(8000).optional(),
@@ -1198,6 +1326,8 @@ export const IpcSchemaRegistry = {
     title: z.string().max(300).optional(),
     projectRootPath: z.string().max(2000).nullable().optional(),
     snapshotJson: z.string().min(1),
+    sourceFilePath: z.string().max(2000).optional(),
+    exportedPackageRoot: z.string().max(2000).nullable().optional(),
     targetParentDirectory: z.string().min(1).max(2000).optional(),
   }),
   'canvas:project:migrate-assets': z.object({
@@ -1243,40 +1373,6 @@ export const IpcSchemaRegistry = {
     sessionId: z.string().min(1).max(160).optional(),
   }),
   'remote:runtime-status': z.object({}),
-
-  // Built-in Terminal Panel (session-scoped PTY dock)
-  // `data` 限制为 1MB 以内，避免粘贴巨量内容打爆 IPC。
-  // `cols/rows` 有界，避免错误参数让 node-pty 拒绝 resize。
-  'terminal:list': z.object({ sessionId: z.string().min(1) }),
-  'terminal:list-active': z.object({}),
-  'terminal:create': z.object({
-    sessionId: z.string().min(1),
-    workspaceId: z.string().min(1).optional(),
-    cwd: z.string().min(1).max(2000).optional(),
-    title: z.string().min(1).max(80).optional(),
-    cols: z.number().int().min(10).max(500).optional(),
-    rows: z.number().int().min(3).max(200).optional(),
-  }),
-  'terminal:input': z.object({
-    terminalId: z.string().min(1).max(200),
-    // 上限 ~1MB；超长粘贴由 renderer 端分块，避免单条 IPC 把渲染进程 / 主进程卡住。
-    data: z.string().max(1_000_000),
-  }),
-  'terminal:resize': z.object({
-    terminalId: z.string().min(1).max(200),
-    cols: z.number().int().min(10).max(500),
-    rows: z.number().int().min(3).max(200),
-  }),
-  'terminal:kill': z.object({
-    terminalId: z.string().min(1).max(200),
-  }),
-  'terminal:rename': z.object({
-    terminalId: z.string().min(1).max(200),
-    title: z.string().min(1).max(80),
-  }),
-  'terminal:get-buffer': z.object({
-    terminalId: z.string().min(1).max(200),
-  }),
 
   // Usage Ledger
   'usage:record': z.object({
@@ -1338,29 +1434,42 @@ export const IpcSchemaRegistry = {
 
   // ─── FFmpeg & Video Processing ─────────────────────────────────────────
   'ffmpeg:status': z.object({}),
-  'ffmpeg:install': z.object({
-    artifactId: z.string().min(1).max(200).optional(),
-  }),
-  'binary:install': z.object({
-    artifactId: z.string().min(1).max(200),
-  }),
-  // video:probe 与 video:process 共享 VideoProcessRequest 结构。
+  'ffmpeg:install': z.object({}),
+  // requestId 会参与产物文件名，只允许不含路径分隔符的稳定标识。
   // params 是宽松的 Record（具体校验在主进程 videoProcessHandler 做路径白名单 + 数值范围）。
   'video:probe': z.object({
-    operation: z.string().min(1).max(50),
+    operation: z.literal('probe'),
     input: z.string().min(1).max(4096),
     params: z.record(z.unknown()),
-    requestId: z.string().min(1).max(100),
+    requestId: z
+      .string()
+      .min(1)
+      .max(100)
+      .regex(/^[A-Za-z0-9_-]+$/),
   }),
   'video:process': z.object({
     operation: z.enum([
-      'probe', 'extractKeyframes', 'extractFramesAtTimes', 'generateThumbnail',
-      'trim', 'concat', 'segment', 'transcode',
-      'adjustSpeed', 'reverse', 'crop', 'watermark', 'burnSubtitle',
+      'probe',
+      'extractKeyframes',
+      'extractFramesAtTimes',
+      'generateThumbnail',
+      'trim',
+      'concat',
+      'segment',
+      'transcode',
+      'adjustSpeed',
+      'reverse',
+      'crop',
+      'watermark',
+      'burnSubtitle',
     ]),
     input: z.string().min(1).max(4096),
     params: z.record(z.unknown()),
-    requestId: z.string().min(1).max(100),
+    requestId: z
+      .string()
+      .min(1)
+      .max(100)
+      .regex(/^[A-Za-z0-9_-]+$/),
   }),
 
   // ─── Cloud Auth ────────────────────────────────────────────────────────
@@ -1387,9 +1496,7 @@ export const IpcSchemaRegistry = {
     captchaText: z.string().min(1).max(20).optional(),
     emailCode: z.string().min(1).max(20).optional(),
   }),
-  'auth:refresh': z.object({
-    refreshToken: z.string().min(1).optional(),
-  }),
+  'auth:refresh': z.object({}).strict(),
   'auth:logout': z.object({}),
   'auth:me': z.object({}),
   'auth:bind-status': z.object({}),

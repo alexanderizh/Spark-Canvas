@@ -4,13 +4,36 @@ import type {
   CanvasPromptDocument,
   CanvasPromptInputKind,
   CanvasPromptInputSnapshot,
+  CanvasPromptModelReference,
   CanvasPromptRelation,
   CanvasPromptRelationManifestEntry,
   CanvasPromptStructuredBlock,
   CanvasPromptCompiledInputFile,
 } from '@spark/protocol'
 import type { CanvasAsset, CanvasNode, CanvasOperationType } from './canvas.types'
-import { presentCanvasTextForModel, readCanvasTextInputContent } from './canvasTextInputPresentation'
+import { readCanvasTextInputContent } from './canvasTextInputPresentation'
+import {
+  renderCanvasPromptWithReferences,
+  renderCanvasReferenceImageList,
+  renderCanvasTextReference,
+  type CanvasModelReferenceImage,
+} from './canvasModelInputPresentation'
+
+type CanvasPromptReferenceState = {
+  textOrdinal: number
+  inputImageOrdinal: number
+  referenceVideoOrdinal: number
+  inputVideoOrdinal: number
+  referenceAudioOrdinal: number
+  inputAudioOrdinal: number
+  referenceImages: CanvasModelReferenceImage[]
+  textResources: string[]
+  mediaReferences: Map<string, CanvasPromptModelReference>
+  textReferences: Map<
+    string,
+    CanvasPromptModelReference & { channel: 'text'; ordinal: number }
+  >
+}
 
 export class CanvasPromptCompileError extends Error {
   readonly code = 'canvas_prompt_compile_failed'
@@ -39,7 +62,18 @@ export function compileCanvasPromptDocument(input: {
   const inputFiles: NonNullable<CanvasPromptCompilation['inputFiles']> = []
   const warnings: NonNullable<CanvasPromptCompilation['promptWarnings']> = []
   const textParts: string[] = []
-  const seenInputFiles = new Set<string>()
+  const referenceState: CanvasPromptReferenceState = {
+    textOrdinal: 0,
+    inputImageOrdinal: 0,
+    referenceVideoOrdinal: 0,
+    inputVideoOrdinal: 0,
+    referenceAudioOrdinal: 0,
+    inputAudioOrdinal: 0,
+    referenceImages: [],
+    textResources: [],
+    mediaReferences: new Map(),
+    textReferences: new Map(),
+  }
 
   for (const [blockIndex, block] of input.document.blocks.entries()) {
     const compiled = compileBlock({
@@ -50,13 +84,20 @@ export function compileCanvasPromptDocument(input: {
       relationManifest,
       inputSnapshots,
       inputFiles,
-      seenInputFiles,
+      referenceState,
       warnings,
     })
     if (compiled) textParts.push(compiled)
   }
 
-  const compiledUserText = textParts.join('\n\n').trim()
+  const referenceResources = [
+    renderCanvasReferenceImageList(referenceState.referenceImages),
+    ...referenceState.textResources,
+  ]
+  const compiledUserText = renderCanvasPromptWithReferences({
+    userInput: textParts.join(''),
+    resources: referenceResources,
+  })
   if (!compiledUserText && inputFiles.length === 0) {
     warnings.push({ code: 'empty_prompt', message: '提示词和媒体输入均为空' })
   }
@@ -80,11 +121,11 @@ function compileBlock(input: {
   relationManifest: CanvasPromptRelationManifestEntry[]
   inputSnapshots: CanvasPromptInputSnapshot[]
   inputFiles: NonNullable<CanvasPromptCompilation['inputFiles']>
-  seenInputFiles: Set<string>
+  referenceState: CanvasPromptReferenceState
   warnings: NonNullable<CanvasPromptCompilation['promptWarnings']>
 }): string {
   const { block } = input
-  if (block.kind === 'text') return block.text.trim()
+  if (block.kind === 'text') return block.text
   if (block.kind === 'reference' && block.suppressed) return ''
   if (block.kind === 'parameter') {
     const unit = block.unit ? ` ${block.unit}` : ''
@@ -93,7 +134,10 @@ function compileBlock(input: {
   }
 
   if (block.kind === 'reference' && block.disconnected) {
-    throw new CanvasPromptCompileError(block.id, `引用“${block.label}”已断开连接，请重新绑定后再提交`)
+    throw new CanvasPromptCompileError(
+      block.id,
+      `引用“${block.label}”已断开连接，请重新绑定后再提交`,
+    )
   }
 
   const node = input.nodeById.get(block.sourceNodeId)
@@ -113,14 +157,6 @@ function compileBlock(input: {
     content,
   })
   input.inputSnapshots.push(snapshot)
-  input.relationManifest.push({
-    blockId: block.id,
-    sourceNodeId: node.id,
-    relation,
-    order,
-    label,
-    ...(snapshot.contentHash ? { contentHash: snapshot.contentHash } : {}),
-  })
 
   if (isMediaNode(node, asset)) {
     const role = inputRoleForRelation(node, relation)
@@ -134,23 +170,133 @@ function compileBlock(input: {
       throw new CanvasPromptCompileError(block.id, `引用“${label}”没有可发送的媒体地址`)
     }
     const key = `${node.id}:${file.role ?? 'input'}`
-    if (!input.seenInputFiles.has(key)) {
-      input.seenInputFiles.add(key)
+    let modelReference = input.referenceState.mediaReferences.get(key)
+    if (!modelReference) {
       input.inputFiles.push(file)
+      modelReference = createMediaModelReference({
+        key,
+        kind: snapshot.kind,
+        role: file.role ?? 'input',
+        label,
+        relation,
+        state: input.referenceState,
+      })
     }
-    return `[${relationLabel(relation)} ref-${input.inputSnapshots.length}: ${label}]`
+    input.relationManifest.push(
+      buildRelationManifestEntry({ block, node, relation, order, label, snapshot, modelReference }),
+    )
+    return renderInlineMediaReference(modelReference, label, relation)
   }
 
-  if (!content) {
+  let modelReference = input.referenceState.textReferences.get(node.id)
+  const isFirstMention = !modelReference
+  if (!modelReference) {
+    input.referenceState.textOrdinal += 1
+    const textOrdinal = input.referenceState.textOrdinal
+    modelReference = {
+      channel: 'text',
+      ordinal: textOrdinal,
+      label: `文本引用 T${textOrdinal}`,
+    }
+    input.referenceState.textReferences.set(node.id, modelReference)
+  }
+  input.relationManifest.push(
+    buildRelationManifestEntry({ block, node, relation, order, label, snapshot, modelReference }),
+  )
+  if (!content && isFirstMention) {
     input.warnings.push({
       code: 'empty_text_reference',
       message: `引用“${label}”没有文本内容`,
       blockId: block.id,
     })
-    return `[${relationLabel(relation)} ref-${input.inputSnapshots.length}: ${label}]`
   }
-  const rendered = presentCanvasTextForModel(content)
-  return `[${relationLabel(relation)} ref-${input.inputSnapshots.length}: ${label}]\n${rendered}`
+  if (isFirstMention) {
+    input.referenceState.textResources.push(
+      renderCanvasTextReference({ ordinal: modelReference.ordinal, label, relation, content }),
+    )
+  }
+  return modelReference.label
+}
+
+function buildRelationManifestEntry(input: {
+  block: Extract<CanvasPromptBlock, { kind: 'reference' | 'structured' }>
+  node: CanvasNode
+  relation: CanvasPromptRelation
+  order: number
+  label: string
+  snapshot: CanvasPromptInputSnapshot
+  modelReference: CanvasPromptModelReference
+}): CanvasPromptRelationManifestEntry {
+  return {
+    blockId: input.block.id,
+    sourceNodeId: input.node.id,
+    relation: input.relation,
+    order: input.order,
+    label: input.label,
+    ...(input.snapshot.contentHash ? { contentHash: input.snapshot.contentHash } : {}),
+    modelReference: input.modelReference,
+  }
+}
+
+function createMediaModelReference(input: {
+  key: string
+  kind: CanvasPromptInputKind
+  role: NonNullable<CanvasPromptCompiledInputFile['role']>
+  label: string
+  relation: CanvasPromptRelation
+  state: CanvasPromptReferenceState
+}): CanvasPromptModelReference {
+  const { state } = input
+  let reference: CanvasPromptModelReference
+  if (input.role === 'first_frame') {
+    reference = { channel: 'first_frame', label: '首帧图' }
+  } else if (input.role === 'last_frame') {
+    reference = { channel: 'last_frame', label: '尾帧图' }
+  } else if (input.kind === 'image') {
+    if (input.role === 'reference') {
+      const ordinal = state.referenceImages.length + 1
+      reference = { channel: 'reference_images', ordinal, label: `参考图 #${ordinal}` }
+      state.referenceImages.push({ ordinal, label: input.label, relation: input.relation })
+    } else {
+      state.inputImageOrdinal += 1
+      reference = {
+        channel: 'input_images',
+        ordinal: state.inputImageOrdinal,
+        label: `输入图 #${state.inputImageOrdinal}`,
+      }
+    }
+  } else if (input.kind === 'video') {
+    const isReference = input.role === 'reference'
+    if (isReference) state.referenceVideoOrdinal += 1
+    else state.inputVideoOrdinal += 1
+    const ordinal = isReference ? state.referenceVideoOrdinal : state.inputVideoOrdinal
+    reference = {
+      channel: isReference ? 'reference_videos' : 'input_videos',
+      ordinal,
+      label: `${isReference ? '参考视频' : '输入视频'} #${ordinal}`,
+    }
+  } else {
+    const isReference = input.role === 'reference'
+    if (isReference) state.referenceAudioOrdinal += 1
+    else state.inputAudioOrdinal += 1
+    const ordinal = isReference ? state.referenceAudioOrdinal : state.inputAudioOrdinal
+    reference = {
+      channel: isReference ? 'reference_audios' : 'input_audios',
+      ordinal,
+      label: `${isReference ? '参考音频' : '输入音频'} #${ordinal}`,
+    }
+  }
+  state.mediaReferences.set(input.key, reference)
+  return reference
+}
+
+function renderInlineMediaReference(
+  reference: CanvasPromptModelReference,
+  label: string,
+  relation: CanvasPromptRelation,
+): string {
+  if (reference.channel === 'reference_images') return reference.label
+  return `[${reference.label}：${label}（${relationLabel(relation)}）]`
 }
 
 function buildInputSnapshot(input: {
@@ -201,11 +347,19 @@ function buildInputFile(
   const type: CanvasPromptCompiledInputFile['type'] =
     node.type === 'image' || node.type === 'video' || node.type === 'audio' ? node.type : 'file'
   const mimeType = node.data.mimeType ?? asset?.mimeType ?? undefined
+  const width = asset?.width ?? undefined
+  const height = asset?.height ?? undefined
+  const durationMs = asset?.durationMs ?? undefined
+  const sizeBytes = asset?.sizeBytes ?? undefined
   return {
     type,
     ...(role ? { role } : {}),
     ...(url.startsWith('data:') ? { dataUrl: url } : { url }),
     ...(mimeType ? { mimeType } : {}),
+    ...(sizeBytes != null ? { sizeBytes } : {}),
+    ...(width != null ? { width } : {}),
+    ...(height != null ? { height } : {}),
+    ...(durationMs != null ? { durationMs } : {}),
   }
 }
 
@@ -217,7 +371,14 @@ function readNodeContent(node: CanvasNode, asset?: CanvasAsset): string {
 }
 
 function isMediaNode(node: CanvasNode, asset?: CanvasAsset): boolean {
-  return node.type === 'image' || node.type === 'video' || node.type === 'audio' || asset?.type === 'image' || asset?.type === 'video' || asset?.type === 'audio'
+  return (
+    node.type === 'image' ||
+    node.type === 'video' ||
+    node.type === 'audio' ||
+    asset?.type === 'image' ||
+    asset?.type === 'video' ||
+    asset?.type === 'audio'
+  )
 }
 
 function inputKindForNode(

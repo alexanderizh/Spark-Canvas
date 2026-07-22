@@ -1,10 +1,12 @@
 import type {
   MediaRequestCall,
+  CanvasInputBinding,
   CanvasPromptDocument,
   CanvasPromptResponseFields,
   CanvasPromptTaskFields,
   SessionReasoningEffort,
 } from '@spark/protocol'
+import type { FilmReferenceKind } from './canvasFilmTypes'
 
 export type CanvasProjectStatus = 'active' | 'archived' | 'deleted'
 
@@ -110,6 +112,21 @@ export type CanvasPipelineRole =
 export type CanvasProductionState = 'empty' | 'drafting' | 'draft' | 'confirmed' | 'stale'
 
 export type CanvasTaskStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
+
+export type CanvasTaskRuntimeEvent = {
+  at: string
+  kind:
+    | 'created'
+    | 'dispatched'
+    | 'submitted'
+    | 'provider_response'
+    | 'validation'
+    | 'completed'
+    | 'failed'
+    | 'cancelled'
+  label: string
+  detail?: string
+}
 export type CanvasEdgeType =
   | 'derived_from'
   | 'used_as_input'
@@ -172,11 +189,61 @@ export type CanvasBoard = {
   updatedAt: string
 }
 
+export type CanvasImageAnnotationPadding = {
+  top: number
+  right: number
+  bottom: number
+  left: number
+}
+
+/** 图片标注的可编辑侧车文档。Fabric 场景被封装在自有版本协议内，避免成为公共存储协议。 */
+export type CanvasImageAnnotationDocument = {
+  schemaVersion: 1
+  source: {
+    nodeId: string
+    assetId?: string
+    url: string
+    width: number
+    height: number
+  }
+  artboard: {
+    width: number
+    height: number
+    contentWidth: number
+    contentHeight: number
+    background: '#ffffff' | null
+    padding: CanvasImageAnnotationPadding
+  }
+  scene: {
+    engine: 'fabric'
+    engineVersion: string
+    json: unknown
+  }
+  createdAt: string
+  updatedAt: string
+}
+
+export type CanvasImageAnnotationRef = {
+  schemaVersion: 1
+  documentPath: string
+  sourceNodeId: string
+  sourceAssetId?: string
+  artboard: {
+    width: number
+    height: number
+    background: '#ffffff' | null
+    padding: CanvasImageAnnotationPadding
+  }
+  updatedAt: string
+}
+
 export type CanvasNodeData = {
   text?: string
   format?: 'plain' | 'markdown' | 'prompt'
   url?: string
   thumbnailUrl?: string
+  /** 可继续编辑的图片标注侧车文档；实际场景不直接写入项目节点快照。 */
+  imageAnnotation?: CanvasImageAnnotationRef
   mimeType?: string
   operation?: CanvasOperationType
   /** 单产物 / 候选 / 集合 / 角色包；缺省时由工作流和最近一次运行自动推断。 */
@@ -198,6 +265,8 @@ export type CanvasNodeData = {
   prompt?: string
   /** Versioned user-authored prompt blocks. `prompt` remains the legacy fallback. */
   promptDocument?: CanvasPromptDocument
+  /** Canonical task input bindings shared by prompt tags, media strip and submission. */
+  inputBindings?: CanvasInputBinding[]
   /** 功能节点的隐藏内置指令；不进入用户可见 Prompt Document。 */
   systemPrompt?: string
   /** 继承/暂存的反向提示词；任务持久化仍以 CanvasTask.negativePrompt 为准 */
@@ -242,13 +311,15 @@ export type CanvasNodeData = {
   outputPipelineRole?: CanvasPipelineRole
   /** 专用流水线任务节点上暂存的「产物节点标题」，供任务完成回写产物节点时读取 */
   outputTitle?: string
+  /** 生成产物应自动归档到的影视资产；用于角色板、场景图等回挂项目资产中心。 */
+  outputFilmAssetId?: string
+  /** 自动回挂项目资产中心时使用的参考图分类。 */
+  outputFilmReferenceKind?: FilmReferenceKind
   /** Contract V2 裁剪产物：被丢弃的字段及原因，供任务详情展示。 */
   droppedModelParams?: Array<{ name: string; reason: string; valuePreview?: string | undefined }>
   /** Contract V2 裁剪产物：非阻断性提示（如 missing_param_policy、compat_passthrough）。 */
   modelParamWarnings?: Array<{ code: string; message: string }>
-  /** 3D 导演台节点数据：三维对象、摄像机、网格与导出提示词。 */
-  directorStage?: Record<string, unknown>
-  /** 真·3D 导演台节点数据（subtype 'director_stage_3d'）：人偶/道具/背景/取景相机。 */
+  /** 3D 导演台节点数据（subtype 'director_stage_3d'）：人偶/道具/背景/取景相机。 */
   stage3d?: Record<string, unknown>
   /** 视频工作台节点数据（subtype 'video_workbench'）：关键帧/剪辑/转码配置与产物。 */
   videoWorkbench?: Record<string, unknown>
@@ -338,6 +409,8 @@ export type CanvasTask = {
   status: CanvasTaskStatus
   progress: number
   title?: string | null
+  /** Stable owner operation node. Unlike node.taskId, this survives later retries. */
+  operationNodeId?: string | null
   prompt?: string | null
   negativePrompt?: string | null
   inputNodeIds: string[]
@@ -353,9 +426,13 @@ export type CanvasTask = {
   requestId?: string | null
   /** provider 原始响应摘要（不含敏感信息） */
   rawResponse?: unknown
+  /** Agent/model 原始文本；即使业务解析失败也必须保留。 */
+  modelOutputText?: string | null
+  /** 轮询任务提交接口响应摘要，拿到渠道任务 ID 后立即写入。 */
+  submitResponse?: unknown
   /** 提交时输入文件的诊断摘要，便于任务详情排查 url/base64/path 等传参方式。 */
   inputFileDiagnostics?: CanvasTaskInputDiagnostic[]
-  /** 实际发给 provider 的 HTTP 调用摘要（请求 + 响应），用于任务详情展示。 */
+  /** 实际模型调用摘要：HTTP 请求，或 SDK/CLI 的最终地址与调用参数。 */
   requestCall?: MediaRequestCall | null
   agentId?: string | null
   skillIds?: string[]
@@ -364,6 +441,12 @@ export type CanvasTask = {
   /** Spark 统一推理强度；主进程会按目标 adapter 映射为 provider 合法枚举。 */
   reasoningEffort?: SessionReasoningEffort | null
   modelParams: Record<string, unknown>
+  taskPipelineRole?: CanvasPipelineRole | null
+  outputPipelineRole?: CanvasPipelineRole | null
+  /** Storyboard timing configuration captured when this task was submitted. */
+  shotScriptConfig?: ShotScriptConfig | null
+  /** Persisted lifecycle events with their actual write timestamps. */
+  runtimeEvents?: CanvasTaskRuntimeEvent[]
   errorMsg?: string | null
   errorDetail?: string | null
   createdAt: string
@@ -422,6 +505,8 @@ export type CreateCanvasTaskRequest = {
     strategy?: 'near_selection' | 'viewport_center' | 'right_of_selection'
   }
   modelParams?: Record<string, unknown>
+  /** User-confirmed opt-out from renderer-side parameter preflight. */
+  skipParameterValidation?: boolean
   agentId?: string
   providerProfileId?: string
   manifestId?: string
@@ -437,6 +522,8 @@ export type CreateCanvasTaskRequest = {
   taskPipelineRole?: CanvasPipelineRole
   /** 专用流水线节点：产物节点的流水线角色（如分镜脚本产物 = shot） */
   outputPipelineRole?: CanvasPipelineRole
+  /** 分镜任务提交时的时长配置快照。 */
+  shotScriptConfig?: ShotScriptConfig
   /** Contract V2 裁剪产物：被丢弃的字段及原因，供任务详情展示。 */
   droppedModelParams?: Array<{ name: string; reason: string; valuePreview?: string | undefined }>
   /** Contract V2 裁剪产物：非阻断性提示（如 missing_param_policy、compat_passthrough）。 */

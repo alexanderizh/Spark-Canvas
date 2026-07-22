@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
 import { join, resolve } from 'node:path'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 
 const workspaceRoot = join('G:', 'spark', 'spark-agent')
+const canvasRoot = join('G:', 'spark', 'canvas-project')
+const databaseState = vi.hoisted(() => ({ settingsRows: [] as Array<{ value: string }> }))
 
 vi.mock('electron', () => ({
   app: {
@@ -25,8 +27,13 @@ vi.mock('electron', () => ({
 vi.mock('../../db.js', () => ({
   getDatabase: () => ({
     raw: {
-      prepare: () => ({
-        all: () => [{ root_path: workspaceRoot }],
+      prepare: (sql: string) => ({
+        all: () =>
+          sql.includes('app_settings')
+            ? databaseState.settingsRows
+            : sql.includes('canvas_projects')
+              ? [{ root_path: canvasRoot }]
+              : [{ root_path: workspaceRoot }],
       }),
     },
   }),
@@ -37,20 +44,29 @@ import {
   getSafeFileAllowedRoots,
   isSafeFilePathAllowed,
 } from '../SafeFileProtocol.js'
+import { CANVAS_PROJECTS_ROOT_GRANT_VERSION } from '../CanvasProjectsRootSetting.js'
 
 describe('SafeFileProtocol', () => {
-  it('allows generated artifacts under registered workspaces', () => {
-    const artifactPath = join(workspaceRoot, '.spark-artifacts', 'images', 'tang-princess.png')
+  it('allows app-owned media artifacts only under the dedicated media directory', () => {
+    const artifactPath = join(
+      'C:',
+      'Users',
+      'Test',
+      'AppData',
+      'Roaming',
+      'SparkAgent',
+      '.spark-artifacts',
+      'media',
+      'tang-princess.png',
+    )
 
     expect(isSafeFilePathAllowed(artifactPath)).toBe(true)
   })
 
-  it('allows arbitrary files under registered workspaces (built-in preview)', () => {
-    // 内置文档/图片预览需要读取项目里的任意文件（PDF、docx、图片等），
-    // 因此整体放行已登记 workspace 根目录，而非仅 .spark-artifacts 子目录。
+  it('does not expose registered workspace files to the standalone Canvas renderer', () => {
     const previewablePdf = join(workspaceRoot, 'preview-test', 'sample.pdf')
 
-    expect(isSafeFilePathAllowed(previewablePdf)).toBe(true)
+    expect(isSafeFilePathAllowed(previewablePdf)).toBe(false)
   })
 
   it('does not allow files outside registered workspaces', () => {
@@ -59,8 +75,40 @@ describe('SafeFileProtocol', () => {
     expect(isSafeFilePathAllowed(outsideFile)).toBe(false)
   })
 
-  it('exposes workspace roots in the allowlist', () => {
-    expect(getSafeFileAllowedRoots()).toContain(resolve(workspaceRoot))
+  it('exposes only Canvas asset and thumbnail subdirectories, not the whole project root', () => {
+    const roots = getSafeFileAllowedRoots()
+
+    expect(roots).toContain(resolve(canvasRoot, 'assets'))
+    expect(roots).toContain(resolve(canvasRoot, 'thumbnails'))
+    expect(roots).not.toContain(resolve(canvasRoot))
+    expect(roots).not.toContain(resolve(workspaceRoot))
+  })
+
+  it('never turns a configured default projects root into a SafeFile read root', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'safe-file-canvas-root-'))
+    const canonical = realpathSync.native(dir)
+    const configured = resolve(dir)
+    try {
+      databaseState.settingsRows = [
+        { value: JSON.stringify({ projectsRootPath: dir }) },
+      ]
+      expect(getSafeFileAllowedRoots()).not.toContain(configured)
+      expect(getSafeFileAllowedRoots()).not.toContain(canonical)
+
+      databaseState.settingsRows = [
+        {
+          value: JSON.stringify({
+            projectsRootPath: dir,
+            projectsRootPathGrantVersion: CANVAS_PROJECTS_ROOT_GRANT_VERSION,
+          }),
+        },
+      ]
+      expect(getSafeFileAllowedRoots()).not.toContain(configured)
+      expect(getSafeFileAllowedRoots()).not.toContain(canonical)
+    } finally {
+      databaseState.settingsRows = []
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 
   it('serves video range requests with partial content headers', async () => {

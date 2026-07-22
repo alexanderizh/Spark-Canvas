@@ -506,7 +506,7 @@ export interface ValidationSuggestionEvent extends BaseEvent {
 
 // ─── 终端类事件 ──────────────────────────────────────────────────────────────
 
-/** 命令执行输出（用于 xterm.js 渲染） */
+/** Agent 命令执行输出（用于会话内命令日志渲染） */
 export interface TerminalOutputEvent extends BaseEvent {
   type: 'terminal_output'
   /** 关联的 ToolCallEvent.toolCallId */

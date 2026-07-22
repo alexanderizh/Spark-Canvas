@@ -38,7 +38,7 @@ function poseDescription(actor: Stage3DActor): string {
  * 角色姿势 / 站位 / 朝向 / 相对关系、道具（相对最近角色的方位+距离）、背景、
  * 相机机位 / 焦段 / 画幅 / 到主体距离。
  * 全部用"固定基准（镜头 or 场景原点）+ 相对位置"描述，单位统一米、保留一位小数，
- * 便于视频生成模型理解空间关系。风格参考 2D 版 buildDirectorPrompt。
+ * 便于视频生成模型理解空间关系。
  */
 
 function sub(a: number, b: number): number {
@@ -126,6 +126,12 @@ function nearestActor(prop: Stage3DProp, actors: Stage3DActor[]): Stage3DActor |
   return best
 }
 
+function sceneScaleWord(data: Stage3DData): string | null {
+  const scale = data.sceneScale ?? 1
+  if (Math.abs(scale - 1) < 0.01) return null
+  return `整体布景缩放 ${scale.toFixed(2)}x，角色和道具按此比例呈现`
+}
+
 const ORIGIN: [number, number, number] = [0, 0, 0]
 
 /** 单个道具的定位描述：相对最近角色，无角色时相对场景原点 */
@@ -191,6 +197,9 @@ export function buildStage3DPrompt(data: Stage3DData, cameraOverride?: Stage3DCa
 
   const backdrop = backdropWord(data)
   if (backdrop) lines.push(`环境：${backdrop}。`)
+
+  const scaleWord = sceneScaleWord(data)
+  if (scaleWord) lines.push(`布景：${scaleWord}。`)
 
   if (data.actors.length > 0) {
     lines.push('画面主体：')

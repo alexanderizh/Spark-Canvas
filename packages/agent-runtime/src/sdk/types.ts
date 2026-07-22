@@ -438,6 +438,7 @@ export interface SDKPermissionRequestContext {
 export interface SDKQuestionRequestContext {
   questionId?: string
   requestId?: string
+  turnId?: string
   signal?: AbortSignal
 }
 
@@ -617,6 +618,12 @@ export interface CodexCliModelProviderConfig {
   env?: Record<string, string | undefined> | undefined
 }
 
+/** Final executor request snapshot with credentials and sensitive environment values removed. */
+export interface SDKInvocationSnapshot {
+  transport: 'claude-sdk' | 'codex-sdk' | 'codex-cli' | 'openai-chat'
+  request: Record<string, unknown>
+}
+
 export interface SDKExecutorConfig {
   apiKey: string
   /** True when the turn is running as unattended automation and must never wait on user input. */
@@ -683,6 +690,8 @@ export interface SDKExecutorConfig {
   /** 画布 Agent in-process MCP server（spark_canvas）：仅在 session 已 attach 到画布弹窗时注入 */
   canvasMcpServer?: SDKMcpServerConfig | undefined
   nativeSkills?: string[] | 'all' | undefined
+  /** Disable Codex CLI's host plugin/skill discovery when Spark owns progressive disclosure. */
+  disableCodexNativeSkills?: boolean | undefined
   /**
    * 本地技能插件目录列表（Claude Code 插件结构，含 .claude-plugin/plugin.json + skills/）。
    * 传给 SDK 的 `plugins` 选项，启用原生技能发现与渐进式披露。
@@ -695,6 +704,7 @@ export interface SDKExecutorConfig {
   enableCheckpoints?: boolean | undefined
   sdkSessionId?: string | undefined
   continueSession?: boolean | undefined
+  invocationObserver?: ((snapshot: SDKInvocationSnapshot) => void) | undefined
   approvalCallback?: ((
     sessionId: string,
     toolName: string,

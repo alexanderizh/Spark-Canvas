@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
@@ -194,7 +194,13 @@ describe('CodexCliExecutor', () => {
     })
 
     const executor = new CodexCliExecutor()
-    await executor.executeTurn('session-1', 'turn-1', '只回复 OK', makeConfig())
+    const invocationObserver = vi.fn()
+    await executor.executeTurn(
+      'session-1',
+      'turn-1',
+      '只回复 OK',
+      makeConfig({ invocationObserver }),
+    )
 
     expect(spawnMock).toHaveBeenCalledWith(
       process.platform === 'win32' ? 'codex.exe' : 'codex',
@@ -208,6 +214,17 @@ describe('CodexCliExecutor', () => {
     expect(args).not.toContain('--model')
     expect(args).not.toContain('codex cli')
     expect(child?.prompt).toContain('# Spark Skills')
+    expect(invocationObserver).toHaveBeenCalledWith(
+      expect.objectContaining({
+        transport: 'codex-cli',
+        request: expect.objectContaining({
+          command: 'codex',
+          args: expect.arrayContaining(['exec', '--json']),
+          stdin: expect.stringContaining('只回复 OK'),
+          credentials: '[local-cli configuration]',
+        }),
+      }),
+    )
     expect(child?.prompt).toContain('Skill catalog')
     expect(child?.prompt).toContain('# Spark Runtime Context')
     expect(child?.prompt).toContain('System context')
@@ -289,6 +306,19 @@ describe('CodexCliExecutor', () => {
     expect(lastProfileConfig).toContain('hide_agent_reasoning=false')
     expect(lastProfileConfig).toContain('sandbox_workspace_write.network_access=true')
     expect(lastProfileConfig).toContain("web_search='cached'")
+  })
+
+  it('disables native Codex plugin skill discovery when Spark owns progressive disclosure', async () => {
+    spawnMock.mockImplementation((_command: string, args: string[]) => new MockChildProcess(args))
+
+    await new CodexCliExecutor().executeTurn(
+      'session-1',
+      'turn-1',
+      'hello',
+      makeConfig({ disableCodexNativeSkills: true }),
+    )
+
+    expect(lastProfileConfig).toContain('features.plugins=false')
   })
 
   it('maps CLI file, todo, item error, cache, and reasoning usage with SDK semantics', async () => {
@@ -522,6 +552,46 @@ describe('CodexCliExecutor', () => {
     expect(profileConfig).toContain("mcp_servers.local_tools.env.TEST_TOKEN='secret'")
     expect(profileConfig.includes('local_tools.default_tools_approval_mode')).toBe(false)
     expect(profileConfig.includes('in_process')).toBe(false)
+  })
+
+  it('forwards Bridge tokens through the process environment instead of the Codex profile', async () => {
+    spawnMock.mockImplementation(
+      (_command: string, args: string[], options: { env?: Record<string, string> }) => {
+        const profileName = args[args.indexOf('-p') + 1]
+        const profilePath = path.join(codexHome, `${profileName}.config.toml`)
+        expect(statSync(profilePath).mode & 0o777).toBe(0o600)
+        expect(options.env?.SPARK_CANVAS_BRIDGE_TOKEN).toBe('canvas-secret')
+        return new MockChildProcess(args)
+      },
+    )
+
+    const executor = new CodexCliExecutor()
+    await executor.executeTurn(
+      'session-1',
+      'turn-1',
+      'hello',
+      makeConfig({
+        mcpServers: {
+          spark_canvas: {
+            type: 'stdio',
+            command: 'node',
+            args: ['spark-canvas-mcp-server.mjs'],
+            env: {
+              SPARK_CANVAS_BRIDGE_TOKEN: 'canvas-secret',
+              SPARK_CANVAS_SID: 'session-1',
+            },
+          },
+        },
+      }),
+    )
+
+    expect(lastProfileConfig).toContain(
+      "mcp_servers.spark_canvas.env_vars=['SPARK_CANVAS_BRIDGE_TOKEN']",
+    )
+    expect(lastProfileConfig).toContain(
+      "mcp_servers.spark_canvas.env.SPARK_CANVAS_SID='session-1'",
+    )
+    expect(lastProfileConfig).not.toContain('canvas-secret')
   })
 
   it('auto-approves Spark built-in MCP tools for non-interactive Codex CLI turns', async () => {

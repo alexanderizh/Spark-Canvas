@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest'
 import { RuntimeCompositionService } from './runtime-composition.service.js'
 import type { SkillRow } from '@spark/storage'
 
-function skillRow(overrides: Partial<SkillRow> & Pick<SkillRow, 'id' | 'name' | 'enabled'>): SkillRow {
+function skillRow(
+  overrides: Partial<SkillRow> & Pick<SkillRow, 'id' | 'name' | 'enabled'>,
+): SkillRow {
   return {
     id: overrides.id,
     scope: 'user',
@@ -48,6 +50,42 @@ function makeSettingsRepo(values: Record<string, unknown>) {
 }
 
 describe('RuntimeCompositionService', () => {
+  it('uses Canvas Assistant skill and prompt layers when agentId is omitted', () => {
+    const service = new RuntimeCompositionService(
+      makeSkillRepo([skillRow({ id: 'skill:canvas', name: 'Canvas', enabled: 1 })]),
+      makeSettingsRepo({
+        'runtime.skills:agent:canvas-assistant-agent': ['skill:canvas'],
+        'runtime.prompts:agent:canvas-assistant-agent': {
+          enabled: true,
+          content: 'Canvas assistant prompt',
+        },
+      }),
+    )
+
+    expect(service.getSkillConfig().agentSkillIds).toEqual(['skill:canvas'])
+    expect(service.getPromptConfig().agent.content).toBe('Canvas assistant prompt')
+  })
+
+  it('preserves explicit platform manager runtime layers', () => {
+    const service = new RuntimeCompositionService(
+      makeSkillRepo([skillRow({ id: 'skill:platform', name: 'Platform', enabled: 1 })]),
+      makeSettingsRepo({
+        'runtime.skills:agent:platform-manager-agent': ['skill:platform'],
+        'runtime.prompts:agent:platform-manager-agent': {
+          enabled: true,
+          content: 'Platform manager prompt',
+        },
+      }),
+    )
+
+    expect(service.getSkillConfig({ agentId: 'platform-manager-agent' }).agentSkillIds).toEqual([
+      'skill:platform',
+    ])
+    expect(service.getPromptConfig({ agentId: 'platform-manager-agent' }).agent.content).toBe(
+      'Platform manager prompt',
+    )
+  })
+
   it('merges system-visible skills with project and session selections while honoring disabled gates', () => {
     const service = new RuntimeCompositionService(
       makeSkillRepo([
@@ -98,9 +136,15 @@ describe('RuntimeCompositionService', () => {
     expect(result.effectivePrompt).toContain('[Agent Prompt]\nAgent prompt')
     expect(result.effectivePrompt).toContain('[Project Prompt]\nProject prompt')
     expect(result.effectivePrompt).toContain('[Session Prompt]\nSession prompt')
-    expect(result.effectivePrompt.indexOf('System prompt')).toBeLessThan(result.effectivePrompt.indexOf('Agent prompt'))
-    expect(result.effectivePrompt.indexOf('Agent prompt')).toBeLessThan(result.effectivePrompt.indexOf('Project prompt'))
-    expect(result.effectivePrompt.indexOf('Project prompt')).toBeLessThan(result.effectivePrompt.indexOf('Session prompt'))
+    expect(result.effectivePrompt.indexOf('System prompt')).toBeLessThan(
+      result.effectivePrompt.indexOf('Agent prompt'),
+    )
+    expect(result.effectivePrompt.indexOf('Agent prompt')).toBeLessThan(
+      result.effectivePrompt.indexOf('Project prompt'),
+    )
+    expect(result.effectivePrompt.indexOf('Project prompt')).toBeLessThan(
+      result.effectivePrompt.indexOf('Session prompt'),
+    )
   })
 
   it('merges env vars with session overriding project and masks values in the prompt', () => {

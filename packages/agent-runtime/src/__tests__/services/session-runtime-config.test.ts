@@ -266,6 +266,15 @@ vi.mock('@spark/storage', () => {
       return row
     }
 
+    patchMetadata(id: string, patch: Record<string, unknown>): Record<string, unknown> {
+      const row = this.findByIdOrFail(id)
+      const current = this.getMetadata(id)
+      const next = { ...current, ...patch }
+      row.metadata_json = JSON.stringify(next)
+      row.updated_at = now()
+      return next
+    }
+
     get(id: string): SessionRow | null {
       return mockState.sessions.get(id) ?? null
     }
@@ -1122,6 +1131,295 @@ describe('SessionService runtime provider/model resolution', () => {
     })
   })
 
+  it('creates a session with Canvas Assistant when agentId is omitted', async () => {
+    mockState.agents.set(
+      'canvas-assistant-agent',
+      makeAgent({
+        id: 'canvas-assistant-agent',
+        name: 'Canvas Assistant',
+        builtIn: true,
+      }),
+    )
+    const service = new SessionService({} as never, (event) => events.push(event))
+
+    const { sessionId } = await service.createSession({
+      providerProfileId: 'tencent-provider',
+      modelId: 'glm-5',
+      title: 'Default Canvas session',
+    })
+
+    expect(mockState.sessions.get(sessionId)?.agent_id).toBe('canvas-assistant-agent')
+  })
+
+  it.each([
+    ['NULL', null],
+    ['unknown', 'deleted-agent'],
+  ])(
+    'runs a session with a %s agent id as Canvas Assistant without rewriting it',
+    async (_, agentId) => {
+      mockState.agents.set(
+        'canvas-assistant-agent',
+        makeAgent({
+          id: 'canvas-assistant-agent',
+          name: 'Canvas Assistant',
+          builtIn: true,
+        }),
+      )
+      const service = new SessionService({} as never, (event) => events.push(event))
+      const { sessionId } = await service.createSession({
+        providerProfileId: 'tencent-provider',
+        modelId: 'glm-5',
+        agentId: 'canvas-assistant-agent',
+        title: 'Damaged agent session',
+      })
+      const row = mockState.sessions.get(sessionId)
+      if (row == null) throw new Error('Expected created session')
+      row.agent_id = agentId
+
+      const persistedAgentId = mockState.sessions.get(sessionId)?.agent_id
+      const resolved = (
+        service as unknown as {
+          resolveAgent: (value: string | undefined) => MockAgentItem
+        }
+      ).resolveAgent(persistedAgentId ?? undefined)
+
+      expect(resolved).toMatchObject({
+        id: 'canvas-assistant-agent',
+        name: 'Canvas Assistant',
+      })
+      expect(mockState.sessions.get(sessionId)?.agent_id).toBe(agentId)
+    },
+  )
+
+  it('reports Canvas Assistant for a NULL session agent id without rewriting it', async () => {
+    mockState.agents.set(
+      'canvas-assistant-agent',
+      makeAgent({
+        id: 'canvas-assistant-agent',
+        name: 'Canvas Assistant',
+        builtIn: true,
+      }),
+    )
+    const service = new SessionService({} as never, (event) => events.push(event))
+    const { sessionId } = await service.createSession({
+      providerProfileId: 'tencent-provider',
+      modelId: 'glm-5',
+      agentId: 'canvas-assistant-agent',
+      title: 'Missing persisted agent',
+    })
+    const row = mockState.sessions.get(sessionId)
+    if (row == null) throw new Error('Expected created session')
+    row.agent_id = null
+
+    const updated = await service.updateSession({ sessionId })
+    const runtime = await service.getSessionRuntimeState(sessionId)
+
+    expect(updated.session.agentId).toBe('canvas-assistant-agent')
+    expect(runtime.agentId).toBe('canvas-assistant-agent')
+    expect(mockState.sessions.get(sessionId)?.agent_id).toBeNull()
+  })
+
+  it('reports Canvas Assistant in doctor diagnostics for a NULL session agent id', async () => {
+    mockState.agents.set(
+      'canvas-assistant-agent',
+      makeAgent({
+        id: 'canvas-assistant-agent',
+        name: 'Canvas Assistant',
+        builtIn: true,
+        providerProfileId: 'tencent-provider',
+        modelId: 'glm-5',
+      }),
+    )
+    const service = new SessionService({} as never, (event) => events.push(event))
+    const { sessionId } = await service.createSession({
+      providerProfileId: 'tencent-provider',
+      modelId: 'glm-5',
+      agentId: 'canvas-assistant-agent',
+      title: 'Doctor fallback session',
+    })
+    const row = mockState.sessions.get(sessionId)
+    if (row == null) throw new Error('Expected created session')
+    row.agent_id = null
+
+    await service.executeCommandAsEvents({ sessionId, message: '/doctor' })
+
+    const assistant = events
+      .slice()
+      .reverse()
+      .find((event) => event.type === 'assistant_message')
+    expect(assistant).toMatchObject({
+      type: 'assistant_message',
+      content: expect.stringContaining('Canvas Assistant (canvas-assistant-agent)'),
+    })
+    expect(mockState.sessions.get(sessionId)?.agent_id).toBeNull()
+  })
+
+  it('preserves an existing session with an explicit platform manager agent', async () => {
+    mockState.agents.set(
+      'platform-manager-agent',
+      makeAgent({
+        id: 'platform-manager-agent',
+        name: 'Platform Manager',
+        builtIn: true,
+      }),
+    )
+    const service = new SessionService({} as never, (event) => events.push(event))
+    const { sessionId } = await service.createSession({
+      providerProfileId: 'tencent-provider',
+      modelId: 'glm-5',
+      agentId: 'platform-manager-agent',
+      title: 'Legacy platform session',
+    })
+
+    const persistedAgentId = mockState.sessions.get(sessionId)?.agent_id
+    const resolved = (
+      service as unknown as {
+        resolveAgent: (value: string | undefined) => MockAgentItem
+      }
+    ).resolveAgent(persistedAgentId ?? undefined)
+
+    expect(resolved).toMatchObject({
+      id: 'platform-manager-agent',
+      name: 'Platform Manager',
+    })
+    expect(mockState.sessions.get(sessionId)?.agent_id).toBe('platform-manager-agent')
+  })
+
+  it('persists the canvas surface and omits general platform MCPs from canvas turns', async () => {
+    mockState.agents.set(
+      'canvas-assistant-agent',
+      makeAgent({
+        id: 'canvas-assistant-agent',
+        name: 'Canvas Assistant',
+        builtIn: true,
+        metadata: { role: 'canvas-assistant' },
+        skillIds: ['builtin:canvas-studio', 'builtin:multimedia-use', 'builtin:video-workflow'],
+      }),
+    )
+    const service = new SessionService({} as never, (event) => events.push(event))
+    const platformServer = {
+      type: 'stdio' as const,
+      command: 'node',
+      args: ['platform-management-mcp-server.mjs'],
+    }
+    const resolvePlatform = vi
+      .spyOn(
+        service as unknown as {
+          resolvePlatformManagementMcpServer: (sessionId: string) => Promise<typeof platformServer>
+        },
+        'resolvePlatformManagementMcpServer',
+      )
+      .mockResolvedValue(platformServer)
+    const resolveNativeSkills = vi
+      .spyOn(
+        service as unknown as {
+          resolveNativeSkillPlugins: () => string[] | null
+        },
+        'resolveNativeSkillPlugins',
+      )
+      .mockReturnValue(['/managed/canvas-skills'])
+    const resolveWebSearch = vi
+      .spyOn(
+        service as unknown as {
+          resolveWebSearchMcpServer: (workspaceRootPath: string) => Promise<typeof platformServer>
+        },
+        'resolveWebSearchMcpServer',
+      )
+      .mockResolvedValue(platformServer)
+    const resolveDebug = vi
+      .spyOn(
+        service as unknown as {
+          resolveDebugMcpServer: (
+            sessionId: string,
+            workspaceRootPath: string,
+          ) => Promise<typeof platformServer>
+        },
+        'resolveDebugMcpServer',
+      )
+      .mockResolvedValue(platformServer)
+    const browserProvider = vi.fn(async () => platformServer)
+    service.setBrowserAutomationMcpProvider(browserProvider)
+    const { sessionId, session } = await service.createSession({
+      providerProfileId: 'tencent-provider',
+      modelId: 'glm-5',
+      agentId: 'canvas-assistant-agent',
+      agentAdapter: 'claude-sdk',
+      title: 'Canvas session',
+      surface: 'canvas',
+    })
+
+    expect(JSON.parse(mockState.sessions.get(sessionId)?.metadata_json ?? '{}')).toEqual({
+      surface: 'canvas',
+    })
+    expect(session.surface).toBe('canvas')
+    expect(mockState.sessions.get(sessionId)?.agent_id).toBe('canvas-assistant-agent')
+    mockState.sessions.get(sessionId)!.metadata_json = JSON.stringify({
+      surface: 'canvas',
+      debugMode: true,
+    })
+
+    await service.sendTurn({ sessionId, message: 'inspect the canvas' })
+    await vi.waitFor(() => expect(mockState.sdkConfigs).toHaveLength(1))
+
+    expect(resolvePlatform).not.toHaveBeenCalled()
+    expect(resolveWebSearch).not.toHaveBeenCalled()
+    expect(resolveDebug).not.toHaveBeenCalled()
+    expect(browserProvider).not.toHaveBeenCalled()
+    expect(resolveNativeSkills).not.toHaveBeenCalled()
+    expect(mockState.sdkConfigs[0]?.mcpServers).not.toHaveProperty('spark_platform')
+    expect(mockState.sdkConfigs[0]?.mcpServers).not.toHaveProperty('spark_search')
+    expect(mockState.sdkConfigs[0]?.mcpServers).not.toHaveProperty('spark_browser')
+    expect(mockState.sdkConfigs[0]?.mcpServers).not.toHaveProperty('spark_debug')
+    expect(mockState.sdkConfigs[0]).not.toHaveProperty('skillPlugins')
+    expect(mockState.sdkConfigs[0]).not.toHaveProperty('nativeSkills')
+    expect(String(mockState.sdkConfigs[0]?.skillSystemPrompt ?? '')).not.toContain(
+      '## Platform Management Capability',
+    )
+  })
+
+  it('keeps platform management available for legacy non-canvas sessions', async () => {
+    const service = new SessionService({} as never, (event) => events.push(event))
+    const platformServer = {
+      type: 'stdio' as const,
+      command: 'node',
+      args: ['platform-management-mcp-server.mjs'],
+    }
+    const resolvePlatform = vi
+      .spyOn(
+        service as unknown as {
+          resolvePlatformManagementMcpServer: (sessionId: string) => Promise<typeof platformServer>
+        },
+        'resolvePlatformManagementMcpServer',
+      )
+      .mockResolvedValue(platformServer)
+    const resolveNativeSkills = vi
+      .spyOn(
+        service as unknown as {
+          resolveNativeSkillPlugins: () => string[] | null
+        },
+        'resolveNativeSkillPlugins',
+      )
+      .mockReturnValue(['/managed/legacy-skills'])
+    const { sessionId } = await service.createSession({
+      providerProfileId: 'tencent-provider',
+      modelId: 'glm-5',
+      agentAdapter: 'claude-sdk',
+      title: 'Legacy session',
+    })
+
+    await service.sendTurn({ sessionId, message: 'inspect the platform' })
+    await vi.waitFor(() => expect(mockState.sdkConfigs).toHaveLength(1))
+
+    expect(resolvePlatform).toHaveBeenCalledWith(sessionId)
+    expect(resolveNativeSkills).toHaveBeenCalledOnce()
+    expect(mockState.sdkConfigs[0]?.mcpServers).toHaveProperty('spark_platform')
+    expect(mockState.sdkConfigs[0]?.skillPlugins).toEqual(['/managed/legacy-skills'])
+    expect(mockState.sdkConfigs[0]?.nativeSkills).toBe('all')
+    expect(String(mockState.sdkConfigs[0]?.skillSystemPrompt ?? '')).toContain(
+      '## Platform Management Capability',
+    )
+  })
+
   it('persists a terminal error when a provider credential cannot be resolved before start', async () => {
     vi.mocked(keystore.getSecret).mockResolvedValueOnce(null)
     const service = new SessionService({} as never, (event) => events.push(event))
@@ -1659,6 +1957,7 @@ describe('SessionService runtime provider/model resolution', () => {
       command: process.execPath,
     })
     expect(canvasServer?.args?.join(' ')).toContain('spark-canvas-mcp-server.mjs')
+    expect(canvasServer?.env?.SPARK_CANVAS_BRIDGE_TOKEN).toMatch(/^[A-Za-z0-9_-]{40,}$/)
     expect(canvasServer?.env?.SPARK_CANVAS_SID).toBe(sessionId)
     expect(canvasServer?.env?.SPARK_CANVAS_TOOL_SCHEMAS_JSON).toContain('get_project')
     expect(config?.mcpServers).toMatchObject({

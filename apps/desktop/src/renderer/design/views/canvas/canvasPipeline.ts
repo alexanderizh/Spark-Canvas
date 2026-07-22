@@ -22,8 +22,13 @@ import type {
   ManuscriptIndex,
 } from './canvasFilmTypes'
 import { readFilmMetadata, writeFilmMetadata } from './canvasFilmTypes'
-import { getOpsForRole, getOpsForNode, type CanvasPipelineOp } from './canvasPipelineOps'
-import { isShotScriptText, parseShotTable } from './canvasShotTableParse'
+import {
+  getOpsForRole,
+  getOpsForNode,
+  type CanvasPipelineAssetKind,
+  type CanvasPipelineOp,
+  type PipelineOpKind,
+} from './canvasPipelineOps'
 
 // ─── 编排动作（右键「下一步」菜单数据源，设计 §7）────────────────────────────
 
@@ -33,6 +38,8 @@ export type PipelineAction = {
   id: string
   /** 中文菜单标签 */
   label: string
+  /** 统一菜单分类；不同节点和入口按此分组，不再各自猜测 */
+  kind: PipelineOpKind
   /** 产出节点的流水线角色 */
   produces: CanvasPipelineRole
   /** 若直接落为媒体任务，对应的 operation（agent 文本动作则为空） */
@@ -45,6 +52,7 @@ function toAction(op: CanvasPipelineOp): PipelineAction {
   return {
     id: op.id,
     label: op.label,
+    kind: op.kind,
     produces: op.produces,
     icon: op.icon,
     ...(op.baseOperation ? { operation: op.baseOperation } : {}),
@@ -57,21 +65,14 @@ export function getPipelineActions(role: CanvasPipelineRole | undefined): Pipeli
 }
 
 /** 解析某节点「下一步」可执行的编排动作（无 role 的文本节点也能拿到剧本类入口） */
-export function getNodePipelineActions(node: {
-  type: import('./canvas.types').CanvasNodeType
-  data?: { pipelineRole?: CanvasPipelineRole; text?: string }
-}): PipelineAction[] {
-  const sourceText = typeof node.data?.text === 'string' ? node.data.text : ''
-  if (
-    node.type === 'text' &&
-    isShotScriptText(sourceText) &&
-    parseShotTable(sourceText).length >= 2
-  ) {
-    return getOpsForRole('shot')
-      .filter((op) => op.id === 'shot.to_keyframes')
-      .map(toAction)
-  }
-  return getOpsForNode(node).map(toAction)
+export function getNodePipelineActions(
+  node: {
+    type: import('./canvas.types').CanvasNodeType
+    data?: { pipelineRole?: CanvasPipelineRole; text?: string }
+  },
+  options: { assetKinds?: readonly CanvasPipelineAssetKind[] } = {},
+): PipelineAction[] {
+  return getOpsForNode(node, options).map(toAction)
 }
 
 // ─── 生产状态机 / 确认闸门 / 过期传播（设计 §9.2）──────────────────────────

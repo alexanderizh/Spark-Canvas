@@ -572,6 +572,11 @@
   width: 100%;
   height: 100%;
   background: transparent !important;
+  cursor: grab;
+}
+
+.canvas-minimap:active .react-flow__minimap-svg {
+  cursor: grabbing;
 }
 
 .canvas-minimap .react-flow__minimap-mask {
@@ -1911,23 +1916,14 @@
   -webkit-box-orient: vertical;
 }
 
-.canvas-node-context-menu {
+// 节点右键菜单（操作/图像/分镜/视频节点条目很多）必须能完整滚动到底部的「删除节点」。
+// 用双类选择器提升优先级，压过 antd v6 cssinjs 运行时注入的同优先级规则；同时把
+// 原先写死的 520px 上限改为视口高度，长菜单也能一屏显示更多、必要时内部滚动。
+.canvas-node-context-menu.ant-dropdown-menu,
+.ant-dropdown .canvas-node-context-menu.ant-dropdown-menu,
+.ant-dropdown-menu-submenu-popup .canvas-node-context-menu.ant-dropdown-menu {
   min-width: 142px;
-  max-height: min(520px, calc(100vh - 32px));
-  overflow-y: auto;
-  overscroll-behavior: contain;
-}
-
-.canvas-node-context-menu .ant-dropdown-menu,
-.canvas-node-context-menu .ant-dropdown-menu-submenu-popup .ant-dropdown-menu {
-  max-height: min(520px, calc(100vh - 32px));
-  overflow-y: auto;
-  overscroll-behavior: contain;
-}
-
-.ant-dropdown .canvas-node-context-menu,
-.ant-dropdown-menu-submenu-popup .canvas-node-context-menu {
-  max-height: min(520px, calc(100vh - 32px));
+  max-height: calc(100vh - 32px);
   overflow-y: auto;
   overscroll-behavior: contain;
 }
@@ -5348,15 +5344,40 @@ body.canvas-agent-panel-resizing .canvas-agent-side-panel-resize-handle::after {
 }
 
 .canvas-task-detail-block {
-  display: flex;
-  flex-direction: column;
-  gap: 7px;
+  display: block;
 }
 
 .canvas-task-detail-block-title {
+  cursor: pointer;
   color: var(--text-strong);
   font-size: 12px;
   font-weight: 700;
+  user-select: none;
+}
+
+.canvas-task-detail-block-content {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin-top: 7px;
+}
+
+.canvas-task-detail-subtitle {
+  margin-top: 3px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.canvas-task-detail-note,
+.canvas-task-detail-empty-call {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--panel);
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.5;
 }
 
 .canvas-task-detail-block pre,
@@ -6227,18 +6248,18 @@ body.canvas-agent-panel-resizing .canvas-agent-side-panel-resize-handle::after {
   animation: canvas-node-bottom-editor-in 0.18s ease-out;
 }
 
+.canvas-node-bottom-editor.is-fullscreen,
 .canvas-node-bottom-editor:has(.is-fullscreen) {
   position: fixed;
-  inset: 24px;
-  left: 24px;
-  bottom: 24px;
-  z-index: 1300;
+  inset: 0;
+  z-index: 1500;
   width: auto;
-  max-height: none;
   height: auto;
+  max-height: none;
+  border-radius: 0;
   transform: none;
   animation: none;
-  top: 60px;
+  box-shadow: none;
 }
 
 @keyframes canvas-node-bottom-editor-in {
@@ -6291,6 +6312,8 @@ body.canvas-agent-panel-resizing .canvas-agent-side-panel-resize-handle::after {
   transform: none;
 }
 
+.canvas-node-bottom-editor.is-fullscreen
+  .canvas-node-bottom-editor-panel.canvas-node-floating-panel,
 .canvas-node-bottom-editor:has(.is-fullscreen)
   .canvas-node-bottom-editor-panel.canvas-node-floating-panel {
   position: relative;
@@ -6302,6 +6325,30 @@ body.canvas-agent-panel-resizing .canvas-agent-side-panel-resize-handle::after {
   max-width: none;
   flex: 1 1 auto;
   transform: none;
+}
+
+:is(.canvas-node-bottom-editor.is-fullscreen, .canvas-node-bottom-editor:has(.is-fullscreen))
+  .canvas-operation-workbench {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  max-height: none;
+}
+
+:is(.canvas-node-bottom-editor.is-fullscreen, .canvas-node-bottom-editor:has(.is-fullscreen))
+  :is(
+    .canvas-operation-workbench-content,
+    .canvas-operation-result-panel,
+    .canvas-operation-workbench-preview,
+    .canvas-operation-workbench-editing
+  ) {
+  min-height: 0;
+  max-height: none;
+}
+
+:is(.canvas-node-bottom-editor.is-fullscreen, .canvas-node-bottom-editor:has(.is-fullscreen))
+  .canvas-operation-workbench-preview {
+  height: 100%;
 }
 
 .canvas-floating-toolbar-shell {
@@ -6394,6 +6441,18 @@ body.canvas-agent-panel-resizing .canvas-agent-side-panel-resize-handle::after {
   font-weight: 650;
 }
 
+.canvas-floating-menu-section + .canvas-floating-menu-section {
+  margin-top: 4px;
+}
+
+.canvas-floating-menu-section-title {
+  padding: 4px 8px 2px;
+  color: var(--text-faint, var(--text-muted));
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+}
+
 .canvas-floating-menu-empty {
   padding: 7px 8px;
   color: var(--text-muted);
@@ -6442,10 +6501,6 @@ body.canvas-agent-panel-resizing .canvas-agent-side-panel-resize-handle::after {
   max-width: calc(100% - 32px);
 }
 
-.canvas-node-floating-panel:has(.canvas-shot-script-edit-panel) {
-  width: min(1180px, calc(100vw - 56px)) !important;
-}
-
 .canvas-node-floating-panel:not(.canvas-node-bottom-editor-panel):has(.is-fullscreen) {
   position: fixed;
   inset: auto;
@@ -6479,7 +6534,8 @@ body.canvas-agent-panel-resizing .canvas-agent-side-panel-resize-handle::after {
   display: flex;
   flex-direction: column;
   border: 0;
-  border-radius: 14px;
+  // 内联面板位于浮层/编辑器内部，外层容器统一负责圆角。
+  border-radius: 0;
   background:
     linear-gradient(180deg, color-mix(in srgb, #ffffff 3%, transparent), transparent 120px),
     var(--canvas-edit-bg);
@@ -6490,7 +6546,7 @@ body.canvas-agent-panel-resizing .canvas-agent-side-panel-resize-handle::after {
 
 .canvas-node-floating-panel .canvas-operation-panel.is-composer:not(.is-fullscreen) {
   max-height: min(70vh, 720px);
-  border-radius: 14px;
+  border-radius: 0;
 }
 
 .canvas-node-floating-panel .canvas-operation-composer-top {
@@ -7512,7 +7568,7 @@ body.canvas-agent-panel-resizing .canvas-agent-side-panel-resize-handle::after {
 }
 
 .canvas-shot-script-edit-panel {
-  min-height: min(62vh, 620px);
+  min-height: min(78vh, 820px);
 }
 
 .canvas-shot-script-edit-panel.is-fullscreen {
@@ -7521,207 +7577,38 @@ body.canvas-agent-panel-resizing .canvas-agent-side-panel-resize-handle::after {
 }
 
 .canvas-shot-script-edit-panel .canvas-node-edit-bottom-body {
+  display: flex;
+  min-height: 0;
+  overflow: hidden;
   padding: 10px 12px 12px;
 }
 
+.canvas-shot-script-edit-panel
+  .canvas-node-edit-bottom-body:has(.canvas-storyboard-editor) {
+  overflow: hidden;
+}
+
+.canvas-node-bottom-editor:has(.canvas-shot-script-edit-panel) {
+  width: min(1480px, calc(100% - 32px));
+  max-height: min(88vh, 920px);
+}
+
+.canvas-node-bottom-editor.is-fullscreen:has(.canvas-shot-script-edit-panel),
+.canvas-node-bottom-editor:has(.canvas-shot-script-edit-panel.is-fullscreen) {
+  inset: 0;
+  width: auto;
+  height: auto;
+  max-height: none;
+}
+
 // 分镜脚本编辑面板（内联、非全屏）：用受限高度而非 height:auto，打通高度链
-// 「bottom-editor(max-height 74vh) → floating-panel → 本面板 → body(flex:1,overflow) →
-//  table-wrap(overflow:auto)」。否则 height:auto 会让 body 的 flex:1 失去受限基准，
+// 「bottom-editor(max-height 88vh) → floating-panel → 本面板 → body(flex:1,overflow) →
+//  独立分镜编辑器」。否则 height:auto 会让 body 的 flex:1 失去受限基准，
 // 内容增多后被外层 overflow:hidden 直接裁切（即"内容一多就炸"、无法滚动）。
 // 仅作用于分镜脚本面板、内联态、非全屏（全屏由专门规则处理），特异性 0,4,0 盖过上面的 0,3,0。
 .canvas-node-floating-panel .canvas-shot-script-edit-panel.is-inline:not(.is-fullscreen) {
   height: 100%;
   max-height: 100%;
-}
-
-.canvas-shot-script-editor {
-  display: flex;
-  min-height: 0;
-  height: 100%;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.canvas-shot-script-editor-toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  color: var(--text-muted);
-  font-size: 12px;
-}
-
-.canvas-shot-script-editor-table-wrap {
-  min-height: 0;
-  flex: 1;
-  overflow: auto;
-  overscroll-behavior-x: contain;
-  overscroll-behavior-y: auto;
-  border-radius: 10px;
-  background: color-mix(in srgb, #ffffff 3%, transparent);
-}
-
-.canvas-shot-script-editor-table {
-  width: 100%;
-  min-width: 2380px;
-  border-collapse: collapse;
-  table-layout: fixed;
-  font-size: 12px;
-
-  th,
-  td {
-    padding: 6px;
-    border-bottom: 1px solid color-mix(in srgb, var(--divider) 62%, transparent);
-    vertical-align: top;
-  }
-
-  th {
-    position: sticky;
-    top: 0;
-    z-index: 1;
-    background: color-mix(in srgb, var(--canvas-float-bg) 96%, #050505);
-    color: var(--text-muted);
-    font-weight: 650;
-    text-align: left;
-  }
-
-  th:nth-child(1),
-  td:nth-child(1) {
-    width: 58px;
-  }
-
-  th:nth-child(2),
-  td:nth-child(2) {
-    width: 68px;
-  }
-
-  th:nth-child(3),
-  td:nth-child(3),
-  th:nth-child(4),
-  td:nth-child(4) {
-    width: 90px;
-  }
-
-  th:nth-child(5),
-  td:nth-child(5),
-  th:nth-child(6),
-  td:nth-child(6),
-  th:nth-child(7),
-  td:nth-child(7),
-  th:nth-child(9),
-  td:nth-child(9) {
-    width: 220px;
-  }
-
-  th:nth-child(8),
-  td:nth-child(8) {
-    width: 180px;
-  }
-
-  th:nth-child(10),
-  td:nth-child(10),
-  th:nth-child(13),
-  td:nth-child(13) {
-    width: 320px;
-  }
-
-  th:nth-child(11),
-  td:nth-child(11) {
-    width: 240px;
-  }
-
-  th:nth-child(12),
-  td:nth-child(12) {
-    width: 180px;
-  }
-
-  th:nth-child(14),
-  td:nth-child(14) {
-    width: 260px;
-  }
-
-  th:last-child,
-  td:last-child {
-    position: sticky;
-    right: 0;
-    z-index: 2;
-    width: 46px;
-    background: color-mix(in srgb, var(--canvas-float-bg) 96%, #050505);
-  }
-
-  td :where(.ant-input, .ant-input-affix-wrapper, textarea.ant-input) {
-    width: 100%;
-  }
-
-  td.canvas-shot-script-editor-cell {
-    height: 1px;
-    .canvas-shot-script-editor-textarea {
-      height: 100%;
-      min-height: 120px;
-    }
-  }
-
-  td.canvas-shot-script-editor-cell.is-multiline,
-  td.canvas-shot-script-editor-cell.is-character {
-    padding-top: 4px;
-    padding-bottom: 4px;
-  }
-
-  td.canvas-shot-script-editor-cell.is-multiline .ant-input-textarea,
-  td.canvas-shot-script-editor-cell.is-character .canvas-shot-script-character-cell {
-    display: flex;
-    min-height: 100%;
-    height: 100%;
-  }
-
-  td.canvas-shot-script-editor-cell.is-multiline .ant-input-textarea {
-    align-items: stretch;
-  }
-
-  td.canvas-shot-script-editor-cell.is-multiline .ant-input-textarea textarea.ant-input {
-    height: 100% !important;
-    min-height: 74px !important;
-    max-height: none !important;
-    overflow-y: hidden !important;
-    resize: none;
-  }
-}
-
-.canvas-shot-script-character-cell {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  justify-content: stretch;
-
-  .ant-input-affix-wrapper,
-  .ant-input {
-    margin-top: auto;
-  }
-}
-
-.canvas-shot-script-character-chip {
-  display: inline-flex;
-  width: 100%;
-  min-height: 26px;
-  align-items: center;
-  justify-content: center;
-  border: 0;
-  border-radius: 8px;
-  background: color-mix(in srgb, #ffffff 5%, transparent);
-  color: var(--text-muted);
-  cursor: pointer;
-  font-size: 12px;
-}
-
-.canvas-shot-script-character-chip:hover,
-.canvas-shot-script-character-chip.is-active {
-  background: color-mix(in srgb, var(--primary) 18%, transparent);
-  color: var(--text-strong);
-}
-
-.canvas-shot-script-empty {
-  color: var(--text-muted);
-  font-size: 12px;
 }
 
 .canvas-node-floating-panel
@@ -8214,6 +8101,42 @@ body.canvas-agent-panel-resizing .canvas-agent-side-panel-resize-handle::after {
   box-shadow:
     0 22px 56px rgba(0, 0, 0, 0.32),
     0 4px 12px rgba(0, 0, 0, 0.2);
+}
+
+// 画布弹层细圆头滚动条：局部覆盖全局 *::-webkit-scrollbar{width:0!important} 隐藏规则。
+// 手法同 chat-stream（global-overrides.css），8mm 轨道 + content-box 让 thumb 视觉约 4mm、两头圆。
+// 覆盖节点工厂菜单、dock 添加下拉、节点右键菜单（antd Dropdown，配合上面的双类选择器优先级）。
+.canvas-add-node-menu,
+.canvas-dock-add-dropdown-panel,
+.canvas-node-context-menu.ant-dropdown-menu {
+  scrollbar-width: auto !important;
+  scrollbar-color: var(--border-strong) transparent !important;
+
+  &::-webkit-scrollbar {
+    width: 8px !important;
+    height: 8px !important;
+  }
+  &::-webkit-scrollbar-track,
+  &::-webkit-scrollbar-track-piece {
+    background: transparent !important;
+  }
+  &::-webkit-scrollbar-thumb {
+    min-height: 28px;
+    border: 2px solid transparent !important;
+    border-radius: 999px !important;
+    background: var(--border-strong) !important;
+    background-clip: content-box !important;
+  }
+  &::-webkit-scrollbar-thumb:hover {
+    background: var(--text-faint) !important;
+    background-clip: content-box !important;
+  }
+  &::-webkit-scrollbar-button,
+  &::-webkit-scrollbar-corner {
+    display: none !important;
+    width: 0 !important;
+    height: 0 !important;
+  }
 }
 
 .canvas-add-node-section {
@@ -10273,10 +10196,34 @@ body.canvas-agent-panel-resizing .canvas-agent-side-panel-resize-handle::after {
   width: 100%;
   min-height: 0;
   flex: 1;
-  overflow: auto;
+  overflow-x: scroll;
+  overflow-y: auto;
   overscroll-behavior: contain;
+  scrollbar-gutter: stable;
   padding: 4px 12px 12px;
   cursor: grab;
+}
+
+.canvas-node-shot-table-wrap:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--primary) 72%, transparent);
+  outline-offset: -2px;
+}
+
+.canvas-node-shot-table-wrap::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.canvas-node-shot-table-wrap::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text-muted) 46%, transparent);
+  background-clip: padding-box;
+}
+
+.canvas-node-shot-table-wrap::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--text-muted) 70%, transparent);
+  background-clip: padding-box;
 }
 
 .canvas-node-shot-table {
@@ -10610,6 +10557,78 @@ body.canvas-agent-panel-resizing .canvas-agent-side-panel-resize-handle::after {
 
 .canvas-agent-panel.is-fullscreen .canvas-agent-modal {
   height: 100%;
+}
+
+.canvas-agent-context-copy {
+  min-width: 0;
+  overflow: hidden;
+  flex: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.canvas-agent-connection {
+  display: inline-flex;
+  min-width: max-content;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-faint);
+  font-size: 10.5px;
+}
+
+.canvas-agent-connection-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-faint);
+}
+
+.canvas-agent-connection.is-attached {
+  color: var(--success, #4d9f74);
+
+  .canvas-agent-connection-dot {
+    background: currentColor;
+  }
+}
+
+.canvas-agent-connection.is-attaching .canvas-agent-connection-dot {
+  background: var(--primary);
+  animation: canvas-agent-connection-pulse 1.2s ease-in-out infinite;
+}
+
+.canvas-agent-connection.is-error {
+  color: var(--danger);
+
+  .canvas-agent-connection-dot {
+    background: currentColor;
+  }
+}
+
+.canvas-agent-connection-retry {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+@keyframes canvas-agent-connection-pulse {
+  0%,
+  100% {
+    opacity: 0.38;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .canvas-agent-connection.is-attaching .canvas-agent-connection-dot {
+    animation: none;
+  }
 }
 
 .canvas-agent-resize-handle {
@@ -12211,459 +12230,6 @@ body.canvas-agent-panel-resizing {
 .canvas-node-edit-bottom-panel.is-fullscreen .canvas-node-edit-prompt-main,
 .canvas-node-edit-bottom-panel.is-fullscreen .canvas-node-edit-prompt-main .canvas-prompt-editor {
   min-height: 0;
-}
-
-/* ─── 3D 导演台节点 / 超大弹窗 ───────────────────────────────────────── */
-.canvas-node-director-stage {
-  position: relative;
-  min-height: 150px;
-  overflow: hidden;
-  border-radius: 14px;
-  background: radial-gradient(circle at 50% 18%, rgba(37, 99, 235, 0.2), transparent 38%), #070a12;
-  border: 1px solid rgba(96, 165, 250, 0.22);
-  color: #dbeafe;
-}
-
-.canvas-node-director-mini {
-  position: absolute;
-  inset: 6px 6px 26px;
-  width: calc(100% - 12px);
-  height: calc(100% - 32px);
-
-  .mini-floor {
-    fill: rgba(15, 23, 42, 0.6);
-    stroke: rgba(56, 189, 248, 0.28);
-    stroke-width: 0.8;
-  }
-
-  .mini-grid line {
-    stroke: rgba(56, 189, 248, 0.14);
-    stroke-width: 0.5;
-  }
-
-  .mini-cone {
-    fill: rgba(245, 158, 11, 0.16);
-    stroke: rgba(245, 158, 11, 0.4);
-    stroke-width: 0.5;
-  }
-
-  .mini-dot {
-    stroke: rgba(0, 0, 0, 0.4);
-    stroke-width: 0.5;
-  }
-
-  .mini-cam {
-    fill: #f59e0b;
-    stroke: rgba(0, 0, 0, 0.4);
-    stroke-width: 0.5;
-  }
-}
-
-.canvas-node-director-stage-hint {
-  position: absolute;
-  left: 12px;
-  right: 12px;
-  bottom: 8px;
-  text-align: center;
-  color: rgba(219, 234, 254, 0.8);
-  font-size: 12px;
-}
-
-.canvas-director-stage-modal .ant-modal-content {
-  padding: 0;
-  overflow: hidden;
-  background: #05070d;
-}
-
-.canvas-director-stage-modal .ant-modal-header {
-  margin: 0;
-  padding: 14px 20px;
-  background: linear-gradient(180deg, #0c111d, #080b13);
-  border-bottom: 1px solid rgba(148, 163, 184, 0.16);
-}
-
-.canvas-director-stage-modal .ant-modal-title {
-  color: #e8eefc;
-}
-
-.canvas-director-stage-modal .ant-modal-close {
-  color: rgba(226, 232, 240, 0.7);
-}
-
-.canvas-director-stage-modal-title {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 15px;
-  font-weight: 700;
-  color: #e8eefc;
-
-  svg {
-    color: #f5a623;
-  }
-}
-
-.canvas-director-stage-modal .ant-modal-body {
-  height: min(84vh, 940px);
-}
-
-.canvas-director-stage-shell {
-  display: grid;
-  grid-template-columns: 216px minmax(440px, 1fr) 328px;
-  height: 100%;
-  color: #e5e7eb;
-}
-
-.canvas-director-stage-tools,
-.canvas-director-stage-inspector {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 16px;
-  background: rgba(15, 23, 42, 0.9);
-  border-right: 1px solid rgba(148, 163, 184, 0.14);
-  overflow: auto;
-}
-
-.canvas-director-stage-inspector {
-  border-right: 0;
-  border-left: 1px solid rgba(148, 163, 184, 0.14);
-}
-
-.canvas-director-stage-section-title {
-  margin-top: 4px;
-  color: #93c5fd;
-  font-size: 12px;
-  font-weight: 800;
-  letter-spacing: 0.04em;
-}
-
-.canvas-director-stage-tip,
-.canvas-director-stage-hint-row {
-  color: rgba(148, 163, 184, 0.78);
-  font-size: 11px;
-  line-height: 1.5;
-}
-
-.canvas-director-stage-object-list {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.canvas-director-stage-object-list button {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  padding: 8px 10px;
-  color: #cbd5e1;
-  background: rgba(15, 23, 42, 0.82);
-  border: 1px solid rgba(148, 163, 184, 0.16);
-  border-radius: 10px;
-  cursor: pointer;
-  transition:
-    border-color 0.15s,
-    background 0.15s;
-}
-
-.canvas-director-stage-object-list button:hover {
-  border-color: rgba(96, 165, 250, 0.5);
-}
-
-.canvas-director-stage-object-list button.active {
-  border-color: rgba(96, 165, 250, 0.85);
-  background: rgba(37, 99, 235, 0.22);
-}
-
-.canvas-director-stage-object-list button .sd-swatch {
-  flex: none;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 20px;
-  height: 20px;
-  border-radius: 6px;
-  color: #0b1220;
-
-  svg {
-    width: 11px;
-    height: 11px;
-  }
-}
-
-.canvas-director-stage-object-list button .sd-swatch-cam {
-  background: rgba(245, 166, 35, 0.18);
-}
-
-.canvas-director-stage-object-list button .ant-tag {
-  margin-left: auto;
-  margin-right: 0;
-}
-
-/* 预设 + 添加行 + 朝向快捷 */
-.canvas-director-stage-presets {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 6px;
-}
-
-.canvas-director-stage-presets button,
-.canvas-director-stage-chip-row button {
-  padding: 6px 8px;
-  color: #cbd5e1;
-  font-size: 12px;
-  background: rgba(15, 23, 42, 0.82);
-  border: 1px solid rgba(148, 163, 184, 0.18);
-  border-radius: 8px;
-  cursor: pointer;
-  transition:
-    border-color 0.15s,
-    background 0.15s,
-    color 0.15s;
-}
-
-.canvas-director-stage-presets button:hover,
-.canvas-director-stage-chip-row button:hover {
-  color: #fff;
-  border-color: rgba(96, 165, 250, 0.7);
-  background: rgba(37, 99, 235, 0.18);
-}
-
-.canvas-director-stage-add-row {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
-}
-
-.canvas-director-stage-chip-row {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 6px;
-}
-
-/* 中列：俯视编排 + 取景预览 */
-.canvas-director-stage-center {
-  display: grid;
-  grid-template-rows: 1.35fr 1fr;
-  gap: 12px;
-  min-width: 0;
-  padding: 14px;
-  overflow: hidden;
-}
-
-.canvas-director-stage-viewport,
-.canvas-director-stage-preview {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  border: 1px solid rgba(148, 163, 184, 0.14);
-  border-radius: 12px;
-  background: radial-gradient(circle at 50% 0%, rgba(15, 23, 42, 0.9), #02040a 60%);
-  overflow: hidden;
-}
-
-.canvas-director-stage-view-label {
-  flex: none;
-  padding: 8px 12px;
-  color: rgba(191, 219, 254, 0.85);
-  font-size: 12px;
-  font-weight: 700;
-  border-bottom: 1px solid rgba(148, 163, 184, 0.12);
-  background: rgba(8, 11, 19, 0.6);
-}
-
-/* 俯视平面图 SVG */
-.canvas-director-stage-plan {
-  flex: 1;
-  width: 100%;
-  min-height: 0;
-  touch-action: none;
-  user-select: none;
-
-  .canvas-director-stage-floor {
-    fill: rgba(15, 23, 42, 0.55);
-    stroke: rgba(56, 189, 248, 0.28);
-    stroke-width: 0.4;
-  }
-
-  .canvas-director-stage-gridlines line {
-    stroke: rgba(56, 189, 248, 0.12);
-    stroke-width: 0.3;
-  }
-
-  .canvas-director-stage-axis {
-    stroke: rgba(148, 163, 184, 0.55);
-    stroke-width: 0.4;
-  }
-
-  .canvas-director-stage-dir {
-    fill: rgba(148, 163, 184, 0.7);
-    font-size: 3px;
-    text-anchor: middle;
-    pointer-events: none;
-  }
-
-  .canvas-director-stage-cone {
-    fill: rgba(245, 158, 11, 0.14);
-    stroke: rgba(245, 158, 11, 0.42);
-    stroke-width: 0.3;
-    pointer-events: none;
-  }
-
-  .canvas-director-stage-glyph {
-    cursor: grab;
-    filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.5));
-    transition: transform 0.05s linear;
-  }
-
-  .sd-obj:hover .canvas-director-stage-glyph {
-    filter: drop-shadow(0 0 4px rgba(96, 165, 250, 0.6));
-  }
-
-  .canvas-director-stage-sel-ring {
-    fill: none;
-    stroke: rgba(255, 255, 255, 0.85);
-    stroke-width: 0.5;
-    stroke-dasharray: 1.4 1.2;
-  }
-
-  .canvas-director-stage-nose {
-    fill: rgba(255, 255, 255, 0.92);
-  }
-
-  .canvas-director-stage-handle-stem {
-    stroke: rgba(96, 165, 250, 0.6);
-    stroke-width: 0.4;
-  }
-
-  .canvas-director-stage-rotate-handle {
-    fill: #fff;
-    stroke: rgba(96, 165, 250, 0.95);
-    stroke-width: 0.5;
-    cursor: grab;
-  }
-
-  .canvas-director-stage-obj-label {
-    fill: #cbd5e1;
-    font-size: 3px;
-    font-weight: 700;
-    text-anchor: middle;
-    pointer-events: none;
-    paint-order: stroke;
-    stroke: rgba(2, 6, 12, 0.85);
-    stroke-width: 0.7;
-  }
-
-  .sd-obj.active .canvas-director-stage-obj-label {
-    fill: #fff;
-  }
-}
-
-/* 取景预览画框（SVG） */
-.canvas-director-stage-frame-wrap {
-  position: relative;
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 0;
-  padding: 10px;
-}
-
-.canvas-director-stage-frame {
-  max-width: 100%;
-  max-height: 100%;
-  border-radius: 8px;
-  overflow: hidden;
-  border: 1px solid rgba(148, 163, 184, 0.2);
-  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
-
-  .sd-frame-bg {
-    fill: #0b1220;
-  }
-
-  .sd-frame-ground {
-    fill: rgba(30, 41, 59, 0.4);
-  }
-
-  .sd-frame-horizon {
-    stroke: rgba(56, 189, 248, 0.35);
-    stroke-width: 0.5;
-  }
-
-  .sd-frame-third {
-    stroke: rgba(148, 163, 184, 0.16);
-    stroke-width: 0.4;
-  }
-
-  .sd-frame-label {
-    fill: #e2e8f0;
-    font-size: 5px;
-    font-weight: 700;
-    text-anchor: middle;
-    paint-order: stroke;
-    stroke: rgba(2, 6, 12, 0.7);
-    stroke-width: 1;
-  }
-}
-
-.canvas-director-stage-offscreen {
-  position: absolute;
-  bottom: 8px;
-  padding: 2px 6px;
-  border-radius: 6px;
-  background: rgba(239, 68, 68, 0.18);
-  color: #fca5a5;
-  font-size: 11px;
-
-  &.left {
-    left: 8px;
-  }
-  &.right {
-    right: 8px;
-  }
-}
-
-/* 检视器字段 */
-.canvas-director-stage-inspector .sd-field {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-
-  > span {
-    color: #93c5fd;
-    font-size: 12px;
-    font-weight: 600;
-  }
-
-  .ant-slider {
-    margin: 2px 6px;
-  }
-}
-
-.canvas-director-stage-inspector .sd-coord-row {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 10px;
-}
-
-.canvas-director-stage-prompt {
-  font-size: 12px;
-  line-height: 1.55;
-  background: rgba(8, 11, 19, 0.7) !important;
-  color: #cbd5e1 !important;
-}
-
-.canvas-director-stage-actions {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
-
-  .ant-btn {
-    width: 100%;
-  }
 }
 
 .canvas-edge-delete-button {

@@ -6,7 +6,7 @@
  *   - 导出单例数据库实例引用
  *
  * 数据库文件路径策略（ADR-002）：
- *   - 开发和生产环境：{app.getPath('userData')}/spark.db
+ *   - 开发和生产环境：{app.getPath('userData')}/spark-canvas.db
  *   - WAL 模式 + NORMAL 同步 + 外键约束
  *
  * 注意：实际的 createDatabase() 调用在 main/index.ts 的 initializeApp() 中完成
@@ -15,6 +15,7 @@
 import { app } from 'electron'
 import { join } from 'path'
 import type { SparkDatabase } from '@spark/storage'
+import { PRODUCT_IDENTITY } from './productIdentity.js'
 
 /**
  * 获取数据库文件路径
@@ -23,7 +24,7 @@ import type { SparkDatabase } from '@spark/storage'
  */
 export function getDatabasePath(): string {
   const userDataPath = app.getPath('userData')
-  return join(userDataPath, 'spark.db')
+  return join(userDataPath, PRODUCT_IDENTITY.databaseFileName)
 }
 
 /** 全局数据库实例引用（由 initializeApp() 初始化） */

@@ -74,7 +74,6 @@ export function GitEnvPanel({
   onOpenCommit,
   onOpenBranches,
   onOpenReview,
-  onOpenTerminal,
   tasks,
   goal,
   onGoalControl,
@@ -86,7 +85,6 @@ export function GitEnvPanel({
   onOpenCommit: () => void
   onOpenBranches: () => void
   onOpenReview: () => void
-  onOpenTerminal: () => void
   tasks: InspectorTask[]
   goal: GoalSnapshot | null
   onGoalControl: (action: 'pause' | 'resume' | 'clear' | 'complete') => void
@@ -147,14 +145,6 @@ export function GitEnvPanel({
           <div className="git-popover-muted">{getGitSourceLabel(status)}</div> */}
         </>
       )}
-      {/* 环境快捷入口：终端打开常驻，git 与否都可用 */}
-      <div className="git-popover-divider" />
-      <button type="button" className="git-env-row" onClick={onOpenTerminal}>
-        <span className="git-env-icon">
-          <Icons.Terminal size={14} />
-        </span>
-        <span>打开终端</span>
-      </button>
       <GitTaskProgressList tasks={tasks} />
       <GitGoalSection goal={goal} onGoalControl={onGoalControl} />
     </div>

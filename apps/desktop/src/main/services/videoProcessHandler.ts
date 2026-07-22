@@ -10,7 +10,8 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { join, resolve, isAbsolute, sep } from 'node:path'
+import { mkdirSync } from 'node:fs'
+import { join, resolve, isAbsolute } from 'node:path'
 import { app } from 'electron'
 import type { VideoProcessRequest, VideoProcessResponse } from '@spark/protocol'
 import {
@@ -32,19 +33,11 @@ import {
   type TranscodeOpts,
 } from './FfmpegRunner.js'
 import { getSafeFileAllowedRoots } from './SafeFileProtocol.js'
+import { isCanonicalPathSameOrChild } from './FilePathBoundary.js'
 
 /** 视频产物落盘根目录：{userData}/.spark-artifacts/media/video-workbench/ */
 function getVideoArtifactDir(): string {
   return join(app.getPath('userData'), '.spark-artifacts', 'media', 'video-workbench')
-}
-
-/** 缓存白名单根目录（启动后基本不变，避免每次 IPC 都查 DB） */
-let cachedAllowedRoots: string[] | null = null
-function getAllowedRoots(): string[] {
-  if (cachedAllowedRoots == null) {
-    cachedAllowedRoots = getSafeFileAllowedRoots()
-  }
-  return cachedAllowedRoots
 }
 
 /**
@@ -58,23 +51,27 @@ function assertPathAllowed(p: string, mode: 'read' | 'write'): void {
   if (!p || typeof p !== 'string') {
     throw new Error(`Invalid path: ${String(p)}`)
   }
-  const abs = resolve(p)
-  if (!isAbsolute(abs)) {
+  if (!isAbsolute(p)) {
     throw new Error(`Path must be absolute: ${p}`)
   }
+  const abs = resolve(p)
   // 写路径额外收紧：只允许写视频产物目录（防止覆盖用户文件）
   if (mode === 'write') {
     const artifactDir = resolve(getVideoArtifactDir())
     // outputPath 可能是产物目录里的文件，检查前缀
     const tempDir = resolve(app.getPath('temp'))
-    if (!abs.startsWith(artifactDir + sep) && !abs.startsWith(tempDir + sep)) {
+    if (
+      !isCanonicalPathSameOrChild(abs, artifactDir) &&
+      !isCanonicalPathSameOrChild(abs, tempDir)
+    ) {
       throw new Error(`Write path outside allowed artifact directory: ${abs}`)
     }
     return
   }
   // 读路径：必须在任一白名单根目录下
-  const roots = getAllowedRoots()
-  const allowed = roots.some((root) => abs.startsWith(resolve(root) + sep) || abs === resolve(root))
+  const allowed = getSafeFileAllowedRoots().some((root) =>
+    isCanonicalPathSameOrChild(abs, resolve(root)),
+  )
   if (!allowed) {
     throw new Error(`Path outside allowed roots: ${abs}`)
   }
@@ -100,7 +97,11 @@ export async function handleVideoProcess(
     return { success: true, result }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
-    console.error('[video-workbench] handleVideoProcess error:', message, err instanceof Error ? err.stack : '')
+    console.error(
+      '[video-workbench] handleVideoProcess error:',
+      message,
+      err instanceof Error ? err.stack : '',
+    )
     return { success: false, error: message }
   }
 }
@@ -110,7 +111,11 @@ async function dispatch(
   onProgress?: (p: FfmpegProgress) => void,
 ): Promise<unknown> {
   const { operation, input, params } = req
-  console.log('[video-workbench] dispatch:', { operation, input: input.slice(0, 100), paramKeys: Object.keys(params) })
+  console.log('[video-workbench] dispatch:', {
+    operation,
+    input: input.slice(0, 100),
+    paramKeys: Object.keys(params),
+  })
 
   // ── 统一输入校验：路径白名单 + 数值范围 ──────────────────────────
   assertPathAllowed(input, 'read')
@@ -148,6 +153,10 @@ async function dispatch(
   assertNumRange(params.w, 1, 16384, 'crop w')
   assertNumRange(params.h, 1, 16384, 'crop h')
 
+  if (operation !== 'probe') {
+    mkdirSync(getVideoArtifactDir(), { recursive: true })
+  }
+
   switch (operation) {
     // ── 探测（无进度）──────────────────────────────────────────────
     case 'probe': {
@@ -157,7 +166,8 @@ async function dispatch(
     // ── 关键帧提取 ──────────────────────────────────────────────────
     case 'extractKeyframes': {
       const strategy = (params.strategy as KeyframeStrategy) ?? 'scene'
-      const outputDir = (params.outputDir as string) ?? join(getVideoArtifactDir(), `kf_${req.requestId}`)
+      const outputDir =
+        (params.outputDir as string) ?? join(getVideoArtifactDir(), `kf_${req.requestId}`)
       return extractKeyframes(input, {
         strategy,
         threshold: asNumber(params.threshold),
@@ -173,7 +183,8 @@ async function dispatch(
     // ── 指定时间点抽帧（手动标记）──────────────────────────────────
     case 'extractFramesAtTimes': {
       const times = (params.timesSec as number[]) ?? []
-      const outputDir = (params.outputDir as string) ?? join(getVideoArtifactDir(), `manual_${req.requestId}`)
+      const outputDir =
+        (params.outputDir as string) ?? join(getVideoArtifactDir(), `manual_${req.requestId}`)
       return extractFramesAtTimes(input, times, outputDir, {
         format: (params.format as 'jpg' | 'png') ?? 'jpg',
         quality: asNumber(params.quality, 2),
@@ -202,7 +213,7 @@ async function dispatch(
     }
 
     case 'concat': {
-      const inputs = [input, ...(params.additionalInputs as string[] ?? [])]
+      const inputs = [input, ...((params.additionalInputs as string[]) ?? [])]
       const outputPath = (params.outputPath as string) ?? makeOutputPath('mp4')
       return concatVideos(inputs, outputPath, { onProgress })
     }
@@ -219,8 +230,12 @@ async function dispatch(
       const outputPath = (params.outputPath as string) ?? makeOutputPath(format)
       const opts: TranscodeOpts = {
         format,
-        ...(params.videoCodec ? { videoCodec: params.videoCodec as TranscodeOpts['videoCodec'] } : {}),
-        ...(params.audioCodec ? { audioCodec: params.audioCodec as TranscodeOpts['audioCodec'] } : {}),
+        ...(params.videoCodec
+          ? { videoCodec: params.videoCodec as TranscodeOpts['videoCodec'] }
+          : {}),
+        ...(params.audioCodec
+          ? { audioCodec: params.audioCodec as TranscodeOpts['audioCodec'] }
+          : {}),
         ...(params.resolution ? { resolution: params.resolution as { w: number; h: number } } : {}),
         ...(params.bitrate ? { bitrate: params.bitrate as string } : {}),
         ...(params.crf != null ? { crf: asNumber(params.crf, 23) } : {}),
@@ -260,7 +275,13 @@ async function dispatch(
       if (!logoPath) throw new Error('水印操作需要 logoPath 参数')
       const outputPath = (params.outputPath as string) ?? makeOutputPath('mp4')
       return addWatermark(input, logoPath, outputPath, {
-        position: (params.position as 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right' | 'center') ?? 'bottom-right',
+        position:
+          (params.position as
+            | 'top-left'
+            | 'top-right'
+            | 'bottom-left'
+            | 'bottom-right'
+            | 'center') ?? 'bottom-right',
         scale: asNumber(params.scale, 0.2),
         onProgress,
       })

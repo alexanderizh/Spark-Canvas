@@ -156,7 +156,29 @@ describe('CodexSdkExecutor', () => {
       }
     })
 
-    await executor.executeTurn('session-1', 'turn-1', 'hello', makeConfig())
+    const invocationObserver = vi.fn()
+    await executor.executeTurn(
+      'session-1',
+      'turn-1',
+      'hello',
+      makeConfig({ apiEndpoint: 'https://api.example.com/v1', invocationObserver }),
+    )
+
+    expect(invocationObserver).toHaveBeenCalledWith(
+      expect.objectContaining({
+        transport: 'codex-sdk',
+        request: expect.objectContaining({
+          input: expect.stringContaining('hello'),
+          clientOptions: expect.objectContaining({
+            baseUrl: 'https://api.example.com/v1',
+            credentials: '[redacted]',
+          }),
+          threadOptions: expect.objectContaining({ model: 'gpt-5-codex' }),
+        }),
+      }),
+    )
+    expect(JSON.stringify(invocationObserver.mock.calls)).not.toContain('sk-test')
+    expect(JSON.stringify(invocationObserver.mock.calls)).not.toContain('mcp-secret')
 
     expect(codexCtor).toHaveBeenCalledWith(
       expect.objectContaining({

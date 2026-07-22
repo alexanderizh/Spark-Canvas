@@ -1,4 +1,6 @@
-const REDEEM_PROTOCOL = 'spark-agent:'
+import { PRODUCT_IDENTITY } from '../../productIdentity.js'
+
+const REDEEM_PROTOCOL = `${PRODUCT_IDENTITY.protocol}:`
 const MAX_REDEEM_CODE_LENGTH = 256
 
 export function parsePlatformModelRedeemDeepLink(value: string): string | null {

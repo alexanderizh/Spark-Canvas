@@ -3,6 +3,7 @@ import type { BrowserWindowConstructorOptions } from 'electron'
 import { join } from 'node:path'
 import { createLogger, SparkError } from '@spark/shared'
 import { registerAppWindow } from '../windows/index.js'
+import { PRODUCT_IDENTITY } from '../productIdentity.js'
 
 const log = createLogger('canvas-window')
 const { app, BrowserWindow: ElectronBrowserWindow, shell } = electron
@@ -182,7 +183,7 @@ function createCanvasBrowserWindow(): CanvasBrowserWindow {
     minWidth: 980,
     minHeight: 680,
     show: false,
-    title: 'SparkWork · Canvas',
+    title: `${PRODUCT_IDENTITY.name} · Canvas`,
     autoHideMenuBar: true,
     backgroundColor: '#111113',
     hasShadow: true,

@@ -15,6 +15,7 @@
 import { capabilityForOperation } from '@spark/protocol'
 import type { CanvasOperationType } from '@spark/protocol'
 import type {
+  CanvasMediaTaskInputFile,
   CanvasMediaPruneModelParamsResponse,
   MediaDroppedParam,
 } from '@spark/protocol'
@@ -27,9 +28,12 @@ export interface PruneModelParamsForCanvasInput {
   providerProfileId?: string | undefined
   /** 显式 capability；缺省时按 operation 推导。 */
   capabilityId?: string | undefined
+  modelId?: string | undefined
+  prompt?: string | undefined
+  validateSubmission?: boolean | undefined
   modelParams: Record<string, unknown>
-  /** 输入文件类型摘要（image / video / first_frame / last_frame / mask 等）。 */
-  inputFiles?: Array<{ type: string; role?: string | undefined }> | undefined
+  /** 最终物化后的输入文件及角色/传输信息。 */
+  inputFiles?: CanvasMediaTaskInputFile[] | undefined
 }
 
 export interface PruneModelParamsForCanvasResult {
@@ -39,10 +43,14 @@ export interface PruneModelParamsForCanvasResult {
   droppedParams: MediaDroppedParam[]
   /** 非阻断性提示，供 UI 提示用户。 */
   warnings: CanvasMediaPruneModelParamsResponse['warnings']
-  /** schema 校验失败摘要，severity='error 时建议 UI 提示但仍允许提交。 */
+  /** schema 校验结果；最终提交预校验中 severity='error' 会阻断任务。 */
   validationIssues: CanvasMediaPruneModelParamsResponse['validationIssues']
   /** 裁剪未执行的原因（manifest 不存在等）；正常裁剪时为 undefined。 */
   fallbackReason?: string | undefined
+  /** 最终预校验锁定的执行目标，避免提交时再次自动路由到其他模型。 */
+  resolvedManifestId?: string | undefined
+  resolvedProviderProfileId?: string | undefined
+  resolvedModelId?: string | undefined
 }
 
 /**
@@ -52,17 +60,18 @@ export interface PruneModelParamsForCanvasResult {
 export async function pruneModelParamsForCanvas(
   input: PruneModelParamsForCanvasInput,
 ): Promise<PruneModelParamsForCanvasResult> {
-  const { manifestId, providerProfileId, capabilityId, modelParams, inputFiles, operation } = input
-  if (!manifestId) {
-    return {
-      modelParams,
-      droppedParams: [],
-      warnings: [],
-      validationIssues: [],
-      fallbackReason: '目标模型未携带 manifestId，跳过 contract 裁剪',
-    }
-  }
-  const capability = capabilityId ?? deriveCapabilityId(operation)
+  const {
+    manifestId,
+    providerProfileId,
+    capabilityId,
+    modelId,
+    prompt,
+    validateSubmission,
+    modelParams,
+    inputFiles,
+    operation,
+  } = input
+  let capability = capabilityId ?? deriveCapabilityId(operation)
   if (!capability) {
     return {
       modelParams,
@@ -72,25 +81,139 @@ export async function pruneModelParamsForCanvas(
       fallbackReason: `无法为 operation=${operation} 推导 capability，跳过 contract 裁剪`,
     }
   }
+  let effectiveManifestId = manifestId
+  let effectiveProviderProfileId = providerProfileId
+  let effectiveModelId = modelId
+  if (validateSubmission === true) {
+    const referenceCapability = prefersReferenceVideoCapability(operation, inputFiles)
+      ? 'video.reference_to_video'
+      : undefined
+    const discoveryCapability = capabilityId ?? referenceCapability ?? capability
+    const hasExplicitModelTarget = Boolean(manifestId || modelId)
+    let response = await canvasApi.listMediaModels({
+      ...(providerProfileId ? { providerProfileId } : {}),
+      ...(!hasExplicitModelTarget ? { capability: discoveryCapability } : {}),
+      enabledOnly: true,
+    })
+    if (
+      response.models.length === 0 &&
+      !hasExplicitModelTarget &&
+      referenceCapability &&
+      discoveryCapability !== capability
+    ) {
+      response = await canvasApi.listMediaModels({
+        ...(providerProfileId ? { providerProfileId } : {}),
+        capability,
+        enabledOnly: true,
+      })
+    }
+    const selected = response.models.find((model) => {
+      if (manifestId && model.manifestId !== manifestId) return false
+      if (modelId && model.effectiveModelId !== modelId && model.modelId !== modelId) {
+        return false
+      }
+      return true
+    })
+    if (selected) {
+      effectiveManifestId = selected.manifestId
+      effectiveProviderProfileId = providerProfileId ?? selected.providerProfileId
+      effectiveModelId = modelId ?? selected.effectiveModelId
+      if (
+        !capabilityId &&
+        referenceCapability &&
+        selected.capabilities.some((item) => item.id === referenceCapability)
+      ) {
+        capability = referenceCapability
+      }
+    } else {
+      const target = [manifestId, modelId].filter(Boolean).join(' / ') || capability
+      return {
+        modelParams,
+        droppedParams: [],
+        warnings: [],
+        validationIssues: [],
+        fallbackReason: `未找到已启用且匹配 ${target} 的媒体模型`,
+      }
+    }
+  }
+  if (!effectiveManifestId) {
+    return {
+      modelParams,
+      droppedParams: [],
+      warnings: [],
+      validationIssues: [],
+      fallbackReason: '目标模型未携带 manifestId，跳过 contract 裁剪',
+    }
+  }
   const response = await canvasApi.pruneMediaModelParams({
-    manifestId,
-    ...(providerProfileId != null ? { providerProfileId } : {}),
+    manifestId: effectiveManifestId,
+    ...(effectiveProviderProfileId != null
+      ? { providerProfileId: effectiveProviderProfileId }
+      : {}),
     capabilityId: capability,
+    ...(effectiveModelId != null ? { modelId: effectiveModelId } : {}),
+    ...(prompt != null ? { prompt } : {}),
+    ...(validateSubmission != null ? { validateSubmission } : {}),
     modelParams,
-    ...(inputFiles != null ? { inputFiles } : {}),
+    ...(inputFiles != null ? { inputFiles: inputFiles.map(summarizeValidationInputFile) } : {}),
   })
   return {
     modelParams: response.prunedModelParams,
     droppedParams: response.droppedParams,
     warnings: response.warnings,
     validationIssues: response.validationIssues,
+    resolvedManifestId: effectiveManifestId,
+    ...(effectiveProviderProfileId
+      ? { resolvedProviderProfileId: effectiveProviderProfileId }
+      : {}),
+    ...(effectiveModelId ? { resolvedModelId: effectiveModelId } : {}),
     ...(response.fallbackReason != null ? { fallbackReason: response.fallbackReason } : {}),
   }
+}
+
+function summarizeValidationInputFile(file: CanvasMediaTaskInputFile): CanvasMediaTaskInputFile {
+  if (!file.dataUrl) return file
+  const commaIndex = file.dataUrl.indexOf(',')
+  const summary =
+    commaIndex >= 0 && commaIndex <= 512
+      ? `${file.dataUrl.slice(0, commaIndex + 1)}${file.dataUrl.slice(
+          commaIndex + 1,
+          commaIndex + 33,
+        )}`
+      : file.dataUrl.slice(0, 512)
+  return { ...file, dataUrl: summary }
 }
 
 function deriveCapabilityId(operation: CanvasOperationType): string | undefined {
   const capabilities = capabilityForOperation(operation)
   return capabilities[0] ?? undefined
+}
+
+function prefersReferenceVideoCapability(
+  operation: CanvasOperationType,
+  inputFiles: CanvasMediaTaskInputFile[] | undefined,
+): boolean {
+  if (operation !== 'text_to_video' && operation !== 'image_to_video') return false
+  if (operation === 'text_to_video') {
+    return (inputFiles ?? []).some((file) => isMediaFile(file))
+  }
+  const images = (inputFiles ?? []).filter((file) => file.type === 'image')
+  if ((inputFiles ?? []).some((file) => file.type === 'video' || file.type === 'audio')) {
+    return true
+  }
+  if (images.some((file) => file.role === 'reference')) return true
+  // Older canvas payloads did not persist roles. With multiple unassigned
+  // images the only unambiguous safe mode is reference-to-video; otherwise a
+  // provider's one-image first-frame limit can reject a valid request.
+  return (
+    images.length > 1 &&
+    !images.some((file) => file.role === 'first_frame' || file.role === 'last_frame')
+  )
+}
+
+function isMediaFile(file: CanvasMediaTaskInputFile): boolean {
+  if (file.type === 'image' || file.type === 'video' || file.type === 'audio') return true
+  return file.type === 'file' && /^((image|video|audio)\/)/i.test(file.mimeType ?? '')
 }
 
 /**

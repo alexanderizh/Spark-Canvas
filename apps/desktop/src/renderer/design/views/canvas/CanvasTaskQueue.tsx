@@ -4,11 +4,13 @@ import { Descriptions, Empty, Modal, Progress, Space } from 'antd'
 import { Icons } from '../../Icons'
 import { operationLabel } from './canvas.api'
 import { buildCanvasTaskDetailParams } from './canvasTaskInputDiagnostics'
+import { stripDuplicateCanvasRuntimeDiagnostics } from './canvasTaskDetailPresentation'
 import type { CanvasAsset, CanvasNode, CanvasTask, CanvasTaskStatus } from './canvas.types'
 import { CanvasTaskInputSnapshotList } from './CanvasTaskInputSnapshotList'
 
 type TaskFilter = 'all' | 'active' | 'failed' | 'completed'
 type ClearTaskScope = 'active' | 'failed'
+export type CanvasTaskRetryRuntimeSource = 'current-node' | 'original-task'
 
 export function CanvasTaskQueue({
   tasks,
@@ -26,7 +28,7 @@ export function CanvasTaskQueue({
   onCancelTask: (taskId: string) => void
   onClearTasks: (scope: ClearTaskScope) => void | Promise<void>
   onDeleteTasks: (taskIds: string[]) => void | Promise<void>
-  onRetryTask: (task: CanvasTask) => void
+  onRetryTask: (task: CanvasTask, runtimeSource: CanvasTaskRetryRuntimeSource) => void
   onSelectNode: (nodeId: string) => void
 }) {
   const [filter, setFilter] = useState<TaskFilter>('all')
@@ -58,8 +60,7 @@ export function CanvasTaskQueue({
     () => new Set(nodes.map((node) => node.taskId).filter(Boolean) as string[]),
     [nodes],
   )
-  const isOrphanTask = (task: CanvasTask) =>
-    isTaskActive(task) && !hostedTaskIds.has(task.id)
+  const isOrphanTask = (task: CanvasTask) => isTaskActive(task) && !hostedTaskIds.has(task.id)
   const orphanTasks = tasks.filter(isOrphanTask)
   const orphanCount = orphanTasks.length
   const detailTask = tasks.find((task) => task.id === detailTaskId) ?? null
@@ -70,10 +71,7 @@ export function CanvasTaskQueue({
     if (taskIds.length === 0 || clearingRef.current) return
     const count = taskIds.length
     Modal.confirm({
-      title:
-        count === 1
-          ? '清理该无节点的运行中任务？'
-          : `清理 ${count} 个无节点的运行中任务？`,
+      title: count === 1 ? '清理该无节点的运行中任务？' : `清理 ${count} 个无节点的运行中任务？`,
       content:
         '这些任务的承载节点已被删除，runtime 早已失效，无法正常取消。将直接从队列删除这些残留记录，操作不可撤销。',
       okText: '清理',
@@ -98,12 +96,10 @@ export function CanvasTaskQueue({
     if (count === 0 || clearingRef.current) return
     const isClearActive = scope === 'active'
     Modal.confirm({
-      title: isClearActive
-        ? `取消全部 ${count} 个运行中任务？`
-        : `清空全部 ${count} 个失败任务？`,
+      title: isClearActive ? `取消全部 ${count} 个运行中任务？` : `清空全部 ${count} 个失败任务？`,
       content: isClearActive
         ? '将中断这些正在运行的任务，已生成的部分结果不会保留。'
-        : '将从队列中删除这些已结束的任务记录，操作不可撤销。',
+        : '无产物的失败记录将从队列删除；仍有关联产物的记录会恢复为完成并保留。删除操作不可撤销。',
       okText: isClearActive ? '全部取消' : '清空',
       okButtonProps: { danger: true },
       cancelText: '再想想',
@@ -160,7 +156,6 @@ export function CanvasTaskQueue({
               清理({orphanCount})
             </Button>
           )}
-   
         </Space>
       </div>
 
@@ -384,7 +379,7 @@ function TaskCard({
         <div className="canvas-task-card-error">
           承载节点已被删除，无法正常取消，请点「清理」移除该残留记录。
         </div>
-      ) : (task.errorMsg || task.errorDetail) ? (
+      ) : task.errorMsg || task.errorDetail ? (
         <div className="canvas-task-card-error">{task.errorDetail ?? task.errorMsg}</div>
       ) : null}
     </div>
@@ -428,39 +423,42 @@ function TaskDetailModal({
   assets: CanvasAsset[]
   onClose: () => void
   onCancelTask: (taskId: string) => void
-  onRetryTask: (task: CanvasTask) => void
+  onRetryTask: (task: CanvasTask, runtimeSource: CanvasTaskRetryRuntimeSource) => void
   onSelectNode: (nodeId: string) => void
 }) {
   if (!task) return null
 
   const inputNodes = nodes.filter((node) => task.inputNodeIds.includes(node.id))
   const outputNodes = nodes.filter((node) => task.outputNodeIds.includes(node.id))
-  // 节点已代表其背后资产（节点带 assetId）时，资产版块就是冗余展示，
-  // 节点版块既能定位跳转又带原标题。仅显示那些没被任何对应节点代表的纯资产引用。
-  const inputNodeAssetIds = new Set(
-    inputNodes.map((n) => n.assetId).filter((id): id is string => Boolean(id))
-  )
-  const outputNodeAssetIds = new Set(
-    outputNodes.map((n) => n.assetId).filter((id): id is string => Boolean(id))
-  )
-  const inputAssets = assets.filter(
-    (asset) => task.inputAssetIds.includes(asset.id) && !inputNodeAssetIds.has(asset.id)
-  )
-  const outputAssets = assets.filter(
-    (asset) => task.outputAssetIds.includes(asset.id) && !outputNodeAssetIds.has(asset.id)
-  )
-  const taskNode = nodes.find((node) => node.taskId === task.id)
+  // Keep assets visible even when a node also represents them. Diagnostic views favor
+  // complete lineage over UI deduplication.
+  const inputAssets = assets.filter((asset) => task.inputAssetIds.includes(asset.id))
+  const outputAssets = assets.filter((asset) => task.outputAssetIds.includes(asset.id))
+  const taskNode =
+    (task.operationNodeId ? nodes.find((node) => node.id === task.operationNodeId) : undefined) ??
+    nodes.find((node) => node.taskId === task.id)
   const canCancel = isTaskActive(task)
   const raw = isRecord(task.rawResponse) ? task.rawResponse : null
-  const outputText = stringField(raw?.outputText) || stringField(raw?.text)
+  const outputText = task.modelOutputText || stringField(raw?.outputText) || stringField(raw?.text)
   const parsedEntities = raw?.parsedEntities
   const displayPrompt = task.compiledUserText || task.prompt || ''
-  const detailParams = buildCanvasTaskDetailParams(task)
+  const detailParams = {
+    ...buildCanvasTaskDetailParams(task),
+    ...(task.shotScriptConfig == null && taskNode?.data.shotScriptConfig
+      ? { shotScriptConfig: taskNode.data.shotScriptConfig }
+      : {}),
+  }
   const httpResponse = task.requestCall?.response
-  const providerResponseText = task.rawResponse != null ? formatJson(task.rawResponse) : ''
+  const submitResponse = task.submitResponse ?? httpResponse?.body
+  const requestCaptureStatus = isRecord(task.requestCall?.body)
+    ? stringField(task.requestCall.body.captureStatus)
+    : undefined
+  const runtimeDiagnostics = stripDuplicateCanvasRuntimeDiagnostics(task.rawResponse)
+  const providerResponseText = runtimeDiagnostics != null ? formatJson(runtimeDiagnostics) : ''
   const httpResponseBodyText = httpResponse?.body != null ? formatJson(httpResponse.body) : ''
   const shouldShowProviderResponse =
-    task.rawResponse != null &&
+    runtimeDiagnostics != null &&
+    (!isRecord(runtimeDiagnostics) || Object.keys(runtimeDiagnostics).length > 0) &&
     (!httpResponseBodyText || providerResponseText !== httpResponseBodyText)
 
   return (
@@ -502,8 +500,13 @@ function TaskDetailModal({
           <Button size="middle" disabled={!canCancel} onClick={() => onCancelTask(task.id)}>
             中断取消
           </Button>
-          <Button size="middle" onClick={() => onRetryTask(task)}>
-            {task.status === 'failed' || task.status === 'cancelled' ? '重试' : '再次运行'}
+          {taskNode && (
+            <Button size="middle" onClick={() => onRetryTask(task, 'current-node')}>
+              使用当前节点模型重试
+            </Button>
+          )}
+          <Button size="middle" type="text" onClick={() => onRetryTask(task, 'original-task')}>
+            按原任务模型重试
           </Button>
         </Space>
 
@@ -525,14 +528,92 @@ function TaskDetailModal({
           ]}
         />
 
-        {outputText && (
-          <DetailBlock title="模型输出">
-            <pre>{outputText}</pre>
+        <DetailBlock title="模型原始输出（解析失败也保留）" defaultOpen>
+          <pre>{outputText || '（Provider/Agent 未返回任何文本）'}</pre>
+        </DetailBlock>
+
+        {task.requestCall ? (
+          <DetailBlock title="实际模型调用（最终 HTTP / SDK / CLI 参数）" defaultOpen>
+            <div className="canvas-task-request-call">
+              {requestCaptureStatus === 'session-dispatch' && (
+                <div className="canvas-task-detail-note">
+                  Executor 尚未进入最终 SDK/CLI
+                  提交边界；当前仅保留会话调度参数，不能视为底层模型请求。
+                </div>
+              )}
+              <div className="canvas-task-detail-subtitle">模型调用地址</div>
+              <div className="canvas-task-request-line">
+                <Tag size="middle" color="blue">
+                  {task.requestCall.method}
+                </Tag>
+                <code>{task.requestCall.url}</code>
+              </div>
+              {task.requestCall.headers != null && (
+                <>
+                  <div className="canvas-task-detail-subtitle">脱敏请求头</div>
+                  <pre>{formatJson(task.requestCall.headers)}</pre>
+                </>
+              )}
+              {task.requestCall.body != null && (
+                <>
+                  <div className="canvas-task-detail-subtitle">
+                    {isHttpMethod(task.requestCall.method)
+                      ? '最终 HTTP 请求体（脱敏）'
+                      : '最终 SDK / CLI 调用参数（脱敏）'}
+                  </div>
+                  <pre>{formatJson(task.requestCall.body)}</pre>
+                </>
+              )}
+              {(httpResponse || task.submitResponse != null) && (
+                <>
+                  <div className="canvas-task-detail-subtitle">调用响应</div>
+                  {httpResponse && (
+                    <div className="canvas-task-request-line">
+                      <Tag size="middle" color={httpResponse.status >= 400 ? 'red' : 'green'}>
+                        {httpResponse.status}
+                      </Tag>
+                      <code>{httpResponse.statusText || 'response'}</code>
+                    </div>
+                  )}
+                  {httpResponse?.headers != null && <pre>{formatJson(httpResponse.headers)}</pre>}
+                  {submitResponse != null && <pre>{formatJson(submitResponse)}</pre>}
+                </>
+              )}
+            </div>
+          </DetailBlock>
+        ) : (
+          task.status !== 'pending' && (
+            <DetailBlock title="实际模型调用（历史任务未记录）" defaultOpen>
+              <div className="canvas-task-detail-empty-call">
+                该任务由旧版本创建，未保存最终 HTTP/SDK
+                调用快照。下次运行或重试会记录调用地址和最终参数。
+              </div>
+            </DetailBlock>
+          )
+        )}
+
+        {(task.systemPrompt || displayPrompt) && (
+          <DetailBlock title="画布提交 Prompt（调用前快照）">
+            <div className="canvas-task-detail-note">
+              这里是画布提交给主进程的 Prompt；Provider/SDK 最终组合结果以上方“实际模型调用”为准。
+            </div>
+            {task.systemPrompt && (
+              <>
+                <div className="canvas-task-detail-subtitle">System Prompt</div>
+                <pre>{task.systemPrompt}</pre>
+              </>
+            )}
+            {displayPrompt && (
+              <>
+                <div className="canvas-task-detail-subtitle">User Prompt</div>
+                <pre>{displayPrompt}</pre>
+              </>
+            )}
           </DetailBlock>
         )}
 
         {task.inputSnapshots && task.inputSnapshots.length > 0 && (
-          <DetailBlock title="提交快照输入">
+          <DetailBlock title="冻结输入内容（仅用于血缘与原文排查）">
             <CanvasTaskInputSnapshotList snapshots={task.inputSnapshots} />
           </DetailBlock>
         )}
@@ -546,7 +627,7 @@ function TaskDetailModal({
           </div>
         </DetailBlock>
 
-        <DetailBlock title="任务配置参数">
+        <DetailBlock title="画布侧任务配置（非最终模型请求）">
           <pre>{formatJson(detailParams)}</pre>
         </DetailBlock>
 
@@ -556,38 +637,25 @@ function TaskDetailModal({
           </DetailBlock>
         )}
 
-        {task.requestCall && (
-          <DetailBlock title="实际 HTTP 请求">
+        {!task.requestCall && (httpResponse || task.submitResponse != null) && (
+          <DetailBlock title={task.submitResponse != null ? '任务提交响应' : '实际 HTTP 响应'}>
             <div className="canvas-task-request-call">
-              <div className="canvas-task-request-line">
-                <Tag size="middle" color="blue">
-                  {task.requestCall.method}
-                </Tag>
-                <code>{task.requestCall.url}</code>
-              </div>
-              {task.requestCall.headers != null && <pre>{formatJson(task.requestCall.headers)}</pre>}
-              {task.requestCall.body != null && <pre>{formatJson(task.requestCall.body)}</pre>}
-            </div>
-          </DetailBlock>
-        )}
-
-        {httpResponse && (
-          <DetailBlock title="实际 HTTP 响应">
-            <div className="canvas-task-request-call">
-              <div className="canvas-task-request-line">
-                <Tag size="middle" color={httpResponse.status >= 400 ? 'red' : 'green'}>
-                  {httpResponse.status}
-                </Tag>
-                <code>{httpResponse.statusText || 'response'}</code>
-              </div>
-              {httpResponse.headers != null && <pre>{formatJson(httpResponse.headers)}</pre>}
-              {httpResponse.body != null && <pre>{formatJson(httpResponse.body)}</pre>}
+              {httpResponse && (
+                <div className="canvas-task-request-line">
+                  <Tag size="middle" color={httpResponse.status >= 400 ? 'red' : 'green'}>
+                    {httpResponse.status}
+                  </Tag>
+                  <code>{httpResponse.statusText || 'response'}</code>
+                </div>
+              )}
+              {httpResponse?.headers != null && <pre>{formatJson(httpResponse.headers)}</pre>}
+              {submitResponse != null && <pre>{formatJson(submitResponse)}</pre>}
             </div>
           </DetailBlock>
         )}
 
         {(task.errorMsg || task.errorDetail) && (
-          <DetailBlock title="错误日志">
+          <DetailBlock title="错误日志" defaultOpen>
             <div className="canvas-task-error-log">
               <strong>{task.errorMsg ?? 'error'}</strong>
               <pre>{task.errorDetail ?? '-'}</pre>
@@ -597,37 +665,27 @@ function TaskDetailModal({
 
         <DetailBlock title="运行日志">
           <div className="canvas-task-log-list">
-            <TaskLogItem time={task.createdAt} label="任务创建" />
-            {(task.agentId || task.providerProfileId || task.modelId) && (
-              <TaskLogItem
-                time={task.updatedAt}
-                label={`运行配置：${[
-                  task.agentId ? `Agent ${task.agentId}` : '',
-                  task.providerProfileId ? `Profile ${task.providerProfileId}` : '',
-                  task.provider ? `Provider ${task.provider}` : '',
-                  task.modelId ? `Model ${task.modelId}` : '',
-                ]
-                  .filter(Boolean)
-                  .join(' / ')}`}
-              />
+            {task.runtimeEvents && task.runtimeEvents.length > 0 ? (
+              task.runtimeEvents.map((event, index) => (
+                <TaskLogItem
+                  key={`${event.at}-${event.kind}-${index}`}
+                  time={event.at}
+                  label={event.detail ? `${event.label}：${event.detail}` : event.label}
+                />
+              ))
+            ) : (
+              <>
+                <TaskLogItem time={task.createdAt} label="任务创建（旧任务无详细事件）" />
+                <TaskLogItem time={task.updatedAt} label={`最后状态：${task.status}`} />
+                {task.completedAt && <TaskLogItem time={task.completedAt} label="任务结束" />}
+              </>
             )}
-            {displayPrompt && (
-              <TaskLogItem time={task.updatedAt} label={`Prompt ${displayPrompt.length} 字符`} />
-            )}
-            {outputText && (
-              <TaskLogItem time={task.updatedAt} label={`模型输出 ${outputText.length} 字符`} />
-            )}
-            {task.requestId && (
-              <TaskLogItem time={task.updatedAt} label={`Provider request: ${task.requestId}`} />
-            )}
-            <TaskLogItem time={task.updatedAt} label={`状态更新为 ${task.status}`} />
-            {task.completedAt && <TaskLogItem time={task.completedAt} label="任务结束" />}
           </div>
         </DetailBlock>
 
         {shouldShowProviderResponse && (
-          <DetailBlock title="最终 Provider 响应">
-            <pre>{formatJson(task.rawResponse)}</pre>
+          <DetailBlock title="运行时 / Provider 诊断数据">
+            <pre>{formatJson(runtimeDiagnostics)}</pre>
           </DetailBlock>
         )}
       </div>
@@ -635,13 +693,30 @@ function TaskDetailModal({
   )
 }
 
-function DetailBlock({ title, children }: { title: string; children: ReactNode }) {
+function DetailBlock({
+  title,
+  children,
+  defaultOpen = false,
+}: {
+  title: string
+  children: ReactNode
+  defaultOpen?: boolean
+}) {
+  const [open, setOpen] = useState(defaultOpen)
   return (
-    <div className="canvas-task-detail-block">
-      <div className="canvas-task-detail-block-title">{title}</div>
-      {children}
-    </div>
+    <details
+      className="canvas-task-detail-block"
+      open={open}
+      onToggle={(event) => setOpen(event.currentTarget.open)}
+    >
+      <summary className="canvas-task-detail-block-title">{title}</summary>
+      <div className="canvas-task-detail-block-content">{children}</div>
+    </details>
   )
+}
+
+function isHttpMethod(method: string): boolean {
+  return /^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)$/i.test(method.trim())
 }
 
 function TaskRefList({

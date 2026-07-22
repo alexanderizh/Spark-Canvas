@@ -15,6 +15,7 @@ import type {
   CanvasMediaTaskInputFile,
   CanvasMediaTaskStreamPayload,
   CanvasTextTaskStreamPayload,
+  CanvasInputBinding,
   CanvasPromptTaskFields,
   SessionReasoningEffort,
 } from '@spark/protocol'
@@ -205,6 +206,7 @@ export function useCanvasWorkspace(projectId: string) {
   const undoStackRef = useRef<CanvasHistoryEntry[]>([])
   const redoStackRef = useRef<CanvasHistoryEntry[]>([])
   const lastRecordedSnapshotRef = useRef<CanvasHistoryEntry | null>(null)
+  const agentTurnCheckpointsRef = useRef<Map<string, CanvasHistoryEntry>>(new Map())
   const restoringHistoryRef = useRef(false)
   const historyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const pendingHistorySnapshotRef = useRef<CanvasSnapshot | null>(null)
@@ -281,10 +283,13 @@ export function useCanvasWorkspace(projectId: string) {
       (payload: CanvasMediaTaskStreamPayload) => {
         if (!active) return
         if (payload.projectId && payload.projectId !== projectId) return
-        if (!payload.clientTaskId) return
-        if (payload.status === 'running') return
-        void canvasApi
-          .applyMediaTaskResult(projectId, payload.clientTaskId, payload.response)
+        const clientTaskId = payload.clientTaskId
+        if (!clientTaskId) return
+        const update =
+          payload.status === 'running'
+            ? canvasApi.markMediaTaskSubmitted(projectId, clientTaskId, payload.response)
+            : canvasApi.applyMediaTaskResult(projectId, clientTaskId, payload.response)
+        void update
           .then((next) => {
             if (active) setSnapshot((current) => mergeCanvasBackgroundTaskSnapshot(current, next))
           })
@@ -299,9 +304,10 @@ export function useCanvasWorkspace(projectId: string) {
       (payload: CanvasTextTaskStreamPayload) => {
         if (!active) return
         if (payload.projectId && payload.projectId !== projectId) return
-        if (!payload.clientTaskId) return
+        const clientTaskId = payload.clientTaskId
+        if (!clientTaskId) return
         void canvasApi
-          .applyTextTaskResult(projectId, payload.clientTaskId, payload.response)
+          .applyTextTaskResult(projectId, clientTaskId, payload.response)
           .then((next) => {
             if (active) setSnapshot((current) => mergeCanvasBackgroundTaskSnapshot(current, next))
           })
@@ -500,11 +506,18 @@ export function useCanvasWorkspace(projectId: string) {
     [applyCanvasMutationSnapshot, projectId],
   )
 
+  const updateNode = useCallback(
+    async (nodeId: string, patch: Parameters<typeof canvasApi.updateNode>[2]) => {
+      await applyCanvasMutationSnapshot(canvasApi.updateNode(projectId, nodeId, patch))
+    },
+    [applyCanvasMutationSnapshot, projectId],
+  )
+
   const updateManyNodeData = useCallback(
     async (
       updates: Array<{ nodeId: string; data: Parameters<typeof canvasApi.updateNodeData>[2] }>,
     ) => {
-      await applyCanvasMutationSnapshot(canvasApi.updateManyNodeData(projectId, updates))
+      return applyCanvasMutationSnapshot(canvasApi.updateManyNodeData(projectId, updates))
     },
     [applyCanvasMutationSnapshot, projectId],
   )
@@ -567,13 +580,13 @@ export function useCanvasWorkspace(projectId: string) {
    *   必须逐个走 cancelTask（通知平台 adapter 中断 media 请求 + 标记 cancelled），
    *   记录保留在队列里作为历史，不删除。串行执行避免并发写库竞态，
    *   单个失败不阻塞其余任务。
-   * - scope='failed'：直接删除所有已结束（failed/cancelled）任务记录。
-   *   这些任务已无运行态，无需 cancel，用 deleteTasks 一次性清掉。
+   * - scope='failed'：清理已结束（failed/cancelled）任务记录。无产物记录直接删除；
+   *   仍有关联产物的记录由 deleteTasks 恢复为 completed 并保留。
    *
    * 注意：孤儿任务（运行中但承载节点已删）不在本方法处理——它们 cancelTask 无法终止，
    * 改由 deleteTasks(taskIds) 单独删除，UI 通过 onDeleteTasks 触发。
    *
-   * scope 互斥：active 只取消不删记录，failed 只删记录不取消。
+   * scope 互斥：active 只取消不删记录，failed 不取消运行时。
    */
   const clearTasks = useCallback(
     async (scope: 'active' | 'failed') => {
@@ -803,8 +816,11 @@ export function useCanvasWorkspace(projectId: string) {
       groupId: string,
       input: Partial<import('./canvasFilmAssets').ShotSegment> & { title: string },
     ) => {
-      await canvasApi.createShotSegment(projectId, groupId, input)
+      const result = await canvasApi.createShotSegment(projectId, groupId, input)
       await applyCanvasMutationSnapshot(canvasApi.openSnapshot(projectId))
+      const created = result.shotGroups.find((group) => group.id === groupId)?.segments.at(-1)
+      if (!created) throw new Error('分镜片段创建失败')
+      return created
     },
     [applyCanvasMutationSnapshot, projectId],
   )
@@ -847,6 +863,7 @@ export function useCanvasWorkspace(projectId: string) {
       providerProfileId?: string
       manifestId?: string
       modelId?: string
+      inputBindings?: CanvasInputBinding[]
       taskPipelineRole?: CreateCanvasTaskRequest['taskPipelineRole']
       outputPipelineRole?: CreateCanvasTaskRequest['outputPipelineRole']
       outputTitle?: CreateCanvasTaskRequest['outputTitle']
@@ -859,8 +876,14 @@ export function useCanvasWorkspace(projectId: string) {
   )
 
   const retryOperationNode = useCallback(
-    async (nodeId: string) => {
-      await applyTaskSnapshot(canvasApi.retryOperationNode(projectId, nodeId))
+    async (
+      nodeId: string,
+      options?: {
+        sourceTaskId?: string
+        runtimeSource?: 'current-node' | 'original-task'
+      },
+    ) => {
+      await applyTaskSnapshot(canvasApi.retryOperationNode(projectId, nodeId, options))
     },
     [applyTaskSnapshot, projectId],
   )
@@ -879,8 +902,10 @@ export function useCanvasWorkspace(projectId: string) {
         modelId?: string
         reasoningEffort?: SessionReasoningEffort
         modelParams?: Record<string, unknown>
+        skipParameterValidation?: boolean
         skillIds?: string[]
         userPrompt?: string
+        shotScriptConfig?: ShotScriptConfig
       } & CanvasPromptTaskFields,
     ) => {
       await applyTaskSnapshot(canvasApi.runOperationNode(projectId, nodeId, params))
@@ -930,6 +955,51 @@ export function useCanvasWorkspace(projectId: string) {
     }
   }, [historyBusy, projectId])
 
+  const createCanvasHistoryCheckpoint = useCallback((): string | null => {
+    if (!snapshot) return null
+    const checkpointId =
+      typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+        ? crypto.randomUUID()
+        : `canvas-checkpoint-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    agentTurnCheckpointsRef.current.set(checkpointId, createHistoryEntry(snapshot))
+    while (agentTurnCheckpointsRef.current.size > 20) {
+      const oldest = agentTurnCheckpointsRef.current.keys().next().value
+      if (oldest == null) break
+      agentTurnCheckpointsRef.current.delete(oldest)
+    }
+    return checkpointId
+  }, [snapshot])
+
+  const restoreCanvasHistoryCheckpoint = useCallback(
+    async (checkpointId: string) => {
+      if (historyBusy) throw new Error('画布历史正在更新，请稍后重试')
+      const checkpoint = agentTurnCheckpointsRef.current.get(checkpointId)
+      if (!checkpoint) throw new Error('本轮画布快照已过期，无法撤销')
+      const current = lastRecordedSnapshotRef.current
+      setHistoryBusy(true)
+      try {
+        if (current) redoStackRef.current.push(current)
+        restoringHistoryRef.current = true
+        setSnapshot(await canvasApi.restoreBoardSnapshot(projectId, checkpoint.snapshot))
+        agentTurnCheckpointsRef.current.delete(checkpointId)
+        setHistoryVersion((version) => version + 1)
+      } catch (error) {
+        if (current)
+          redoStackRef.current = redoStackRef.current.filter((entry) => entry !== current)
+        restoringHistoryRef.current = false
+        throw error
+      } finally {
+        setHistoryBusy(false)
+      }
+    },
+    [historyBusy, projectId],
+  )
+
+  const hasCanvasHistoryCheckpoint = useCallback(
+    (checkpointId: string) => agentTurnCheckpointsRef.current.has(checkpointId),
+    [],
+  )
+
   const canUndo = useMemo(
     () => !historyBusy && undoStackRef.current.length > 0,
     [historyBusy, historyVersion],
@@ -946,6 +1016,9 @@ export function useCanvasWorkspace(projectId: string) {
     canRedo,
     undoCanvasChange,
     redoCanvasChange,
+    createCanvasHistoryCheckpoint,
+    restoreCanvasHistoryCheckpoint,
+    hasCanvasHistoryCheckpoint,
     refresh,
     refreshTaskSnapshot,
     updateNodes,
@@ -962,6 +1035,7 @@ export function useCanvasWorkspace(projectId: string) {
     deleteNodes,
     duplicateNodes,
     patchNodes,
+    updateNode,
     updateNodeData,
     updateManyNodeData,
     updateProjectSettings,

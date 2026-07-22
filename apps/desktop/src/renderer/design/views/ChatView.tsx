@@ -192,7 +192,6 @@ import { TeamInspectorSection } from '../components/TeamInspectorSection'
 import { TeamMemberDrawer } from '../components/TeamMemberDrawer'
 import { WorktreePanel } from '../components/WorktreePanel'
 import { CheckpointTimelinePanel } from '../components/CheckpointTimelinePanel'
-import { BuiltInTerminalPanel } from '../components/BuiltInTerminalPanel'
 import { MentionPopover, type MentionCandidate } from '../components/MentionPopover'
 import { AvatarImage } from '../components/AvatarImage'
 import { SkillsPickerModal } from '../components/SkillsPickerModal'
@@ -349,16 +348,6 @@ const EMPTY_PROMPT_LAYER: PromptConfigGetResponse['system'] = { enabled: false, 
 const EMPTY_ENV_LAYER: EnvConfigGetResponse['project'] = { enabled: true, vars: [] }
 
 /**
- * 空会话（无活跃 session）下挂载内置终端面板时使用的伪 sessionId。
- *
- * 内置终端面板需要一个 string 形态的 sessionId 作为 PTY 生命周期键 + localStorage
- * 命名空间。空会话没有真实 session，但用户可能希望在选好项目文件夹后直接开终端，
- * 因此用这个稳定的 app 级占位 id。它的 PTY 仅在 activeWorkspace 存在时创建，
- * 且会在面板关闭 / 真实会话创建 / 应用关闭时被清理。
- */
-const EMPTY_HERO_TERMINAL_SESSION_ID = '__empty_hero__'
-
-/**
  * 单条环境变量编辑行。
  * 定义在模块作用域（而非组件内），保证每次父级重渲染不会更换组件类型导致 input 重挂载丢焦点。
  * 明文切换状态 showValue 只属于这一行，独立于父级 vars 数组，无需扰动持久化逻辑。
@@ -393,9 +382,6 @@ export function ChatView({
   const [inspectorWidth, setInspectorWidth] = useState(360)
   // 侧边聊天面板宽度：可拖拽伸缩，默认值按窗口宽度分档（见 defaultUnifiedSidePanelWidth）
   const [sideChatWidth, setSideChatWidth] = useState(defaultUnifiedSidePanelWidth)
-  // 内置终端面板：会话级 dock，按钮在 ChatTabbar 右上。
-  // 仅在有活跃会话且绑定 workspace 时启用；切会话会保留各自的 terminals（后端负责）。
-  const [showTerminalPanel, setShowTerminalPanel] = useState(false)
   const [showGitReviewPanel, setShowGitReviewPanel] = useState(false)
   const [unifiedSideTabs, setUnifiedSideTabs] = useState<UnifiedSidePanelKind[]>([])
   const [activeUnifiedSideTab, setActiveUnifiedSideTab] = useState<UnifiedSidePanelKind | null>(
@@ -434,13 +420,12 @@ export function ChatView({
 
   // ── 按会话隔离的侧面板 UI 状态 ──
   // 切换会话时把当前面板状态存到 prevId 槽位，加载 active 对应快照；
-  // 后端长驻任务（终端 PTY / side-chat session）不受影响，切回自动恢复展开状态。
+  // 后端长驻的 side-chat session 不受影响，切回自动恢复展开状态。
   type PanelSnapshot = {
     unifiedSideTabs: UnifiedSidePanelKind[]
     activeUnifiedSideTab: UnifiedSidePanelKind | null
     unifiedPanelOpen: boolean
     showConfigPanel: boolean
-    showTerminalPanel: boolean
     showGitReviewPanel: boolean
     showSideChatPanel: boolean
     showInspector: boolean
@@ -452,7 +437,6 @@ export function ChatView({
     activeUnifiedSideTab: null,
     unifiedPanelOpen: false,
     showConfigPanel: false,
-    showTerminalPanel: false,
     showGitReviewPanel: false,
     showSideChatPanel: false,
     showInspector: false,
@@ -474,7 +458,6 @@ export function ChatView({
     setUnifiedSideTabs((tabs) => (tabs.includes(kind) ? tabs : [...tabs, kind]))
     setActiveUnifiedSideTab(kind)
     if (kind === 'config') setShowConfigPanel(true)
-    if (kind === 'terminal') setShowTerminalPanel(true)
     if (kind === 'review') setShowGitReviewPanel(true)
     if (kind === 'side-chat') {
       setShowSideChatPanel(true)
@@ -491,7 +474,6 @@ export function ChatView({
       return next
     })
     if (kind === 'config') setShowConfigPanel(false)
-    if (kind === 'terminal') setShowTerminalPanel(false)
     if (kind === 'review') setShowGitReviewPanel(false)
     if (kind === 'side-chat') setShowSideChatPanel(false)
   }, [])
@@ -751,8 +733,7 @@ export function ChatView({
   // 进入空白新会话（新建任务 / active 被清空）时，关闭 Inspector / 统一面板，
   // 否则它们会沿用上一个会话的展开态继续遮挡空白聊天区。
   // 切换会话：把当前面板状态存给上一个会话，加载目标会话的快照（无则收起全部）。
-  // 后端长驻任务（终端 PTY / side-chat session）不在此处理 —— 切回时各组件重新挂载/订阅
-  // 即可接回原本在跑的任务（PTY 不杀、side-chat session 在后端继续运行）。
+  // 后端长驻的 side-chat session 不在此处理，切回时重新挂载并订阅。
   useEffect(() => {
     const prevId = prevActiveRef.current
     prevActiveRef.current = active
@@ -765,7 +746,6 @@ export function ChatView({
       // 退到无会话：收起所有参与记忆的面板
       setShowInspector(false)
       setShowConfigPanel(false)
-      setShowTerminalPanel(false)
       setShowGitReviewPanel(false)
       setShowSideChatPanel(false)
       setUnifiedPanelOpen(false)
@@ -780,7 +760,6 @@ export function ChatView({
       // 首次进入该会话：默认收起所有面板（避免看到上个会话残留的面板）
       setShowInspector(false)
       setShowConfigPanel(false)
-      setShowTerminalPanel(false)
       setShowGitReviewPanel(false)
       setShowSideChatPanel(false)
       setUnifiedPanelOpen(false)
@@ -793,7 +772,6 @@ export function ChatView({
     // 恢复该会话上次的展开状态
     setShowInspector(snap.showInspector)
     setShowConfigPanel(snap.showConfigPanel)
-    setShowTerminalPanel(snap.showTerminalPanel)
     setShowGitReviewPanel(snap.showGitReviewPanel)
     setShowSideChatPanel(snap.showSideChatPanel)
     setUnifiedPanelOpen(snap.unifiedPanelOpen)
@@ -927,7 +905,6 @@ export function ChatView({
     activeUnifiedSideTab,
     unifiedPanelOpen,
     showConfigPanel,
-    showTerminalPanel,
     showGitReviewPanel,
     showSideChatPanel,
     showInspector,
@@ -1042,7 +1019,6 @@ export function ChatView({
     setShowConfigPanel(false)
     setShowGitReviewPanel(false)
     setShowSideChatPanel(false)
-    setShowTerminalPanel(false)
     setUnifiedPanelOpen(false)
     setShowCheckpointTimeline(false)
     setFilePreview({ filePath, fileType })
@@ -1407,7 +1383,6 @@ export function ChatView({
     inspectorWidth,
     showConfigPanel,
     showInspector,
-    showTerminalPanel,
     filePreview,
   ])
 
@@ -2108,10 +2083,6 @@ export function ChatView({
                     setFilePreview(null)
                   }
                 }}
-                showTerminalPanel={showTerminalPanel}
-                setShowTerminalPanel={(v) =>
-                  v ? openUnifiedSidePanel('terminal') : closeUnifiedSidePanel('terminal')
-                }
                 showSideChatPanel={showSideChatPanel}
                 onToggleSideChat={() => {
                   if (showSideChatPanel) closeUnifiedSidePanel('side-chat')
@@ -2184,7 +2155,6 @@ export function ChatView({
             onOpenCommit={() => setGitCommitModalOpen(true)}
             onOpenBranches={() => setGitBranchModalOpen(true)}
             onOpenReview={handleOpenGitReview}
-            onOpenTerminal={() => openUnifiedSidePanel('terminal')}
             tasks={activeSessionTasks}
             goal={activeSessionGoal}
             onGoalControl={handleGoalControl}
@@ -2310,17 +2280,6 @@ export function ChatView({
                 sessionCtx.updateSessionInList(sessionId, { permissionMode: 'claude-auto-edits' })
               }}
             />
-          ) : activeUnifiedSideTab === 'terminal' && showTerminalPanel ? (
-            (() => {
-              const terminalSessionId = active != null ? active : EMPTY_HERO_TERMINAL_SESSION_ID
-              return (
-                <BuiltInTerminalPanel
-                  sessionId={terminalSessionId}
-                  workspace={activeSessionWorkspace ?? activeWorkspace}
-                  onClose={() => closeUnifiedSidePanel('terminal')}
-                />
-              )
-            })()
           ) : activeUnifiedSideTab === 'side-chat' && showSideChatPanel ? (
             <SideChatPanel
               workspaceName={sideChatWorkspace?.name ?? activeWorkspace?.name ?? '当前项目'}

@@ -6,6 +6,7 @@ import type {
   CanvasNode,
   CanvasNodeType,
   CanvasOperationType,
+  CanvasPipelineRole,
   CanvasProject,
   CanvasProjectSettings,
   CanvasSnapshot,
@@ -15,11 +16,13 @@ import type {
   ShotScriptConfig,
 } from './canvas.types'
 import { getCanvasCapability, isOperationNode } from './canvas.capabilities'
+import { inferCanvasConnectionType } from './canvasConnectionSemantics'
 import { encodeToSafeFileUrl, readFileAsDataUrl, resolveMediaDisplayUrl } from './canvas-safe-file'
 import {
   filmKindToAssetType,
   filmUid,
   migrateFilmAssetMetadata,
+  readAssetKind,
   readReferences,
   readTags,
   writeReferences,
@@ -52,8 +55,14 @@ import {
   pickTextNodeSize,
 } from './canvasNodeSize'
 import { pruneModelParamsForCanvas } from './canvasMediaContract'
+import {
+  validateCanvasMediaTaskSubmission,
+  validateCanvasTextTaskSubmission,
+} from './canvasTaskSubmissionValidation'
 import { isShotScriptText } from './canvasShotTableParse'
 import { readRenderableShotScriptRows } from './canvasShotScriptPresentation'
+import { materializeStoryboardRows } from './canvasStoryboardMaterialization'
+import { validateCanvasSemanticTextOutput } from './canvasTextOutputValidation'
 import { placeAutoNodeToRight } from './canvasAutoPlacement'
 import { planGroupLayout } from './canvasGroupLayout'
 import {
@@ -65,6 +74,7 @@ import type {
   CanvasMediaTaskCreateResponse,
   CanvasTextTaskCreateResponse,
   CanvasMediaTaskInputFile,
+  CanvasInputBinding,
   CanvasMediaCapabilitiesListResponse,
   CanvasMediaModelDescribeRequest,
   CanvasMediaModelDescribeResponse,
@@ -82,8 +92,18 @@ import type {
 import { buildCanvasRetryInputRoles, pickCanvasPromptTaskFields } from './canvasPromptTaskFields'
 import { buildTaskInputFiles } from './canvasTaskInputFiles'
 import { summarizeCanvasTaskInputFiles } from './canvasTaskInputDiagnostics'
+import {
+  appendCanvasTaskRuntimeEvent,
+  appendCanvasTaskModelOutputEvent,
+  initialCanvasTaskRuntimeEvents,
+  syncCanvasNodeRuntimeData,
+  syncCanvasTaskRuntimeToNode,
+} from './canvasTaskLifecycle'
 import { materializeCanvasTaskInputFiles } from './canvasWorkspaceTaskInput'
-import { buildCanvasVisiblePromptDocument } from './canvasPromptInitialization'
+import {
+  buildCanvasVisiblePromptDocument,
+  normalizeCanvasFunctionalSystemPrompt,
+} from './canvasPromptInitialization'
 import { reconcilePromptConnections } from './canvasPromptConnections'
 import {
   buildCanvasOperationSystemPrompt,
@@ -93,20 +113,24 @@ import {
   readCanvasResolvedPresetTarget,
   resolveCanvasPresetTarget,
 } from './canvasOperationPresets'
+import { CanvasDirtyTracker } from './canvasDirtyTracker'
+import { sanitizeLegacyCanvasProjectImport } from './canvasLegacyProjectImport'
+import { canvasTaskErrorMessage } from './canvasTaskErrorMessage'
+import {
+  canvasTaskIdsSafeToDelete,
+  isCompletedCanvasTaskWithOutputs,
+  recoverCanvasTaskFromMaterializedOutputs,
+} from './canvasTaskOutputIntegrity'
 
 const STORAGE_KEY = 'spark-canvas:v1'
 const USER_ID = 0
-const PROVIDER_NOT_CONFIGURED_MESSAGE = '请先在『模型 / Agent 配置』中添加可用模型'
+const CANVAS_TASK_VALIDATION_TOKEN = Symbol('canvas-task-validation')
 
 const MANUSCRIPT_SPLIT_MODE_LABELS: Record<ChapterSplitMode, string> = {
   heading: '按标题',
   length: '按长度分片',
   single: '不分章',
   'multi-file': '多文件（一文件一章）',
-}
-
-function canvasTaskErrorMessage(code: string | undefined, fallback: string): string {
-  return code === 'provider_not_configured' ? PROVIDER_NOT_CONFIGURED_MESSAGE : fallback
 }
 
 function readCanvasTextNodeContent(node: CanvasNode, assets: CanvasAsset[]): string {
@@ -210,6 +234,9 @@ type CanvasWorkflowTaskStartRequest = {
   reasoningEffort?: SessionReasoningEffort
   skillIds?: string[]
   modelParams?: Record<string, unknown>
+  taskPipelineRole?: CanvasPipelineRole
+  outputPipelineRole?: CanvasPipelineRole
+  shotScriptConfig?: ShotScriptConfig
 } & CanvasPromptTaskFields
 
 type CanvasWorkflowTaskFinishRequest = {
@@ -221,6 +248,7 @@ type CanvasWorkflowTaskFinishRequest = {
   errorMsg?: string | null
   errorDetail?: string | null
   rawResponse?: unknown
+  modelOutputText?: string | null
   agentId?: string | null
   providerProfileId?: string | null
   provider?: string | null
@@ -253,17 +281,17 @@ let persistInFlight: Promise<{ attempted: Set<string>; failed: Set<string> }> = 
  * 导致退出守卫跳过「未保存改动」弹窗。改成 Set 后，写操作显式标记被改动的项目，消费点
  * 按当前 projectId 查询。
  */
-const dirtyProjectIds = new Set<string>()
+const dirtyProjects = new CanvasDirtyTracker()
 
 function isProjectDirty(projectId: string): boolean {
-  return dirtyProjectIds.has(projectId)
+  return dirtyProjects.has(projectId)
 }
 
 /**
  * 广播 dirty 事件。
  * - `projectId` 为具体 id：该项目的 dirty 状态变化（监听者按自己的 view 过滤）。
  * - `projectId` 为 null：全库级操作（如 hydrateFromStorage 整库重建），detail.dirty 反映
- *   全局「是否有任何项目未落库」（dirtyProjectIds.size > 0），监听者据此刷新徽标。
+ *   全局「是否有任何项目未落库」（dirty tracker 非空），监听者据此刷新徽标。
  */
 function dispatchDirty(projectId: string | null, dirty: boolean): void {
   if (typeof window === 'undefined') return
@@ -331,7 +359,7 @@ async function persistAllProjects(db: CanvasDb): Promise<{
  * 立即把全量快照写进 SQLite；所有项目都成功返回 true。
  *
  * per-project 更新 dirty：以 persistAllProjects 返回的 attempted 为准，落库成功的项目
- * 从 dirtyProjectIds 移除并广播，失败的保留；无 board 被跳过的项目不在 attempted 中，
+ * 从 dirty tracker 移除并广播，失败的保留；无 board 被跳过的项目不在 attempted 中，
  * 保留其 dirty，避免静默吞掉未保存改动。返回「是否有任一项目落库失败」。
  *
  * 注意：不另起 readDb() 推断「哪些项目该清 dirty」——落库期间并发的写操作会让两次读到的
@@ -343,11 +371,14 @@ async function flushPersist(): Promise<boolean> {
   flushHotPersist()
   // readDb 现在返回内存缓存引用（非深拷贝）；persistAllProjects 内部有跨 project 的 await，
   // 期间可能被其他 mutation 修改，所以这里做一次快照拷贝保证落库数据一致性。
-  persistInFlight = persistAllProjects(cloneDb(readDb()))
+  const dbSnapshot = cloneDb(readDb())
+  const savedRevisions = new Map(
+    dbSnapshot.projects.map((project) => [project.id, dirtyProjects.revision(project.id)]),
+  )
+  persistInFlight = persistAllProjects(dbSnapshot)
   const { attempted, failed } = await persistInFlight
   for (const id of attempted) {
-    if (!failed.has(id)) {
-      dirtyProjectIds.delete(id)
+    if (!failed.has(id) && dirtyProjects.markCleanIfUnchanged(id, savedRevisions.get(id) ?? 0)) {
       dispatchDirty(id, false)
     }
   }
@@ -393,12 +424,12 @@ export async function revertProject(projectId: string): Promise<void> {
     console.error('[canvas] revertProject load failed', projectId, err)
   }
   persistHotDb(db)
-  dirtyProjectIds.delete(projectId)
+  dirtyProjects.markClean(projectId)
   dispatchDirty(projectId, false)
 }
 
 export function isCanvasDirty(projectId: string): boolean {
-  return dirtyProjectIds.has(projectId)
+  return dirtyProjects.has(projectId)
 }
 
 /**
@@ -409,6 +440,8 @@ export function isCanvasDirty(projectId: string): boolean {
 export function __resetCanvasHotCache(): void {
   hotMemory = null
   hotOverflow = null
+  dirtyProjects.reset()
+  canvasTaskDiagnosticsMigratedDbs = new WeakSet<CanvasDb>()
   if (hotPersistTimer != null) {
     clearTimeout(hotPersistTimer)
     hotPersistTimer = null
@@ -464,6 +497,30 @@ export function isTextModelOperation(operation: CanvasOperationType): boolean {
   return TEXT_MODEL_OPERATIONS.has(operation)
 }
 
+const CANVAS_TEXT_CONTROL_MODEL_PARAM_NAMES = new Set([
+  'workflow',
+  'sourceAssetId',
+  'responseFormat',
+  'response_format',
+])
+
+/**
+ * Provider contracts only understand wire parameters. Canvas workflow identity and
+ * response-shape hints are renderer control metadata and must survive that pruning.
+ */
+function restoreCanvasTextControlModelParams(
+  operation: CanvasOperationType,
+  original: Record<string, unknown>,
+  pruned: Record<string, unknown>,
+): Record<string, unknown> {
+  if (!isTextModelOperation(operation)) return pruned
+  const restored = { ...pruned }
+  for (const name of CANVAS_TEXT_CONTROL_MODEL_PARAM_NAMES) {
+    if (Object.prototype.hasOwnProperty.call(original, name)) restored[name] = original[name]
+  }
+  return restored
+}
+
 export type CanvasDb = {
   projects: CanvasProject[]
   boards: CanvasBoard[]
@@ -486,7 +543,7 @@ type CanvasProjectExportPayload = {
   kind: 'spark.canvas.project'
   version: 1 | 2
   exportedAt: string
-  app: 'Spark-Agent'
+  app: 'Spark-Agent' | 'spark-agent' | 'spark-canvas'
   projectRootPath?: string
   snapshot: CanvasSnapshot
 }
@@ -497,6 +554,18 @@ function uid(prefix: string): string {
 
 function now(): string {
   return new Date().toISOString()
+}
+
+/**
+ * Entity versions are ISO timestamps and are also used by the renderer to decide
+ * whether an in-memory node can be reused. Two Agent edits can land in the same
+ * millisecond, so make data mutations strictly monotonic per node.
+ */
+function nextEntityUpdatedAt(previous?: string): string {
+  const candidate = now()
+  if (!previous || candidate > previous) return candidate
+  const previousTime = Date.parse(previous)
+  return Number.isFinite(previousTime) ? new Date(previousTime + 1).toISOString() : candidate
 }
 
 function toCanvasProject(project: CanvasProjectListItem): CanvasProject {
@@ -627,6 +696,7 @@ function readDb(): CanvasDb {
   // 内存缓存优先：首次加载后不再重复 JSON.parse（性能关键路径）
   if (hotMemory != null) {
     migrateFilmAssetDbInPlace(hotMemory)
+    migrateCanvasTaskDiagnosticsInPlace(hotMemory)
     return hotMemory
   }
   // 内存兜底优先：此时 localStorage 是不完整/过期的
@@ -634,6 +704,7 @@ function readDb(): CanvasDb {
     const parsed = { ...emptyDb(), ...cloneDb(hotOverflow) }
     hotMemory = parsed
     migrateFilmAssetDbInPlace(parsed)
+    migrateCanvasTaskDiagnosticsInPlace(parsed)
     return parsed
   }
   try {
@@ -646,6 +717,7 @@ function readDb(): CanvasDb {
     const parsed = { ...emptyDb(), ...JSON.parse(raw) } as CanvasDb
     hotMemory = parsed
     migrateFilmAssetDbInPlace(parsed)
+    migrateCanvasTaskDiagnosticsInPlace(parsed)
     return parsed
   } catch {
     const empty = emptyDb()
@@ -676,10 +748,77 @@ function migrateFilmAssetDbInPlace(db: CanvasDb): void {
   }
 }
 
+/** Backfill optional diagnostic fields without changing task content or status. */
+let canvasTaskDiagnosticsMigratedDbs = new WeakSet<CanvasDb>()
+function migrateCanvasTaskDiagnosticsInPlace(db: CanvasDb): void {
+  if (canvasTaskDiagnosticsMigratedDbs.has(db)) return
+  let touched = false
+  const nodeById = new Map(db.nodes.map((node) => [node.id, node]))
+  const operationNodeByTaskId = new Map<string, CanvasNode>()
+  for (const node of db.nodes) {
+    if (node.taskId && isOperationNode(node)) operationNodeByTaskId.set(node.taskId, node)
+  }
+  for (const edge of db.edges) {
+    if (!edge.taskId || operationNodeByTaskId.has(edge.taskId)) continue
+    const operationNodeId =
+      edge.type === 'used_as_input'
+        ? edge.targetNodeId
+        : edge.type === 'generated'
+          ? edge.sourceNodeId
+          : null
+    const operationNode = operationNodeId ? nodeById.get(operationNodeId) : undefined
+    if (operationNode && isOperationNode(operationNode)) {
+      operationNodeByTaskId.set(edge.taskId, operationNode)
+    }
+  }
+  for (const task of db.tasks) {
+    const operationNode = operationNodeByTaskId.get(task.id)
+    if (task.operationNodeId == null && operationNode) {
+      task.operationNodeId = operationNode.id
+      touched = true
+    }
+    if (task.taskPipelineRole === undefined && operationNode?.data.pipelineRole) {
+      task.taskPipelineRole = operationNode.data.pipelineRole
+      touched = true
+    }
+    if (task.outputPipelineRole === undefined && operationNode?.data.outputPipelineRole) {
+      task.outputPipelineRole = operationNode.data.outputPipelineRole
+      touched = true
+    }
+    if (
+      task.completedAt == null &&
+      (task.status === 'completed' || task.status === 'failed' || task.status === 'cancelled')
+    ) {
+      task.completedAt = task.updatedAt
+      touched = true
+    }
+    if (
+      task.modelOutputText == null &&
+      task.rawResponse != null &&
+      typeof task.rawResponse === 'object' &&
+      !Array.isArray(task.rawResponse)
+    ) {
+      const rawResponse = task.rawResponse as Record<string, unknown>
+      const legacyOutput =
+        typeof rawResponse.outputText === 'string'
+          ? rawResponse.outputText
+          : typeof rawResponse.text === 'string'
+            ? rawResponse.text
+            : ''
+      if (legacyOutput.trim()) {
+        task.modelOutputText = legacyOutput
+        touched = true
+      }
+    }
+  }
+  canvasTaskDiagnosticsMigratedDbs.add(db)
+  if (touched) persistHotDb(db)
+}
+
 /**
  * 写热存储并标记 dirty。
  *
- * 保守地把**所有非 deleted 项目**都加入 dirtyProjectIds。绝大多数写操作是针对当前打开
+ * 保守地把**所有非 deleted 项目**都加入 dirty tracker。绝大多数写操作是针对当前打开
  * 的项目（编辑节点/连线/资产/任务等），而 dirty 的唯一消费方是当前画布工作区的
  * `isCanvasDirty(projectId)`（项目列表不显示 dirty 徽标），所以「多标」是不可见的过报，
  * 而「漏标」会吞掉未保存提醒——这里宁可过报。
@@ -694,15 +833,15 @@ function writeDb(db: CanvasDb): void {
   persistHotDb(db)
   for (const project of db.projects) {
     if (project.status === 'deleted') continue
-    dirtyProjectIds.add(project.id)
+    dirtyProjects.markDirty(project.id)
     dispatchDirty(project.id, true)
   }
 }
 
 function writeHotDb(db: CanvasDb, projectId: string, dirty: boolean): void {
   persistHotDb(db)
-  if (dirty) dirtyProjectIds.add(projectId)
-  else dirtyProjectIds.delete(projectId)
+  if (dirty) dirtyProjects.markDirty(projectId)
+  else dirtyProjects.markClean(projectId)
   dispatchDirty(projectId, dirty)
 }
 
@@ -1722,7 +1861,7 @@ export const canvasApi = {
       kind: 'spark.canvas.project',
       version: 2,
       exportedAt: now(),
-      app: 'Spark-Agent',
+      app: 'spark-canvas',
       ...(snapshot.project.rootPath ? { projectRootPath: snapshot.project.rootPath } : {}),
       snapshot: portableSnapshot,
     }
@@ -1807,8 +1946,28 @@ export const canvasApi = {
     })
     if (result.canceled || !result.filePath) return null
     const { content } = await window.spark.invoke('file:read-text', { path: result.filePath })
+
+    // 跨设备导入：从 payload 顶层提取源电脑导出包根（writeCanvasProjectPackageFiles 写入）。
+    // 导出包内 url 编码的是源电脑绝对路径，需让 main 端把它翻译到本机导入包根，否则 fs.stat 必失败。
+    let exportedPackageRoot: string | null = null
+    try {
+      const rawPayload = JSON.parse(content) as { kind?: string; projectRootPath?: unknown }
+      if (
+        rawPayload.kind === 'spark.canvas.project' &&
+        typeof rawPayload.projectRootPath === 'string' &&
+        rawPayload.projectRootPath.trim()
+      ) {
+        exportedPackageRoot = rawPayload.projectRootPath.trim()
+      }
+    } catch {
+      // 非 payload 包裹的纯 snapshot：无源包根，走原迁移逻辑。
+    }
     const parsedSnapshot = parseCanvasProjectExport(content)
-    const clonedSnapshot = cloneImportedSnapshot(parsedSnapshot)
+    const { snapshot: safeSnapshot } = sanitizeLegacyCanvasProjectImport(parsedSnapshot)
+    if (!exportedPackageRoot && typeof safeSnapshot.project.rootPath === 'string') {
+      exportedPackageRoot = safeSnapshot.project.rootPath.trim() || null
+    }
+    const clonedSnapshot = cloneImportedSnapshot(safeSnapshot)
     clonedSnapshot.project.rootPath = await ensureCanvasProjectDirectory({
       projectId: clonedSnapshot.project.id,
       title: clonedSnapshot.project.title,
@@ -1819,17 +1978,44 @@ export const canvasApi = {
         projectId: clonedSnapshot.project.id,
         projectRootPath: clonedSnapshot.project.rootPath,
         snapshotJson: JSON.stringify(clonedSnapshot),
+        sourceFilePath: result.filePath,
+        ...(exportedPackageRoot ? { exportedPackageRoot } : {}),
       })
-      clonedSnapshot.project = (JSON.parse(migrated.snapshotJson) as CanvasSnapshot).project
       Object.assign(clonedSnapshot, JSON.parse(migrated.snapshotJson) as CanvasSnapshot)
-    } catch {
-      // Import remains compatible with pure JSON projects even if local asset copy is unavailable.
+    } catch (err) {
+      // 资产迁移失败时仍保留纯 JSON 项目，避免阻断旧项目导入。
+      console.warn('[canvas] migrate-assets failed during import', err)
     }
     const normalized = await normalizeSnapshotForHotStorage(clonedSnapshot)
     const db = readDb()
     replaceProjectSnapshot(db, normalized.snapshot)
     writeDb(db)
-    await flushPersist()
+    if (!(await flushPersist())) throw new Error('导入项目保存失败')
+    return normalized.snapshot
+  },
+
+  async importProjectFromDirectory(
+    sourceDirectory: string,
+    targetParentDirectory?: string,
+  ): Promise<CanvasSnapshot> {
+    const imported = await window.spark.invoke('canvas:project:import-package', {
+      sourceDirectory,
+      ...(targetParentDirectory ? { targetParentDirectory } : {}),
+    })
+    const parsedSnapshot = parseCanvasProjectExport(imported.snapshotJson)
+    const clonedSnapshot = cloneImportedSnapshot(parsedSnapshot)
+    clonedSnapshot.project.rootPath = imported.rootPath
+    if (imported.warnings.length > 0) {
+      clonedSnapshot.project.metadata = {
+        ...(clonedSnapshot.project.metadata ?? {}),
+        importWarnings: imported.warnings,
+      }
+    }
+    const normalized = await normalizeSnapshotForHotStorage(clonedSnapshot)
+    const db = readDb()
+    replaceProjectSnapshot(db, normalized.snapshot)
+    writeDb(db)
+    if (!(await flushPersist())) throw new Error('导入项目保存失败')
     return normalized.snapshot
   },
 
@@ -3110,17 +3296,12 @@ export const canvasApi = {
     const groups = this.readShotGroups(db, projectId)
     const group = groups.find((item) => item.id === groupId)
     if (!group) return { shotGroups: groups }
+    const { id: _id, index: _index, ...fields } = input as Partial<ShotSegment>
     const segment: ShotSegment = {
+      ...fields,
       id: filmUid('shot_seg'),
       index: group.segments.length + 1,
       title: input.title,
-      ...(input.description ? { description: input.description } : {}),
-      ...(input.dialogue ? { dialogue: input.dialogue } : {}),
-      ...(input.narration ? { narration: input.narration } : {}),
-      ...(input.characterAssetIds ? { characterAssetIds: input.characterAssetIds } : {}),
-      ...(input.sceneAssetId ? { sceneAssetId: input.sceneAssetId } : {}),
-      ...(input.propAssetIds ? { propAssetIds: input.propAssetIds } : {}),
-      ...(input.shotPrompt ? { shotPrompt: input.shotPrompt } : {}),
     }
     group.segments.push(segment)
     this.writeShotGroups(db, projectId, groups)
@@ -3695,13 +3876,7 @@ export const canvasApi = {
     const board = db.boards.find((item) => item.projectId === projectId)
     if (!source || !target || !board) return this.openSnapshot(projectId)
 
-    const edgeType: CanvasEdge['type'] =
-      input.type ??
-      (target.type === 'task' || isOperationNode(target)
-        ? 'used_as_input'
-        : source.type === 'task' || isOperationNode(source)
-          ? 'generated'
-          : 'references')
+    const edgeType: CanvasEdge['type'] = input.type ?? inferCanvasConnectionType(source, target)
     const duplicate = db.edges.some(
       (edge) =>
         edge.projectId === projectId &&
@@ -3741,10 +3916,13 @@ export const canvasApi = {
     }
     if (edgeType === 'used_as_input') syncOperationPromptDocumentFromConnections(db, target)
     if (task && edgeType === 'generated') {
-      if (!task.outputNodeIds.includes(target.id)) task.outputNodeIds.push(target.id)
-      if (target.assetId && !task.outputAssetIds.includes(target.assetId))
-        task.outputAssetIds.push(target.assetId)
-      task.updatedAt = at
+      recoverCanvasTaskFromMaterializedOutputs({
+        task,
+        operationNode: source,
+        outputNodeIds: [target.id],
+        outputAssetIds: target.assetId ? [target.assetId] : [],
+        at,
+      })
     }
 
     updateProjectCounts(db, projectId)
@@ -3826,49 +4004,88 @@ export const canvasApi = {
     return this.updateManyNodeData(projectId, [{ nodeId, data }])
   },
 
+  async updateNode(
+    projectId: string,
+    nodeId: string,
+    patch: { title?: string; data?: Partial<CanvasNode['data']> },
+  ): Promise<CanvasSnapshot> {
+    return this.updateManyNodeData(projectId, [
+      {
+        nodeId,
+        data: patch.data ?? {},
+        ...(patch.title !== undefined ? { title: patch.title } : {}),
+      },
+    ])
+  },
+
   async updateManyNodeData(
     projectId: string,
-    updates: Array<{ nodeId: string; data: Partial<CanvasNode['data']> }>,
+    updates: Array<{
+      nodeId: string
+      data: Partial<CanvasNode['data']>
+      title?: string
+    }>,
   ): Promise<CanvasSnapshot> {
     if (updates.length === 0) return this.openSnapshot(projectId)
     const db = readDb()
-    const at = now()
-    for (const { nodeId, data } of updates) {
-      const node = db.nodes.find((item) => item.id === nodeId && item.projectId === projectId)
+    for (const { nodeId, data, title } of updates) {
+      const nodeIndex = db.nodes.findIndex(
+        (item) => item.id === nodeId && item.projectId === projectId,
+      )
+      const node = db.nodes[nodeIndex]
       if (!node) continue
+      const at = nextEntityUpdatedAt(node.updatedAt)
       const nextData = { ...node.data, ...data }
       for (const key of Object.keys(nextData)) {
         if ((nextData as Record<string, unknown>)[key] === undefined) {
           delete (nextData as Record<string, unknown>)[key]
         }
       }
-      node.data = nextData
-      node.updatedAt = at
+      // openSnapshot returns entity references from the hot store. Never mutate
+      // those objects in place: React may currently hold the same node reference
+      // and would then see no identity change to render.
+      db.nodes[nodeIndex] = {
+        ...node,
+        ...(title !== undefined ? { title } : {}),
+        data: nextData,
+        updatedAt: at,
+      }
 
-      // Operation node data is the editable configuration shown to the user/Agent.
-      // Keep the bound task aligned so retry uses the latest persisted values.
+      // Operation node data is editable current configuration. Only the pending
+      // placeholder task may follow those edits; once execution starts, the task is
+      // an immutable diagnostic snapshot used by history and original-task retry.
       const task = node.taskId
         ? db.tasks.find((item) => item.id === node.taskId && item.projectId === projectId)
         : null
-      if (task) {
-        if (Object.prototype.hasOwnProperty.call(data, 'prompt')) task.prompt = data.prompt ?? null
+      if (
+        task?.status === 'pending' &&
+        task.outputNodeIds.length === 0 &&
+        task.outputAssetIds.length === 0
+      ) {
+        const nextTask = { ...task }
+        if (Object.prototype.hasOwnProperty.call(data, 'prompt'))
+          nextTask.prompt = data.prompt ?? null
         if (Object.prototype.hasOwnProperty.call(data, 'negativePrompt'))
-          task.negativePrompt = data.negativePrompt ?? null
+          nextTask.negativePrompt = data.negativePrompt ?? null
         if (Object.prototype.hasOwnProperty.call(data, 'modelParams'))
-          task.modelParams = data.modelParams ?? {}
+          nextTask.modelParams = data.modelParams ?? {}
         if (Object.prototype.hasOwnProperty.call(data, 'agentId'))
-          task.agentId = data.agentId ?? null
+          nextTask.agentId = data.agentId ?? null
         if (Object.prototype.hasOwnProperty.call(data, 'providerProfileId'))
-          task.providerProfileId = data.providerProfileId ?? null
+          nextTask.providerProfileId = data.providerProfileId ?? null
         if (Object.prototype.hasOwnProperty.call(data, 'manifestId'))
-          task.manifestId = data.manifestId ?? null
+          nextTask.manifestId = data.manifestId ?? null
         if (Object.prototype.hasOwnProperty.call(data, 'modelId'))
-          task.modelId = data.modelId ?? null
+          nextTask.modelId = data.modelId ?? null
         if (Object.prototype.hasOwnProperty.call(data, 'skillIds'))
-          task.skillIds = data.skillIds ?? []
+          nextTask.skillIds = data.skillIds ?? []
         if (Object.prototype.hasOwnProperty.call(data, 'reasoningEffort'))
-          task.reasoningEffort = data.reasoningEffort ?? null
-        task.updatedAt = at
+          nextTask.reasoningEffort = data.reasoningEffort ?? null
+        if (Object.prototype.hasOwnProperty.call(data, 'shotScriptConfig'))
+          nextTask.shotScriptConfig = data.shotScriptConfig ?? null
+        nextTask.updatedAt = at
+        const taskIndex = db.tasks.indexOf(task)
+        if (taskIndex >= 0) db.tasks[taskIndex] = nextTask
       }
 
       const asset = node.assetId ? db.assets.find((item) => item.id === node.assetId) : null
@@ -3877,8 +4094,10 @@ export const canvasApi = {
         (node.type === 'text' || node.type === 'prompt') &&
         Object.prototype.hasOwnProperty.call(data, 'text')
       ) {
-        asset.contentText = data.text ?? ''
-        asset.updatedAt = at
+        const assetIndex = db.assets.indexOf(asset)
+        if (assetIndex >= 0) {
+          db.assets[assetIndex] = { ...asset, contentText: data.text ?? '', updatedAt: at }
+        }
       }
     }
     updateProjectCounts(db, projectId)
@@ -4024,6 +4243,7 @@ export const canvasApi = {
         ? { outputPipelineRole: request.outputPipelineRole }
         : {}),
     }
+    syncCanvasNodeRuntimeData(taskNodeData, request)
     const requestPrompt = request.promptDocument
       ? (request.compiledUserText ?? request.prompt)
       : buildCanvasOperationPrompt(request.operation, request.prompt)
@@ -4061,6 +4281,7 @@ export const canvasApi = {
       status: 'pending',
       progress: 12,
       title: defaultTaskTitle,
+      operationNodeId: taskNode.id,
       prompt: requestPrompt ?? null,
       negativePrompt: request.negativePrompt ?? null,
       inputNodeIds: request.inputNodeIds ?? [],
@@ -4074,6 +4295,10 @@ export const canvasApi = {
       modelId: request.modelId ?? null,
       reasoningEffort: request.reasoningEffort ?? null,
       modelParams: request.modelParams ?? {},
+      taskPipelineRole: request.taskPipelineRole ?? null,
+      outputPipelineRole: request.outputPipelineRole ?? null,
+      shotScriptConfig: request.shotScriptConfig ?? null,
+      runtimeEvents: initialCanvasTaskRuntimeEvents(at),
       ...pickCanvasPromptTaskFields(request),
       createdAt: at,
       updatedAt: at,
@@ -4132,10 +4357,24 @@ export const canvasApi = {
       message: messageText,
     }
     const requestPrompt = request.compiledUserText ?? request.prompt
-    const visibleUserPrompt = request.userPrompt ?? (request.promptDocument ? undefined : request.prompt)
+    const visibleUserPrompt =
+      request.userPrompt ?? (request.promptDocument ? undefined : request.prompt)
     if (visibleUserPrompt != null) taskNodeData.prompt = visibleUserPrompt
     if (request.promptDocument != null) taskNodeData.promptDocument = request.promptDocument
     if (request.systemPrompt != null) taskNodeData.systemPrompt = request.systemPrompt
+    // A bound operation node is reusable. Keep its displayed/runtime configuration in
+    // lockstep with the new task instead of retaining the model from its previous run.
+    if (request.agentId != null) taskNodeData.agentId = request.agentId
+    if (request.providerProfileId != null)
+      taskNodeData.providerProfileId = request.providerProfileId
+    if (request.modelId != null) taskNodeData.modelId = request.modelId
+    if (request.reasoningEffort != null) taskNodeData.reasoningEffort = request.reasoningEffort
+    if (request.skillIds != null) taskNodeData.skillIds = request.skillIds
+    if (request.modelParams != null) taskNodeData.modelParams = request.modelParams
+    if (request.taskPipelineRole != null) taskNodeData.pipelineRole = request.taskPipelineRole
+    if (request.outputPipelineRole != null)
+      taskNodeData.outputPipelineRole = request.outputPipelineRole
+    if (request.shotScriptConfig != null) taskNodeData.shotScriptConfig = request.shotScriptConfig
 
     let taskNode: CanvasNode
     const bindNode = request.bindToNodeId
@@ -4189,6 +4428,7 @@ export const canvasApi = {
       status: 'running',
       progress,
       title: request.title,
+      operationNodeId: taskNode.id,
       prompt: requestPrompt ?? null,
       negativePrompt: null,
       inputNodeIds: request.inputNodeIds ?? [],
@@ -4203,6 +4443,10 @@ export const canvasApi = {
       modelId: request.modelId ?? null,
       reasoningEffort: request.reasoningEffort ?? null,
       modelParams: request.modelParams ?? {},
+      taskPipelineRole: request.taskPipelineRole ?? null,
+      outputPipelineRole: request.outputPipelineRole ?? null,
+      shotScriptConfig: request.shotScriptConfig ?? null,
+      runtimeEvents: initialCanvasTaskRuntimeEvents(at, '本地工作流任务创建'),
       ...pickCanvasPromptTaskFields(request),
       createdAt: at,
       updatedAt: at,
@@ -4252,10 +4496,25 @@ export const canvasApi = {
     if (result.errorMsg !== undefined) task.errorMsg = result.errorMsg
     if (result.errorDetail !== undefined) task.errorDetail = result.errorDetail
     if (result.rawResponse !== undefined) task.rawResponse = result.rawResponse
+    if (result.modelOutputText !== undefined) task.modelOutputText = result.modelOutputText
     if (result.agentId !== undefined) task.agentId = result.agentId
     if (result.providerProfileId !== undefined) task.providerProfileId = result.providerProfileId
     if (result.provider !== undefined) task.provider = result.provider
     if (result.modelId !== undefined) task.modelId = result.modelId
+    if (result.modelOutputText != null) {
+      appendCanvasTaskModelOutputEvent(task, at, result.modelOutputText)
+    }
+    appendCanvasTaskRuntimeEvent(task, {
+      at,
+      kind: status === 'completed' ? 'completed' : status === 'cancelled' ? 'cancelled' : 'failed',
+      label:
+        status === 'completed'
+          ? '本地工作流完成'
+          : status === 'cancelled'
+            ? '本地工作流已取消'
+            : '本地工作流失败',
+      ...(task.errorDetail ? { detail: task.errorDetail } : {}),
+    })
 
     const defaultMessage =
       status === 'completed'
@@ -4269,6 +4528,9 @@ export const canvasApi = {
         status,
         progress,
         message: result.message ?? defaultMessage,
+        ...(task.agentId ? { agentId: task.agentId } : {}),
+        ...(task.providerProfileId ? { providerProfileId: task.providerProfileId } : {}),
+        ...(task.modelId ? { modelId: task.modelId } : {}),
       }
       taskNode.updatedAt = at
     }
@@ -4328,6 +4590,7 @@ export const canvasApi = {
     modelId?: string
     reasoningEffort?: SessionReasoningEffort
     skillIds?: string[]
+    inputBindings?: CanvasInputBinding[]
     taskPipelineRole?: CreateCanvasTaskRequest['taskPipelineRole']
     outputPipelineRole?: CreateCanvasTaskRequest['outputPipelineRole']
     outputTitle?: CreateCanvasTaskRequest['outputTitle']
@@ -4359,12 +4622,25 @@ export const canvasApi = {
       outputPipelineRole: input.outputPipelineRole ?? null,
       workflow: input.modelParams?.workflow,
     })
-    const operationPreset = readCanvasResolvedPresetTarget(presetTargetId)
+    const taskPipelineRole =
+      input.taskPipelineRole ??
+      (presetTargetId !== input.operation ? input.outputPipelineRole : undefined)
+    const operationPreset = readCanvasResolvedPresetTarget(presetTargetId, {
+      hasImageInput: inputNodes.some((node) => node.type === 'image'),
+    })
+    const explicitSystemPrompt = normalizeCanvasFunctionalSystemPrompt(
+      nonEmptyString(input.systemPrompt),
+      presetTargetId,
+    )
     const systemPrompt = buildCanvasOperationSystemPrompt(
       input.operation,
-      operationPreset.prompt,
+      // An explicit functional contract is authoritative. Generic operation presets
+      // are only a fallback for generic nodes and must not be concatenated into it.
+      explicitSystemPrompt.length === 0 || presetTargetId !== input.operation
+        ? operationPreset.prompt
+        : undefined,
       project?.settings?.prompt,
-      input.systemPrompt,
+      explicitSystemPrompt || undefined,
     )
     const promptDocument = buildCanvasVisiblePromptDocument({
       prompt: explicitPrompt ?? '',
@@ -4372,6 +4648,9 @@ export const canvasApi = {
       connections: inputNodes,
       assets: db.assets,
     })
+    const inputBindings = (input.inputBindings ?? [])
+      .filter((binding) => input.inputNodeIds.includes(binding.sourceNodeId))
+      .map((binding) => ({ ...binding }))
     const inheritedNegativePrompt =
       inputTasks
         .map((task) => nonEmptyString(task.negativePrompt))
@@ -4388,10 +4667,10 @@ export const canvasApi = {
     for (const task of inputTasks) mergeInheritedModelParams(inheritedModelParams, task.modelParams)
     for (const node of inputNodes)
       mergeInheritedModelParams(inheritedModelParams, node.data.modelParams)
-    const mergedModelParams = {
-      ...mergeCanvasPresetTargetModelParams(presetTargetId, inheritedModelParams),
+    const mergedModelParams = mergeCanvasPresetTargetModelParams(presetTargetId, {
+      ...inheritedModelParams,
       ...(input.modelParams ?? {}),
-    }
+    })
     // Contract V2 二次裁剪：preset/继承/input 合并后按目标 manifest 再次过滤，
     // 防止上游节点的旧模型字段（如 searchEnabled / output_format）污染新模型请求。
     // manifest 缺省时直接退回原值，不阻塞创建。
@@ -4406,7 +4685,14 @@ export const canvasApi = {
     // 参数裁剪可能走异步 IPC；创建前重新读取最新快照，避免菜单/Agent 同时添加操作节点时
     // 后写入者覆盖前一个节点，也确保统一碰撞检测包含刚落下的节点。
     db = readDb()
-    const modelParams = pruned.modelParams
+    const modelParams = restoreCanvasTextControlModelParams(
+      input.operation,
+      mergedModelParams,
+      pruned.modelParams,
+    )
+    const droppedParams = pruned.droppedParams.filter(
+      (item) => !CANVAS_TEXT_CONTROL_MODEL_PARAM_NAMES.has(item.name),
+    )
     const modelId = input.modelId ?? operationPreset.modelId ?? null
     const agentId = input.agentId ?? operationPreset.agentId ?? null
     const skillIds = input.skillIds ?? operationPreset.skillIds
@@ -4422,7 +4708,7 @@ export const canvasApi = {
     )
     const operationNodeSize = pickOperationNodeInitialSize(
       Boolean(input.shotScriptConfig) ||
-        (input.operation === 'text_generate' && input.taskPipelineRole === 'shot'),
+        (input.operation === 'text_generate' && taskPipelineRole === 'shot'),
     )
     const position = resolveCollisionFreeNodePosition({
       preferred: { x: input.x, y: input.y },
@@ -4452,6 +4738,7 @@ export const canvasApi = {
         message: input.message ?? '点击下方编辑面板调整参数后运行',
         ...(explicitPrompt ? { prompt: explicitPrompt } : {}),
         promptDocument,
+        ...(inputBindings.length > 0 ? { inputBindings } : {}),
         ...(systemPrompt ? { systemPrompt } : {}),
         ...(negativePrompt ? { negativePrompt } : {}),
         ...(Object.keys(modelParams).length > 0 ? { modelParams } : {}),
@@ -4460,13 +4747,13 @@ export const canvasApi = {
         ...(modelId ? { modelId } : {}),
         ...(agentId ? { agentId } : {}),
         ...(skillIds.length > 0 ? { skillIds } : {}),
-        ...(input.taskPipelineRole != null ? { pipelineRole: input.taskPipelineRole } : {}),
+        ...(taskPipelineRole != null ? { pipelineRole: taskPipelineRole } : {}),
         ...(input.outputPipelineRole != null
           ? { outputPipelineRole: input.outputPipelineRole }
           : {}),
         ...(input.outputTitle != null ? { outputTitle: input.outputTitle } : {}),
         ...(input.shotScriptConfig ? { shotScriptConfig: input.shotScriptConfig } : {}),
-        ...(pruned.droppedParams.length > 0 ? { droppedModelParams: pruned.droppedParams } : {}),
+        ...(droppedParams.length > 0 ? { droppedModelParams: droppedParams } : {}),
         ...(pruned.warnings.length > 0 ? { modelParamWarnings: pruned.warnings } : {}),
         origin: 'manual',
       },
@@ -4488,6 +4775,7 @@ export const canvasApi = {
           input.operation as CanvasNodeType,
           nextCanvasNodeSequence(db, input.projectId, input.operation as CanvasNodeType),
         ),
+      operationNodeId: node.id,
       prompt: explicitPrompt ?? null,
       negativePrompt: negativePrompt ?? null,
       inputNodeIds: input.inputNodeIds,
@@ -4501,7 +4789,12 @@ export const canvasApi = {
       modelId,
       reasoningEffort,
       modelParams,
+      taskPipelineRole: taskPipelineRole ?? null,
+      outputPipelineRole: input.outputPipelineRole ?? null,
+      shotScriptConfig: input.shotScriptConfig ?? null,
+      runtimeEvents: initialCanvasTaskRuntimeEvents(at, '操作节点草稿创建'),
       promptDocument,
+      ...(inputBindings.length > 0 ? { inputBindings } : {}),
       ...(systemPrompt ? { systemPrompt } : {}),
       createdAt: at,
       updatedAt: at,
@@ -4532,12 +4825,21 @@ export const canvasApi = {
    * 重试操作节点：基于原 task 参数创建全新 task + output 流程。
    * 旧 output 节点和旧 task 不动。新 output 放在旧 output 右侧。
    */
-  async retryOperationNode(projectId: string, nodeId: string): Promise<CanvasSnapshot> {
+  async retryOperationNode(
+    projectId: string,
+    nodeId: string,
+    options?: {
+      sourceTaskId?: string
+      runtimeSource?: 'current-node' | 'original-task'
+    },
+  ): Promise<CanvasSnapshot> {
     const db = readDb()
     const node = db.nodes.find((n) => n.id === nodeId && n.projectId === projectId && !n.hidden)
-    if (!node || !node.taskId) throw new Error('操作节点未关联任务')
-    const oldTask = db.tasks.find((t) => t.id === node.taskId && t.projectId === projectId)
+    if (!node || (!node.taskId && !options?.sourceTaskId)) throw new Error('操作节点未关联任务')
+    const sourceTaskId = options?.sourceTaskId ?? node.taskId
+    const oldTask = db.tasks.find((t) => t.id === sourceTaskId && t.projectId === projectId)
     if (!oldTask) throw new Error('未找到原任务')
+    const useCurrentRuntime = options?.runtimeSource !== 'original-task'
     const oldOutputNodes = db.nodes.filter((n) => oldTask.outputNodeIds.includes(n.id))
     const baseX =
       oldOutputNodes.length > 0
@@ -4564,6 +4866,44 @@ export const canvasApi = {
       buildTaskInputFiles(retryInputNodes, buildCanvasRetryInputRoles(oldTask.relationManifest)),
       oldTask.provider === 'xai' ? 'base64' : undefined,
     )
+    const requestedRetryModelParams = useCurrentRuntime
+      ? { ...oldTask.modelParams, ...(node.data.modelParams ?? {}) }
+      : oldTask.modelParams
+    const retryProviderProfileId =
+      (useCurrentRuntime ? node.data.providerProfileId : oldTask.providerProfileId) ?? undefined
+    const retryManifestId =
+      (useCurrentRuntime ? node.data.manifestId : oldTask.manifestId) ?? undefined
+    const retryModelId = (useCurrentRuntime ? node.data.modelId : oldTask.modelId) ?? undefined
+    const retryAgentId = (useCurrentRuntime ? node.data.agentId : oldTask.agentId) ?? undefined
+    const retryReasoningEffort =
+      (useCurrentRuntime ? node.data.reasoningEffort : oldTask.reasoningEffort) ?? undefined
+    const retrySkillIds = (useCurrentRuntime ? node.data.skillIds : oldTask.skillIds) ?? []
+    const retryTaskPipelineRole = useCurrentRuntime
+      ? (node.data.pipelineRole ?? oldTask.taskPipelineRole)
+      : (oldTask.taskPipelineRole ?? node.data.pipelineRole)
+    const retryOutputPipelineRole = useCurrentRuntime
+      ? (node.data.outputPipelineRole ?? oldTask.outputPipelineRole)
+      : (oldTask.outputPipelineRole ?? node.data.outputPipelineRole)
+    const retryShotScriptConfig = useCurrentRuntime
+      ? (node.data.shotScriptConfig ?? oldTask.shotScriptConfig)
+      : (oldTask.shotScriptConfig ?? node.data.shotScriptConfig)
+    const retryPresetTargetId = resolveCanvasPresetTarget({
+      operation: oldTask.operation,
+      taskPipelineRole: retryTaskPipelineRole ?? null,
+      outputPipelineRole: retryOutputPipelineRole ?? null,
+      workflow: requestedRetryModelParams.workflow,
+    })
+    const retryModelParams = mergeCanvasPresetTargetModelParams(
+      retryPresetTargetId,
+      requestedRetryModelParams,
+    )
+    const resolvedRetryTaskPipelineRole =
+      retryTaskPipelineRole ??
+      (retryPresetTargetId !== oldTask.operation ? retryOutputPipelineRole : undefined)
+    const retrySystemPrompt = normalizeCanvasFunctionalSystemPrompt(
+      oldTask.systemPrompt,
+      retryPresetTargetId,
+    )
     const request: CreateCanvasTaskRequest & { inputFiles?: CanvasMediaTaskInputFile[] } = {
       boardId: node.boardId,
       operation: oldTask.operation,
@@ -4573,16 +4913,19 @@ export const canvasApi = {
       ...(oldTask.inputAssetIds.length > 0 ? { inputAssetIds: oldTask.inputAssetIds } : {}),
       ...(retryInputFiles.length > 0 ? { inputFiles: retryInputFiles } : {}),
       outputPlacement: { x: baseX, y: baseY },
-      ...(oldTask.modelParams && Object.keys(oldTask.modelParams).length > 0
-        ? { modelParams: oldTask.modelParams }
-        : {}),
-      ...(oldTask.providerProfileId ? { providerProfileId: oldTask.providerProfileId } : {}),
-      ...(oldTask.manifestId ? { manifestId: oldTask.manifestId } : {}),
-      ...(oldTask.modelId ? { modelId: oldTask.modelId } : {}),
-      ...(oldTask.agentId ? { agentId: oldTask.agentId } : {}),
-      ...(oldTask.reasoningEffort ? { reasoningEffort: oldTask.reasoningEffort } : {}),
-      ...(oldTask.skillIds && oldTask.skillIds.length > 0 ? { skillIds: oldTask.skillIds } : {}),
+      ...(Object.keys(retryModelParams).length > 0 ? { modelParams: retryModelParams } : {}),
+      ...(retryProviderProfileId ? { providerProfileId: retryProviderProfileId } : {}),
+      ...(retryManifestId ? { manifestId: retryManifestId } : {}),
+      ...(retryModelId ? { modelId: retryModelId } : {}),
+      ...(retryAgentId ? { agentId: retryAgentId } : {}),
+      ...(retryReasoningEffort ? { reasoningEffort: retryReasoningEffort } : {}),
+      ...(retrySkillIds.length > 0 ? { skillIds: retrySkillIds } : {}),
+      ...(resolvedRetryTaskPipelineRole ? { taskPipelineRole: resolvedRetryTaskPipelineRole } : {}),
+      ...(retryOutputPipelineRole ? { outputPipelineRole: retryOutputPipelineRole } : {}),
+      ...(retryShotScriptConfig ? { shotScriptConfig: retryShotScriptConfig } : {}),
+      ...(oldTask.title ? { taskTitle: oldTask.title } : {}),
       ...pickCanvasPromptTaskFields(oldTask),
+      ...(retrySystemPrompt ? { systemPrompt: retrySystemPrompt } : {}),
     }
     // 重试：绑定到原操作节点，不新建节点
     return isTextModelOperation(request.operation)
@@ -4609,8 +4952,10 @@ export const canvasApi = {
       modelId?: string
       reasoningEffort?: SessionReasoningEffort
       modelParams?: Record<string, unknown>
+      skipParameterValidation?: boolean
       skillIds?: string[]
       userPrompt?: string
+      shotScriptConfig?: ShotScriptConfig
     } & CanvasPromptTaskFields,
   ): Promise<CanvasSnapshot> {
     const db = readDb()
@@ -4632,7 +4977,71 @@ export const canvasApi = {
           inputNodes.map((n) => n.assetId).filter((id): id is string => Boolean(id)),
       ),
     )
+    // output 位置：节点右侧
+    const oldOutputs = db.nodes.filter((n) =>
+      db.edges.some(
+        (e) => e.sourceNodeId === nodeId && e.type === 'generated' && e.targetNodeId === n.id,
+      ),
+    )
+    const baseX =
+      oldOutputs.length > 0
+        ? Math.max(...oldOutputs.map((n) => n.x + n.width)) + 60
+        : node.x + node.width + 60
+    const existingReasoningEffort = node.taskId
+      ? db.tasks.find((item) => item.id === node.taskId && item.projectId === projectId)
+          ?.reasoningEffort
+      : undefined
+    const reasoningEffort = params.reasoningEffort ?? existingReasoningEffort ?? undefined
+    const operation = (node.data.operation ?? node.type) as CanvasOperationType
+    const presetTargetId = resolveCanvasPresetTarget({
+      operation,
+      taskPipelineRole: node.data.pipelineRole ?? null,
+      outputPipelineRole: node.data.outputPipelineRole ?? null,
+      workflow: params.modelParams?.workflow ?? node.data.modelParams?.workflow,
+    })
+    const taskPipelineRole =
+      node.data.pipelineRole ??
+      (presetTargetId !== operation ? node.data.outputPipelineRole : undefined)
+    const modelParams = mergeCanvasPresetTargetModelParams(presetTargetId, params.modelParams)
+    const normalizedSystemPrompt = normalizeCanvasFunctionalSystemPrompt(
+      params.systemPrompt ?? node.data.systemPrompt,
+      presetTargetId,
+    )
+    let request: Omit<CreateCanvasTaskRequest, 'boardId'> & {
+      inputFiles?: CanvasMediaTaskInputFile[]
+    } = {
+      operation,
+      prompt: params.prompt,
+      ...(params.negativePrompt ? { negativePrompt: params.negativePrompt } : {}),
+      inputNodeIds,
+      ...(inputAssetIds.length > 0 ? { inputAssetIds } : {}),
+      ...(params.inputFiles ? { inputFiles: params.inputFiles } : {}),
+      outputPlacement: { x: baseX, y: node.y },
+      taskTitle: node.title ?? operationLabel(operation),
+      ...(taskPipelineRole ? { taskPipelineRole } : {}),
+      ...(node.data.outputPipelineRole ? { outputPipelineRole: node.data.outputPipelineRole } : {}),
+      ...(node.data.outputTitle ? { outputTitle: node.data.outputTitle } : {}),
+      ...(params.agentId ? { agentId: params.agentId } : {}),
+      ...(params.providerProfileId ? { providerProfileId: params.providerProfileId } : {}),
+      ...(params.manifestId ? { manifestId: params.manifestId } : {}),
+      ...(params.modelId ? { modelId: params.modelId } : {}),
+      ...(reasoningEffort ? { reasoningEffort } : {}),
+      ...(Object.keys(modelParams).length > 0 ? { modelParams } : {}),
+      ...(params.skipParameterValidation === true ? { skipParameterValidation: true } : {}),
+      ...(params.skillIds ? { skillIds: params.skillIds } : {}),
+      ...(params.shotScriptConfig ? { shotScriptConfig: params.shotScriptConfig } : {}),
+      ...pickCanvasPromptTaskFields(params),
+      ...(normalizedSystemPrompt ? { systemPrompt: normalizedSystemPrompt } : {}),
+    }
     if (params.inputNodeIds) {
+      const skipParameterValidation = params.skipParameterValidation === true
+      if (skipParameterValidation) {
+        // The user explicitly accepted the warning or disabled future renderer preflight.
+      } else if (isTextModelOperation(request.operation)) {
+        request = validateCanvasTextTaskSubmission(request)
+      } else {
+        request = await validateCanvasMediaTaskSubmission(request)
+      }
       db.edges = db.edges.filter(
         (edge) =>
           !(
@@ -4649,51 +5058,16 @@ export const canvasApi = {
       }
       writeDb(db)
     }
-    // output 位置：节点右侧
-    const oldOutputs = db.nodes.filter((n) =>
-      db.edges.some(
-        (e) => e.sourceNodeId === nodeId && e.type === 'generated' && e.targetNodeId === n.id,
-      ),
-    )
-    const baseX =
-      oldOutputs.length > 0
-        ? Math.max(...oldOutputs.map((n) => n.x + n.width)) + 60
-        : node.x + node.width + 60
-    const existingReasoningEffort = node.taskId
-      ? db.tasks.find((item) => item.id === node.taskId && item.projectId === projectId)
-          ?.reasoningEffort
-      : undefined
-    const reasoningEffort = params.reasoningEffort ?? existingReasoningEffort ?? undefined
-    const request = {
-      operation: (node.data.operation ?? node.type) as CanvasOperationType,
-      prompt: params.prompt,
-      ...(params.negativePrompt ? { negativePrompt: params.negativePrompt } : {}),
-      inputNodeIds,
-      ...(inputAssetIds.length > 0 ? { inputAssetIds } : {}),
-      ...(params.inputFiles ? { inputFiles: params.inputFiles } : {}),
-      outputPlacement: { x: baseX, y: node.y },
-      taskTitle:
-        node.title ?? operationLabel((node.data.operation ?? node.type) as CanvasOperationType),
-      ...(node.data.pipelineRole ? { taskPipelineRole: node.data.pipelineRole } : {}),
-      ...(node.data.outputPipelineRole ? { outputPipelineRole: node.data.outputPipelineRole } : {}),
-      ...(node.data.outputTitle ? { outputTitle: node.data.outputTitle } : {}),
-      ...(params.agentId ? { agentId: params.agentId } : {}),
-      ...(params.providerProfileId ? { providerProfileId: params.providerProfileId } : {}),
-      ...(params.manifestId ? { manifestId: params.manifestId } : {}),
-      ...(params.modelId ? { modelId: params.modelId } : {}),
-      ...(reasoningEffort ? { reasoningEffort } : {}),
-      ...(params.modelParams ? { modelParams: params.modelParams } : {}),
-      ...(params.skillIds ? { skillIds: params.skillIds } : {}),
-      ...pickCanvasPromptTaskFields(params),
-    }
     return isTextModelOperation(request.operation)
       ? this.createTextTask(projectId, request, {
           bindToNodeId: nodeId,
           ...(params.userPrompt !== undefined ? { userPrompt: params.userPrompt } : {}),
+          ...(params.inputNodeIds ? { validationToken: CANVAS_TASK_VALIDATION_TOKEN } : {}),
         })
       : this.createMediaTask(projectId, request, {
           bindToNodeId: nodeId,
           ...(params.userPrompt !== undefined ? { userPrompt: params.userPrompt } : {}),
+          ...(params.inputNodeIds ? { validationToken: CANVAS_TASK_VALIDATION_TOKEN } : {}),
         })
   },
   async cancelTask(projectId: string, taskId: string): Promise<CanvasSnapshot> {
@@ -4728,6 +5102,12 @@ export const canvasApi = {
     task.errorDetail = '任务已由用户在画布任务队列中取消。'
     task.updatedAt = at
     task.completedAt = at
+    appendCanvasTaskRuntimeEvent(task, {
+      at,
+      kind: 'cancelled',
+      label: '任务已由用户取消',
+      detail: task.errorDetail,
+    })
     if (taskNode && patchTaskNode) {
       taskNode.data = {
         ...taskNode.data,
@@ -4746,9 +5126,9 @@ export const canvasApi = {
   /**
    * 删除任务记录（不经过取消流程）。
    *
-   * 用于「清空失败/已取消任务」等清理场景：这些任务已经结束，没有运行态需要中断，
-   * 直接从 db.tasks 移除记录即可。参考 deleteNodes 删除节点时连带移除任务的先例
-   * （见本对象内 `db.tasks = db.tasks.filter(...)` 写法）。
+   * 用于「清空失败/已取消任务」等清理场景。无产物记录可直接删除；仍有关联
+   * 产物节点/资产的记录会先恢复为 completed 并保留，避免删除唯一运行索引后
+   * 操作节点预览退回空状态。
    *
    * 不返回任何值——调用方在循环删除结束后统一 openSnapshot 刷新视图，避免每删一条
    * 就重写一次库。
@@ -4756,7 +5136,15 @@ export const canvasApi = {
   deleteTasks(projectId: string, taskIds: string[]): void {
     if (taskIds.length === 0) return
     const db = readDb()
-    const idSet = new Set(taskIds)
+    const idSet = canvasTaskIdsSafeToDelete({
+      projectId,
+      taskIds,
+      tasks: db.tasks,
+      nodes: db.nodes,
+      assets: db.assets,
+      edges: db.edges,
+      at: now(),
+    })
     db.tasks = db.tasks.filter((task) => !(task.projectId === projectId && idSet.has(task.id)))
     updateProjectCounts(db, projectId)
     writeDb(db)
@@ -4774,18 +5162,24 @@ export const canvasApi = {
    */
   async createMediaTask(
     projectId: string,
-    request: Omit<CreateCanvasTaskRequest, 'boardId'> & {
+    requestInput: Omit<CreateCanvasTaskRequest, 'boardId'> & {
       inputFiles?: CanvasMediaTaskInputFile[]
     },
     options?: {
       bindToNodeId?: string
       userPrompt?: string
+      validationToken?: typeof CANVAS_TASK_VALIDATION_TOKEN
     },
   ): Promise<CanvasSnapshot> {
     const db = readDb()
     const board = db.boards.find((item) => item.projectId === projectId)
     const project = db.projects.find((item) => item.id === projectId)
     if (!board || !project) throw new Error('Canvas board not found')
+    const request =
+      requestInput.skipParameterValidation === true ||
+      options?.validationToken === CANVAS_TASK_VALIDATION_TOKEN
+        ? requestInput
+        : await validateCanvasMediaTaskSubmission(requestInput)
     if (!project.rootPath) {
       project.rootPath = await ensureCanvasProjectDirectory({
         projectId,
@@ -4811,6 +5205,7 @@ export const canvasApi = {
       progress: 24,
       message: '调用平台 adapter 中…',
     }
+    syncCanvasNodeRuntimeData(taskNodeData, request)
     const requestPromptWithContext = request.promptDocument
       ? request.prompt
       : mergeCanvasPromptWithInputTextContext(
@@ -4820,11 +5215,7 @@ export const canvasApi = {
     const requestPrompt = request.promptDocument
       ? request.prompt
       : buildCanvasOperationPrompt(request.operation, requestPromptWithContext)
-    if (
-      requestPrompt != null &&
-      request.promptDocument == null &&
-      options?.bindToNodeId == null
-    ) {
+    if (requestPrompt != null && request.promptDocument == null && options?.bindToNodeId == null) {
       taskNodeData.prompt = requestPrompt
     }
     if (request.promptDocument != null) taskNodeData.promptDocument = request.promptDocument
@@ -4842,6 +5233,7 @@ export const canvasApi = {
     if (request.outputPipelineRole != null)
       taskNodeData.outputPipelineRole = request.outputPipelineRole
     if (request.outputTitle != null) taskNodeData.outputTitle = request.outputTitle
+    if (request.shotScriptConfig != null) taskNodeData.shotScriptConfig = request.shotScriptConfig
     const defaultTaskTitle =
       request.taskTitle ??
       defaultCanvasNodeTitle(
@@ -4866,6 +5258,7 @@ export const canvasApi = {
         : null
     if (bindNode) {
       bindNode.data = { ...bindNode.data, ...taskNodeData }
+      syncCanvasNodeRuntimeData(bindNode.data, request)
       if (options != null && 'userPrompt' in options) {
         const userPrompt = options.userPrompt?.trim() ?? ''
         if (userPrompt) {
@@ -4906,6 +5299,7 @@ export const canvasApi = {
       status: 'running',
       progress: 24,
       title: defaultTaskTitle,
+      operationNodeId: taskNode.id,
       prompt: requestPrompt ?? null,
       negativePrompt: request.negativePrompt ?? null,
       inputNodeIds: request.inputNodeIds ?? [],
@@ -4921,6 +5315,10 @@ export const canvasApi = {
       modelId: request.modelId ?? null,
       reasoningEffort: request.reasoningEffort ?? null,
       modelParams: request.modelParams ?? {},
+      taskPipelineRole: request.taskPipelineRole ?? null,
+      outputPipelineRole: request.outputPipelineRole ?? null,
+      shotScriptConfig: request.shotScriptConfig ?? null,
+      runtimeEvents: initialCanvasTaskRuntimeEvents(at, '媒体任务创建并提交'),
       ...pickCanvasPromptTaskFields(request),
       createdAt: at,
       updatedAt: at,
@@ -4958,6 +5356,7 @@ export const canvasApi = {
       ...(request.manifestId != null ? { manifestId: request.manifestId } : {}),
       ...(request.modelId != null ? { modelId: request.modelId } : {}),
       ...(request.modelParams != null ? { modelParams: request.modelParams } : {}),
+      ...(request.skipParameterValidation === true ? { skipParameterValidation: true } : {}),
       ...pickCanvasPromptTaskFields(request),
       outputDir: `${project.rootPath}/assets`,
       waitForCompletion: false,
@@ -4989,18 +5388,24 @@ export const canvasApi = {
    */
   async createTextTask(
     projectId: string,
-    request: Omit<CreateCanvasTaskRequest, 'boardId'> & {
+    requestInput: Omit<CreateCanvasTaskRequest, 'boardId'> & {
       inputFiles?: CanvasMediaTaskInputFile[]
     },
     options?: {
       bindToNodeId?: string
       userPrompt?: string
+      validationToken?: typeof CANVAS_TASK_VALIDATION_TOKEN
     },
   ): Promise<CanvasSnapshot> {
     const db = readDb()
     const board = db.boards.find((item) => item.projectId === projectId)
     const project = db.projects.find((item) => item.id === projectId)
     if (!board || !project) throw new Error('Canvas board not found')
+    const request =
+      requestInput.skipParameterValidation === true ||
+      options?.validationToken === CANVAS_TASK_VALIDATION_TOKEN
+        ? requestInput
+        : validateCanvasTextTaskSubmission(requestInput)
     const at = now()
     const taskId = uid('canvas_task')
     const taskNodeSize = pickOperationNodeInitialSize(
@@ -5022,14 +5427,11 @@ export const canvasApi = {
       progress: 30,
       message: '调用文本模型中…',
     }
+    syncCanvasNodeRuntimeData(taskNodeData, request)
     const requestPrompt = request.promptDocument
       ? request.prompt
       : buildCanvasOperationPrompt(request.operation, request.prompt)
-    if (
-      requestPrompt != null &&
-      request.promptDocument == null &&
-      options?.bindToNodeId == null
-    ) {
+    if (requestPrompt != null && request.promptDocument == null && options?.bindToNodeId == null) {
       taskNodeData.prompt = requestPrompt
     }
     if (request.promptDocument != null) taskNodeData.promptDocument = request.promptDocument
@@ -5039,6 +5441,7 @@ export const canvasApi = {
     if (request.outputPipelineRole != null)
       taskNodeData.outputPipelineRole = request.outputPipelineRole
     if (request.outputTitle != null) taskNodeData.outputTitle = request.outputTitle
+    if (request.shotScriptConfig != null) taskNodeData.shotScriptConfig = request.shotScriptConfig
     if (request.skillIds != null) taskNodeData.skillIds = request.skillIds
     const defaultTaskTitle =
       request.taskTitle ??
@@ -5064,6 +5467,7 @@ export const canvasApi = {
         : null
     if (bindNode) {
       bindNode.data = { ...bindNode.data, ...taskNodeData }
+      syncCanvasNodeRuntimeData(bindNode.data, request)
       if (request.operation === 'text_generate' && request.taskPipelineRole === 'shot') {
         bindNode.width = Math.max(bindNode.width, taskNodeSize.width)
         bindNode.height = Math.max(bindNode.height, taskNodeSize.height)
@@ -5108,6 +5512,7 @@ export const canvasApi = {
       status: 'running',
       progress: 30,
       title: defaultTaskTitle,
+      operationNodeId: taskNode.id,
       prompt: request.prompt ?? null,
       negativePrompt: request.negativePrompt ?? null,
       inputNodeIds: request.inputNodeIds ?? [],
@@ -5124,6 +5529,10 @@ export const canvasApi = {
       modelId: request.modelId ?? null,
       reasoningEffort: request.reasoningEffort ?? null,
       modelParams: request.modelParams ?? {},
+      taskPipelineRole: request.taskPipelineRole ?? null,
+      outputPipelineRole: request.outputPipelineRole ?? null,
+      shotScriptConfig: request.shotScriptConfig ?? null,
+      runtimeEvents: initialCanvasTaskRuntimeEvents(at, '文本任务创建并提交'),
       ...pickCanvasPromptTaskFields(request),
       createdAt: at,
       updatedAt: at,
@@ -5199,8 +5608,12 @@ export const canvasApi = {
     const patchTaskNode = taskNodeLookup ? canPatchCanvasTaskNode(taskNodeLookup, taskId) : false
     if (!task || !taskNode) return this.openSnapshot(projectId)
     if (task.status === 'cancelled') return this.openSnapshot(projectId)
+    if (task.status === 'completed' || task.status === 'failed') {
+      return this.openSnapshot(projectId)
+    }
 
     if (response.status === 'failed' || response.error || !response.text) {
+      const at = now()
       task.status = 'failed'
       task.progress = 100
       task.errorMsg = response.error?.code ?? 'text_generation_failed'
@@ -5212,8 +5625,19 @@ export const canvasApi = {
       task.provider = response.provider || task.provider || null
       task.modelId = response.model || task.modelId || null
       task.requestCall = response.requestCall ?? task.requestCall ?? null
+      if (response.text.trim()) {
+        task.modelOutputText = response.text
+        appendCanvasTaskModelOutputEvent(task, at, response.text)
+      }
       if (response.rawResponse !== undefined) task.rawResponse = response.rawResponse
-      task.updatedAt = now()
+      task.updatedAt = at
+      task.completedAt = at
+      appendCanvasTaskRuntimeEvent(task, {
+        at,
+        kind: 'failed',
+        label: '文本模型调用失败',
+        detail: task.errorDetail ?? undefined,
+      })
       if (patchTaskNode) {
         taskNode.data = {
           ...taskNode.data,
@@ -5221,11 +5645,69 @@ export const canvasApi = {
           progress: 100,
           message: `失败：${task.errorDetail}`,
         }
-        taskNode.updatedAt = now()
+        syncCanvasTaskRuntimeToNode(task, taskNode.data)
+        taskNode.updatedAt = at
       }
       updateProjectCounts(db, projectId)
       writeDb(db)
       return this.openSnapshot(projectId)
+    }
+
+    const outputRole = task.outputPipelineRole ?? taskNode.data.outputPipelineRole
+    const semanticValidation = validateCanvasSemanticTextOutput(outputRole, response.text, {
+      shotScriptConfig: task.shotScriptConfig ?? taskNode.data.shotScriptConfig ?? null,
+    })
+    if (!semanticValidation.ok) {
+      const at = now()
+      task.status = 'failed'
+      task.progress = 100
+      task.errorMsg = semanticValidation.code
+      task.errorDetail = semanticValidation.message
+      task.providerProfileId = response.providerProfileId || task.providerProfileId || null
+      task.provider = response.provider || task.provider || null
+      task.modelId = response.model || task.modelId || null
+      task.requestCall = response.requestCall ?? task.requestCall ?? null
+      task.modelOutputText = response.text
+      appendCanvasTaskModelOutputEvent(task, at, response.text)
+      if (response.rawResponse !== undefined) task.rawResponse = response.rawResponse
+      task.updatedAt = at
+      task.completedAt = at
+      appendCanvasTaskRuntimeEvent(task, {
+        at,
+        kind: 'validation',
+        label: '模型已返回文本，但业务结构解析失败',
+        detail: semanticValidation.message,
+      })
+      if (patchTaskNode) {
+        taskNode.data = {
+          ...taskNode.data,
+          status: 'failed',
+          progress: 100,
+          message: `失败：${semanticValidation.message}`,
+        }
+        syncCanvasTaskRuntimeToNode(task, taskNode.data)
+        taskNode.updatedAt = at
+      }
+      updateProjectCounts(db, projectId)
+      writeDb(db)
+      return this.openSnapshot(projectId)
+    }
+
+    const outputText = semanticValidation.text
+    let materializedShotGroups: ShotGroup[] = []
+    if (outputRole === 'shot' && semanticValidation.storyboardRows?.length) {
+      const project = db.projects.find((item) => item.id === projectId)
+      if (project) {
+        const materialized = materializeStoryboardRows({
+          metadata: project.metadata,
+          defaultGroupName: taskNode.data.outputTitle ?? task.title ?? '分镜脚本',
+          assets: db.assets,
+          rows: semanticValidation.storyboardRows,
+        })
+        project.metadata = materialized.metadata
+        project.updatedAt = now()
+        materializedShotGroups = materialized.createdGroups
+      }
     }
 
     const at = now()
@@ -5236,7 +5718,7 @@ export const canvasApi = {
       type: 'text',
       source: 'ai_generated',
       title: defaultCanvasNodeTitle('text', nextCanvasNodeSequence(db, projectId, 'text')),
-      contentText: response.text,
+      contentText: outputText,
       metadata: {
         taskId,
         providerProfileId: response.providerProfileId,
@@ -5246,8 +5728,7 @@ export const canvasApi = {
       createdAt: at,
       updatedAt: at,
     }
-    const outputRole = taskNode.data.outputPipelineRole
-    const storyboardRows = readRenderableShotScriptRows(response.text)
+    const storyboardRows = readRenderableShotScriptRows(outputText)
     if (patchTaskNode && storyboardRows.length > 0) {
       const completedSize = fitShotScriptOperationNodeSize(storyboardRows.length)
       taskNode.width = Math.max(taskNode.width, completedSize.width)
@@ -5260,7 +5741,11 @@ export const canvasApi = {
       width: taskNode.width,
       height: taskNode.height,
     })
-    const resultNodeSize = pickTextNodeSize(response.text)
+    const resultNodeSize = pickTextNodeSize(outputText)
+    const materializedShotGroup =
+      materializedShotGroups.length === 1 ? materializedShotGroups[0] : undefined
+    const materializedShotSegment =
+      materializedShotGroup?.segments.length === 1 ? materializedShotGroup.segments[0] : undefined
     const resultNodePlacement = resolveCollisionFreeNodePosition({
       preferred: preferredResultNodePlacement,
       size: resultNodeSize,
@@ -5278,10 +5763,12 @@ export const canvasApi = {
       width: resultNodeSize.width,
       height: resultNodeSize.height,
       data: {
-        text: response.text,
+        text: outputText,
         format: 'markdown',
         origin: 'task_output',
         ...(outputRole ? { pipelineRole: outputRole } : {}),
+        ...(materializedShotGroup ? { shotGroupId: materializedShotGroup.id } : {}),
+        ...(materializedShotSegment ? { shotSegmentId: materializedShotSegment.id } : {}),
       },
       at,
     })
@@ -5293,7 +5780,14 @@ export const canvasApi = {
     task.provider = response.provider || task.provider || null
     task.modelId = response.model || task.modelId || null
     task.requestCall = response.requestCall ?? task.requestCall ?? null
+    task.modelOutputText = response.text
+    appendCanvasTaskModelOutputEvent(task, at, response.text)
     if (response.rawResponse !== undefined) task.rawResponse = response.rawResponse
+    appendCanvasTaskRuntimeEvent(task, {
+      at,
+      kind: 'completed',
+      label: '文本生成与业务解析完成',
+    })
     task.outputAssetIds.push(asset.id)
     task.outputNodeIds.push(resultNode.id)
     if (patchTaskNode) {
@@ -5303,6 +5797,7 @@ export const canvasApi = {
         progress: 100,
         message: '文本已生成',
       }
+      syncCanvasTaskRuntimeToNode(task, taskNode.data)
       taskNode.updatedAt = at
     }
     db.assets.push(asset)
@@ -5339,12 +5834,20 @@ export const canvasApi = {
     if (task.status === 'completed' || task.status === 'failed') return this.openSnapshot(projectId)
     task.status = 'running'
     task.progress = Math.max(task.progress, 35)
-    task.requestId = response.runtimeTaskId ?? response.requestId ?? null
+    task.requestId = response.requestId ?? task.requestId ?? response.runtimeTaskId ?? null
     task.providerProfileId = response.providerProfileId || task.providerProfileId || null
     task.provider = response.provider || task.provider || null
     task.modelId = response.model || task.modelId || null
     task.requestCall = response.requestCall ?? task.requestCall ?? null
-    task.updatedAt = now()
+    if (response.submitResponse !== undefined) task.submitResponse = response.submitResponse
+    const at = now()
+    task.updatedAt = at
+    appendCanvasTaskRuntimeEvent(task, {
+      at,
+      kind: 'submitted',
+      label: 'Provider 已接受后台任务',
+      ...(task.requestId ? { detail: `Request ${task.requestId}` } : {}),
+    })
     if (patchTaskNode) {
       taskNode.data = {
         ...taskNode.data,
@@ -5352,7 +5855,8 @@ export const canvasApi = {
         progress: task.progress,
         message: '后台任务已提交，等待 provider 返回产物',
       }
-      taskNode.updatedAt = now()
+      syncCanvasTaskRuntimeToNode(task, taskNode.data)
+      taskNode.updatedAt = at
     }
     updateProjectCounts(db, projectId)
     writeDb(db)
@@ -5373,6 +5877,10 @@ export const canvasApi = {
     if (!task || !taskNode) return this.openSnapshot(projectId)
     if (task.status === 'cancelled') return this.openSnapshot(projectId)
 
+    // Terminal state is monotonic once outputs are materialized. A duplicated or
+    // delayed failure/cancel event must not hide an already playable artifact.
+    if (isCompletedCanvasTaskWithOutputs(task)) return this.openSnapshot(projectId)
+
     const responseRequestId = response.requestId ?? response.runtimeTaskId ?? null
     if (
       !response.error &&
@@ -5385,6 +5893,7 @@ export const canvasApi = {
     }
 
     if (response.error || response.status === 'failed' || response.status === 'cancelled') {
+      const at = now()
       const isCancelled = response.status === 'cancelled'
       task.status = isCancelled ? 'cancelled' : 'failed'
       task.progress = 100
@@ -5394,7 +5903,17 @@ export const canvasApi = {
         response.error?.message ?? (isCancelled ? '任务已取消' : 'Provider task failed'),
       )
       task.requestId = responseRequestId
-      task.updatedAt = now()
+      task.requestCall = response.requestCall ?? task.requestCall ?? null
+      if (response.submitResponse !== undefined) task.submitResponse = response.submitResponse
+      if (response.rawResponse !== undefined) task.rawResponse = response.rawResponse
+      task.updatedAt = at
+      task.completedAt = at
+      appendCanvasTaskRuntimeEvent(task, {
+        at,
+        kind: isCancelled ? 'cancelled' : 'failed',
+        label: isCancelled ? 'Provider 任务已取消' : 'Provider 任务失败',
+        detail: task.errorDetail ?? undefined,
+      })
       if (patchTaskNode) {
         taskNode.data = {
           ...taskNode.data,
@@ -5402,7 +5921,8 @@ export const canvasApi = {
           progress: 100,
           message: isCancelled ? '任务已取消' : `失败：${task.errorDetail}`,
         }
-        taskNode.updatedAt = now()
+        syncCanvasTaskRuntimeToNode(task, taskNode.data)
+        taskNode.updatedAt = at
       }
       updateProjectCounts(db, projectId)
       writeDb(db)
@@ -5411,22 +5931,57 @@ export const canvasApi = {
 
     task.status = 'completed'
     task.progress = 100
-    task.completedAt = now()
-    task.updatedAt = now()
+    const at = now()
+    task.completedAt = at
+    task.updatedAt = at
     if (response.providerProfileId) task.providerProfileId = response.providerProfileId
     if (response.model) task.modelId = response.model
     task.provider = response.provider || null
     task.requestId = responseRequestId
     task.rawResponse = response.rawResponse
-    task.requestCall = response.requestCall ?? null
+    if (response.submitResponse !== undefined) task.submitResponse = response.submitResponse
+    task.requestCall = response.requestCall ?? task.requestCall ?? null
 
-    const at = now()
+    appendCanvasTaskRuntimeEvent(task, {
+      at,
+      kind: 'completed',
+      label: 'Provider 任务完成并返回产物',
+    })
     const preparedOutputs: Array<{
       asset: CanvasAsset
       nodeType: CanvasNode['type']
       nodeData: CanvasNode['data']
       resultNodeSize: { width: number; height: number }
     }> = []
+    const explicitFilmOwner =
+      typeof taskNode.data.outputFilmAssetId === 'string'
+        ? db.assets.find(
+            (item) =>
+              item.id === taskNode.data.outputFilmAssetId &&
+              item.projectId === projectId &&
+              readAssetKind(item) !== null,
+          )
+        : undefined
+    const inferredFilmOwners =
+      taskNode.data.outputPipelineRole === 'design_card' || task.operation === 'panorama_360'
+        ? task.inputAssetIds
+            .map((assetId) => db.assets.find((item) => item.id === assetId))
+            .filter(
+              (item): item is CanvasAsset =>
+                item != null &&
+                item.projectId === projectId &&
+                (task.operation === 'panorama_360'
+                  ? readAssetKind(item) === 'scene'
+                  : ['character', 'scene', 'prop', 'effect'].includes(readAssetKind(item) ?? '')),
+            )
+        : []
+    const uniqueInferredFilmOwners = Array.from(
+      new Map(inferredFilmOwners.map((item) => [item.id, item])).values(),
+    )
+    const filmOwner =
+      explicitFilmOwner ??
+      (uniqueInferredFilmOwners.length === 1 ? uniqueInferredFilmOwners[0] : undefined)
+    const filmReferenceKind = taskNode.data.outputFilmReferenceKind ?? 'concept'
 
     for (const assetOut of response.assets) {
       const assetType = (assetOut.type || 'file') as CanvasAssetType
@@ -5497,6 +6052,13 @@ export const canvasApi = {
         ...(assetOut.durationMs != null ? { durationMs: assetOut.durationMs } : {}),
         metadata: {
           taskId,
+          ...(filmOwner ? { filmOwnerAssetId: filmOwner.id } : {}),
+          ...(!filmOwner && isPanorama360
+            ? {
+                kind: 'scene',
+                tags: ['360全景图'],
+              }
+            : {}),
           ...(isPanorama360
             ? { panorama360: { projection: 'equirectangular', sourceOperation: 'panorama_360' } }
             : {}),
@@ -5537,6 +6099,27 @@ export const canvasApi = {
         nodeData,
         resultNodeSize: fitMediaNodeSize(assetType, assetWidth, assetHeight),
       })
+    }
+
+    if (filmOwner) {
+      const currentReferences = readReferences(filmOwner.metadata)
+      const generatedReferences: FilmReference[] = preparedOutputs
+        .filter((output) => output.asset.type === 'image')
+        .map((output, index) => ({
+          id: filmUid('ref'),
+          kind: filmReferenceKind,
+          assetId: output.asset.id,
+          description: output.asset.title ?? task.title ?? '',
+          order: currentReferences.length + index,
+          ...(currentReferences.length === 0 && index === 0 ? { isPrimary: true } : {}),
+        }))
+      if (generatedReferences.length > 0) {
+        filmOwner.metadata = writeReferences(filmOwner.metadata, [
+          ...currentReferences,
+          ...generatedReferences,
+        ])
+        filmOwner.updatedAt = at
+      }
     }
 
     const outputPlacements = resolveCollisionFreeBatchPositions({
@@ -5602,7 +6185,8 @@ export const canvasApi = {
         progress: 100,
         message: `${response.assets.length} 个产物已写回画布`,
       }
-      taskNode.updatedAt = now()
+      syncCanvasTaskRuntimeToNode(task, taskNode.data)
+      taskNode.updatedAt = at
     }
     updateProjectCounts(db, projectId)
     writeDb(db)
@@ -5670,7 +6254,7 @@ export const canvasApi = {
    */
   async hydrateFromStorage(): Promise<{ restored: number }> {
     // 整库重建是全库级操作：只要**任何一个**项目还有未落库改动，就不覆盖热存储。
-    if (dirtyProjectIds.size > 0) return { restored: 0 }
+    if (dirtyProjects.size > 0) return { restored: 0 }
     const db = emptyDb()
     let restored = 0
     let migrated = false
@@ -5690,7 +6274,7 @@ export const canvasApi = {
       }
       // 从权威源整库重建：重建出来的项目本身不带未落库改动，整体清空 dirty 集合。
       persistHotDb(db)
-      dirtyProjectIds.clear()
+      dirtyProjects.reset()
       dispatchDirty(null, false)
       if (migrated) {
         await persistAllProjects(db)
@@ -5732,14 +6316,10 @@ async function ensureVideoThumbnail(
     const status = await window.spark.invoke('ffmpeg:status', {})
     if (!(status as { ffmpegReady?: boolean }).ffmpegReady) return
 
-    // 取视频所在目录（兼容 Windows \ 和 Unix / 路径分隔符）
-    const videoDir = videoFilePath.replace(/[/\\][^/\\]+$/, '')
-    const thumbDir = `${videoDir}/.thumbs`
-    const outputPath = `${thumbDir}/${assetId}.jpg`
     const res = await window.spark.invoke('video:process', {
       operation: 'generateThumbnail',
       input: videoFilePath,
-      params: { atSec: 1, outputPath, width: 480 },
+      params: { atSec: 1, width: 480 },
       requestId: `thumb_${assetId}`,
     })
     if (!res.success || !res.result) return

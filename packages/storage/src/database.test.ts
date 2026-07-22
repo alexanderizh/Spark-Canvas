@@ -104,23 +104,39 @@ describe('SparkDatabase', () => {
     expect(tableNames).toContain('media_generation_tasks')
 
     const canvasAssistant = db.raw
-      .prepare('SELECT name, built_in, enabled, skill_ids_json FROM agents WHERE id = ?')
+      .prepare(
+        'SELECT name, description, prompt, built_in, enabled, is_default, skill_ids_json FROM agents WHERE id = ?',
+      )
       .get('canvas-assistant-agent') as
       | {
           name: string
+          description: string
+          prompt: string
           built_in: number
           enabled: number
+          is_default: number
           skill_ids_json: string
         }
       | undefined
     expect(canvasAssistant?.name).toBe('画布助手')
+    expect(canvasAssistant?.description).toContain('Spark Canvas')
+    expect(canvasAssistant?.description).not.toContain('平台管理')
+    expect(canvasAssistant?.prompt).toContain('你是 Spark Canvas 的「画布助手」')
+    expect(canvasAssistant?.prompt).not.toContain('Spark Agent')
+    expect(canvasAssistant?.prompt).not.toContain('- 平台管理：')
     expect(canvasAssistant?.built_in).toBe(1)
     expect(canvasAssistant?.enabled).toBe(1)
+    expect(canvasAssistant?.is_default).toBe(1)
     expect(JSON.parse(canvasAssistant?.skill_ids_json ?? '[]')).toEqual([
-      'builtin:platform-manager',
       'builtin:canvas-studio',
       'builtin:multimedia-use',
+      'builtin:video-workflow',
     ])
+
+    const platformManager = db.raw
+      .prepare('SELECT is_default FROM agents WHERE id = ?')
+      .get('platform-manager-agent') as { is_default: number } | undefined
+    expect(platformManager?.is_default).toBe(0)
   })
 
   it('should not re-apply already applied migrations', () => {
@@ -249,6 +265,41 @@ describe('SparkDatabase', () => {
     }
     expect(row.max_discussion_rounds).toBe(6)
     expect(row.enable_peer_messaging).toBe(0)
+  })
+
+  it('makes Canvas Assistant default without rewriting existing session agents', () => {
+    const migrationsDir = join(process.cwd(), 'migrations')
+    db = new SparkDatabase(join(testDir, 'test.db'))
+    applyMigrationsThrough(db, migrationsDir, 54)
+    db.raw.exec(`
+      INSERT INTO sessions (
+        id, kind, title, status, project_id, agent_id, metadata_json
+      ) VALUES
+        ('canvas-session', 'agent', 'Canvas', 'idle', 'default', 'canvas-assistant-agent', '{}'),
+        ('legacy-session', 'agent', 'Legacy', 'idle', 'default', 'platform-manager-agent', '{}');
+    `)
+
+    db.runMigrations(migrationsDir)
+
+    const agents = db.raw
+      .prepare(
+        "SELECT id, is_default FROM agents WHERE id IN ('canvas-assistant-agent', 'platform-manager-agent') ORDER BY id",
+      )
+      .all() as Array<{ id: string; is_default: number }>
+    expect(agents).toEqual([
+      { id: 'canvas-assistant-agent', is_default: 1 },
+      { id: 'platform-manager-agent', is_default: 0 },
+    ])
+
+    const sessions = db.raw
+      .prepare('SELECT id, agent_id, metadata_json FROM sessions ORDER BY id')
+      .all() as Array<{ id: string; agent_id: string; metadata_json: string }>
+    expect(sessions.map(({ id, agent_id }) => ({ id, agent_id }))).toEqual([
+      { id: 'canvas-session', agent_id: 'canvas-assistant-agent' },
+      { id: 'legacy-session', agent_id: 'platform-manager-agent' },
+    ])
+    expect(JSON.parse(sessions[0]?.metadata_json ?? '{}')).toMatchObject({ surface: 'canvas' })
+    expect(JSON.parse(sessions[1]?.metadata_json ?? '{}')).not.toHaveProperty('surface')
   })
 
   it('should throw error for invalid migration filename', () => {

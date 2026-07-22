@@ -55,9 +55,21 @@ const isWin = process.platform === 'win32'
 type ProviderModelType = NonNullable<ProviderProfile['modelType']>
 type ImageGenApiType = NonNullable<ProviderProfile['imageApiType']>
 type TextProviderKind = 'anthropic' | 'openai' | 'deepseek' | 'ollama' | 'openai-compatible'
-const PROVIDER_MODEL_TYPES = new Set<ProviderModelType>(['image', 'text', 'multimodal', 'voice', 'video'])
+const PROVIDER_MODEL_TYPES = new Set<ProviderModelType>([
+  'image',
+  'text',
+  'multimodal',
+  'voice',
+  'video',
+])
 const IMAGE_API_TYPES = new Set<ImageGenApiType>(['sync', 'async', 'auto'])
-const TEXT_PROVIDER_KINDS = new Set<TextProviderKind>(['anthropic', 'openai', 'deepseek', 'ollama', 'openai-compatible'])
+const TEXT_PROVIDER_KINDS = new Set<TextProviderKind>([
+  'anthropic',
+  'openai',
+  'deepseek',
+  'ollama',
+  'openai-compatible',
+])
 // CLI 安装状态很少在应用运行中变化。短 TTL 会让 Provider 列表刷新频繁拉起
 // login shell；采用与主流 Agent 凭据 helper 相近的 5 分钟缓存窗口。
 const LOCAL_CLI_CHECK_TTL_MS = 5 * 60_000
@@ -256,12 +268,16 @@ async function checkClaudeCliAvailable(): Promise<boolean> {
   }
   // 3. 用 where/which 解析 PATH（兜底，覆盖 shim 名字不规范的情况）
   const resolved = await resolveClaudeCliPath()
-  if (resolved != null && await tryClaudeVersion(resolved)) return true
+  if (resolved != null && (await tryClaudeVersion(resolved))) return true
   // 4. 最后兜底：用 login shell 重新解析用户的真实 PATH
   //    （Electron GUI 进程的 PATH 来自 launchd，不含 .zshrc 里 nvm/volta 等初始化，
   //    导致 ~/.nvm/versions/node/*/bin/claude 这类用户级安装检测不到）
   const loginResolved = await resolveCliFromLoginShell('claude')
-  if (loginResolved != null && loginResolved !== resolved && await tryClaudeVersion(loginResolved)) {
+  if (
+    loginResolved != null &&
+    loginResolved !== resolved &&
+    (await tryClaudeVersion(loginResolved))
+  ) {
     return true
   }
   return false
@@ -275,9 +291,13 @@ async function checkCodexCliAvailable(): Promise<boolean> {
     if (await tryCodexVersion(known)) return true
   }
   const resolved = await resolveCodexCliPath()
-  if (resolved != null && await tryCodexVersion(resolved)) return true
+  if (resolved != null && (await tryCodexVersion(resolved))) return true
   const loginResolved = await resolveCliFromLoginShell('codex')
-  if (loginResolved != null && loginResolved !== resolved && await tryCodexVersion(loginResolved)) {
+  if (
+    loginResolved != null &&
+    loginResolved !== resolved &&
+    (await tryCodexVersion(loginResolved))
+  ) {
     return true
   }
   return false
@@ -312,8 +332,10 @@ function rowToProfile(row: {
     ...(config.apiEndpoint !== undefined && { apiEndpoint: config.apiEndpoint }),
     ...(config.codexApiKind !== undefined && { codexApiKind: config.codexApiKind }),
     supportsMillionContext: config.supportsMillionContext === true,
-    ...(typeof config.contextWindow === 'number' && config.contextWindow > 0 && { contextWindow: config.contextWindow }),
-    ...(typeof config.maxTokens === 'number' && config.maxTokens > 0 && { maxTokens: config.maxTokens }),
+    ...(typeof config.contextWindow === 'number' &&
+      config.contextWindow > 0 && { contextWindow: config.contextWindow }),
+    ...(typeof config.maxTokens === 'number' &&
+      config.maxTokens > 0 && { maxTokens: config.maxTokens }),
     ...(config.haikuModel !== undefined && { haikuModel: config.haikuModel }),
     ...(config.sonnetModel !== undefined && { sonnetModel: config.sonnetModel }),
     ...(config.opusModel !== undefined && { opusModel: config.opusModel }),
@@ -327,7 +349,9 @@ function rowToProfile(row: {
     ...(config.mediaModelRefs !== undefined && { mediaModelRefs: config.mediaModelRefs }),
     ...(config.managed === true && { managed: true }),
     ...(config.managedType !== undefined && { managedType: config.managedType }),
-    ...(config.managedOwnerUserId !== undefined && { managedOwnerUserId: config.managedOwnerUserId }),
+    ...(config.managedOwnerUserId !== undefined && {
+      managedOwnerUserId: config.managedOwnerUserId,
+    }),
     ...(config.credentialState !== undefined && { credentialState: config.credentialState }),
     keystoreRef: row.keystore_ref ?? '',
     isDefault: row.is_default === 1,
@@ -352,10 +376,7 @@ function createAutoRouterProvider(adapter: 'claude' | 'codex'): ProviderProfile 
   }
 }
 
-function hasRouteableTextProvider(
-  profiles: ProviderProfile[],
-  adapter: RoutingAdapter,
-): boolean {
+function hasRouteableTextProvider(profiles: ProviderProfile[], adapter: RoutingAdapter): boolean {
   return profiles.some((profile) => {
     if (isBuiltInLocalCliProvider(profile) || isAutoRouterProvider(profile)) return false
     if (profile.codexApiKind === 'embedding') return false
@@ -425,7 +446,7 @@ export class ProviderService {
         if (!available) {
           log.warn(
             `Local claude CLI not found. Tried candidates [${CLAUDE_CLI_CANDIDATES.join(', ')}]` +
-            ` and ${isWin ? 'where' : 'which'} resolution.`,
+              ` and ${isWin ? 'where' : 'which'} resolution.`,
           )
         }
         return available
@@ -453,7 +474,7 @@ export class ProviderService {
         if (!available) {
           log.warn(
             `Local codex CLI not found. Tried candidates [${CODEX_CLI_CANDIDATES.join(', ')}]` +
-            ` and ${isWin ? 'where' : 'which'} resolution.`,
+              ` and ${isWin ? 'where' : 'which'} resolution.`,
           )
         }
         return available
@@ -520,7 +541,10 @@ export class ProviderService {
     const existing = this.repo.get(LOCAL_CODEX_CLI_PROVIDER_ID)
     if (existing != null) {
       const rawConfig = JSON.parse(existing.config_json) as ProviderConfig
-      const normalizedConfig = normalizeLocalCliProviderConfig(LOCAL_CODEX_CLI_PROVIDER_ID, rawConfig)
+      const normalizedConfig = normalizeLocalCliProviderConfig(
+        LOCAL_CODEX_CLI_PROVIDER_ID,
+        rawConfig,
+      )
       if (
         existing.name !== LOCAL_CODEX_CLI_PROVIDER_NAME ||
         existing.provider_type !== 'openai' ||
@@ -589,9 +613,13 @@ export class ProviderService {
     const ref = hasApiKey ? keystore.makeKeystoreRef(providerType, id) : ''
     if (hasApiKey) {
       await keystore.setSecret(ref as keystore.KeystoreRef, params.apiKey)
-      log.info(`Stored API key for provider=${providerType} id=${id} key=${keystore.maskSecret(params.apiKey)}`)
+      log.info(
+        `Stored API key for provider=${providerType} id=${id} key=${keystore.maskSecret(params.apiKey)}`,
+      )
     } else {
-      log.info(`Created provider without API key (local CLI / pending key): provider=${providerType} id=${id}`)
+      log.info(
+        `Created provider without API key (local CLI / pending key): provider=${providerType} id=${id}`,
+      )
     }
 
     if (params.isDefault) {
@@ -611,18 +639,27 @@ export class ProviderService {
         ...(params.providerIcon !== undefined && { providerIcon: params.providerIcon }),
         ...(params.apiEndpoint !== undefined && { apiEndpoint: params.apiEndpoint }),
         ...(params.codexApiKind !== undefined && { codexApiKind: params.codexApiKind }),
-        ...(params.supportsMillionContext !== undefined && { supportsMillionContext: params.supportsMillionContext }),
-        ...(params.contextWindow !== undefined && params.contextWindow > 0 && { contextWindow: Math.floor(params.contextWindow) }),
-        ...(params.maxTokens !== undefined && params.maxTokens > 0 && { maxTokens: Math.floor(params.maxTokens) }),
-        ...(params.haikuModel !== undefined && params.haikuModel.trim().length > 0 && { haikuModel: params.haikuModel.trim() }),
-        ...(params.sonnetModel !== undefined && params.sonnetModel.trim().length > 0 && { sonnetModel: params.sonnetModel.trim() }),
-        ...(params.opusModel !== undefined && params.opusModel.trim().length > 0 && { opusModel: params.opusModel.trim() }),
+        ...(params.supportsMillionContext !== undefined && {
+          supportsMillionContext: params.supportsMillionContext,
+        }),
+        ...(params.contextWindow !== undefined &&
+          params.contextWindow > 0 && { contextWindow: Math.floor(params.contextWindow) }),
+        ...(params.maxTokens !== undefined &&
+          params.maxTokens > 0 && { maxTokens: Math.floor(params.maxTokens) }),
+        ...(params.haikuModel !== undefined &&
+          params.haikuModel.trim().length > 0 && { haikuModel: params.haikuModel.trim() }),
+        ...(params.sonnetModel !== undefined &&
+          params.sonnetModel.trim().length > 0 && { sonnetModel: params.sonnetModel.trim() }),
+        ...(params.opusModel !== undefined &&
+          params.opusModel.trim().length > 0 && { opusModel: params.opusModel.trim() }),
         ...(params.modelType !== undefined && { modelType: normalizeModelType(params.modelType) }),
         ...(params.imageProvider !== undefined && { imageProvider: params.imageProvider }),
         ...(params.imageApiType !== undefined && { imageApiType: params.imageApiType }),
         ...(params.mediaProvider !== undefined && { mediaProvider: params.mediaProvider }),
         ...(params.mediaApiType !== undefined && { mediaApiType: params.mediaApiType }),
-        ...(params.mediaCapabilities !== undefined && { mediaCapabilities: params.mediaCapabilities }),
+        ...(params.mediaCapabilities !== undefined && {
+          mediaCapabilities: params.mediaCapabilities,
+        }),
         ...(params.mediaDefaults !== undefined && { mediaDefaults: params.mediaDefaults }),
         ...(params.mediaModelRefs !== undefined && { mediaModelRefs: params.mediaModelRefs }),
       }),
@@ -674,7 +711,8 @@ export class ProviderService {
 
     let updatedKeystoreRef: string | undefined
     if (params.apiKey !== undefined) {
-      const ref = existing.keystore_ref || keystore.makeKeystoreRef(existing.provider_type, params.id)
+      const ref =
+        existing.keystore_ref || keystore.makeKeystoreRef(existing.provider_type, params.id)
       await keystore.setSecret(ref as keystore.KeystoreRef, params.apiKey)
       updatedKeystoreRef = ref
       log.info(`Updated API key for id=${params.id} key=${keystore.maskSecret(params.apiKey)}`)
@@ -804,7 +842,10 @@ export class ProviderService {
     }
     // 重新走 normalize，确保 image→media 同步、能力兜底、枚举校验一致
     if (newConfig !== undefined) {
-      Object.assign(newConfig, normalizeProviderConfigForProviderType(existing.provider_type, newConfig))
+      Object.assign(
+        newConfig,
+        normalizeProviderConfigForProviderType(existing.provider_type, newConfig),
+      )
     }
 
     this.repo.update(params.id, {
@@ -822,7 +863,11 @@ export class ProviderService {
   }
 
   async deleteProvider(id: string): Promise<void> {
-    if (id === LOCAL_CLI_PROVIDER_ID || id === LOCAL_CODEX_CLI_PROVIDER_ID || isAutoRouterProvider(id)) {
+    if (
+      id === LOCAL_CLI_PROVIDER_ID ||
+      id === LOCAL_CODEX_CLI_PROVIDER_ID ||
+      isAutoRouterProvider(id)
+    ) {
       throw new Error('Cannot delete the built-in provider')
     }
     const row = this.repo.get(id)
@@ -910,8 +955,8 @@ export class ProviderService {
   }): Promise<ProviderHealthCheckResponse> {
     const providerType = normalizeProviderType(params.provider)
     log.info(
-      `testConnection started, provider=${providerType}, id=${params.id ?? '(draft)'}, `
-      + `model=${params.defaultModel}, codexApiKind=${params.codexApiKind ?? 'chat'}`,
+      `testConnection started, provider=${providerType}, id=${params.id ?? '(draft)'}, ` +
+        `model=${params.defaultModel}, codexApiKind=${params.codexApiKind ?? 'chat'}`,
     )
     const apiKey = await this.resolveProviderApiKey(params.id, params.apiKey)
     if (!apiKey) {
@@ -925,57 +970,57 @@ export class ProviderService {
     const defaultModel = params.defaultModel.trim()
     if (!defaultModel) {
       log.warn(
-        `testConnection aborted: default model missing, provider=${providerType}, `
-        + `id=${params.id ?? '(draft)'}`,
+        `testConnection aborted: default model missing, provider=${providerType}, ` +
+          `id=${params.id ?? '(draft)'}`,
       )
       return { healthy: false, errorMessage: 'Default model is required' }
     }
 
-    const resolvedEndpoint = providerType === 'anthropic'
-      ? endpoint
-      : (endpoint ?? getDefaultEndpointBase(providerType))
+    const resolvedEndpoint =
+      providerType === 'anthropic' ? endpoint : (endpoint ?? getDefaultEndpointBase(providerType))
     log.debug(
-      `testConnection pinging endpoint=${resolvedEndpoint ?? '(default)'}, `
-      + `provider=${providerType}, id=${params.id ?? '(draft)'}`,
+      `testConnection pinging endpoint=${resolvedEndpoint ?? '(default)'}, ` +
+        `provider=${providerType}, id=${params.id ?? '(draft)'}`,
     )
 
     const start = Date.now()
 
     try {
-      const res = providerType === 'anthropic'
-        ? await fetchAnthropicMessagesPing(endpoint, apiKey, defaultModel)
-        : await fetchOpenAiCompatiblePing(
-          endpoint ?? getDefaultEndpointBase(providerType),
-          apiKey,
-          defaultModel,
-          params.codexApiKind ?? 'chat',
-        )
+      const res =
+        providerType === 'anthropic'
+          ? await fetchAnthropicMessagesPing(endpoint, apiKey, defaultModel)
+          : await fetchOpenAiCompatiblePing(
+              endpoint ?? getDefaultEndpointBase(providerType),
+              apiKey,
+              defaultModel,
+              params.codexApiKind ?? 'chat',
+            )
       const latencyMs = Date.now() - start
       if (res.ok || res.status === 401) {
         // 401 means key is wrong but endpoint is reachable
         if (res.ok) {
           log.info(
-            `testConnection success, provider=${providerType}, id=${params.id ?? '(draft)'}, `
-            + `latencyMs=${latencyMs}, status=${res.status}`,
+            `testConnection success, provider=${providerType}, id=${params.id ?? '(draft)'}, ` +
+              `latencyMs=${latencyMs}, status=${res.status}`,
           )
           return { healthy: true, latencyMs }
         }
         log.warn(
-          `testConnection auth-failed, provider=${providerType}, id=${params.id ?? '(draft)'}, `
-          + `latencyMs=${latencyMs}, status=${res.status}`,
+          `testConnection auth-failed, provider=${providerType}, id=${params.id ?? '(draft)'}, ` +
+            `latencyMs=${latencyMs}, status=${res.status}`,
         )
         return { healthy: false, latencyMs, errorMessage: `HTTP ${res.status}` }
       }
       log.warn(
-        `testConnection failed, provider=${providerType}, id=${params.id ?? '(draft)'}, `
-        + `latencyMs=${latencyMs}, status=${res.status}`,
+        `testConnection failed, provider=${providerType}, id=${params.id ?? '(draft)'}, ` +
+          `latencyMs=${latencyMs}, status=${res.status}`,
       )
       return { healthy: false, latencyMs, errorMessage: `HTTP ${res.status}` }
     } catch (err) {
       const latencyMs = Date.now() - start
       log.warn(
-        `testConnection threw, provider=${providerType}, id=${params.id ?? '(draft)'}, `
-        + `latencyMs=${latencyMs}, error=${err instanceof Error ? err.message : String(err)}`,
+        `testConnection threw, provider=${providerType}, id=${params.id ?? '(draft)'}, ` +
+          `latencyMs=${latencyMs}, error=${err instanceof Error ? err.message : String(err)}`,
       )
       return {
         healthy: false,
@@ -995,8 +1040,8 @@ export class ProviderService {
   }): Promise<ProviderFetchedModel[]> {
     const providerType = normalizeProviderType(params.provider)
     log.info(
-      `fetchModels started, provider=${providerType}, id=${params.id ?? '(draft)'}, `
-      + `isFullUrl=${params.isFullUrl === true}`,
+      `fetchModels started, provider=${providerType}, id=${params.id ?? '(draft)'}, ` +
+        `isFullUrl=${params.isFullUrl === true}`,
     )
     const apiKey = await this.resolveProviderApiKey(params.id, params.apiKey)
     if (!apiKey) {
@@ -1008,17 +1053,21 @@ export class ProviderService {
 
     const endpoint = await this.resolveProviderEndpoint(params.id, params.apiEndpoint)
     const baseUrl = endpoint ?? getDefaultEndpointBase(providerType)
-    const candidates = getModelsUrlCandidates(baseUrl, params.isFullUrl === true, params.modelsUrl ?? null)
+    const candidates = getModelsUrlCandidates(
+      baseUrl,
+      params.isFullUrl === true,
+      params.modelsUrl ?? null,
+    )
     if (candidates.length === 0) {
       log.warn(
-        `fetchModels aborted: cannot derive endpoint, provider=${providerType}, `
-        + `id=${params.id ?? '(draft)'}, baseUrl=${baseUrl ?? '(none)'}`,
+        `fetchModels aborted: cannot derive endpoint, provider=${providerType}, ` +
+          `id=${params.id ?? '(draft)'}, baseUrl=${baseUrl ?? '(none)'}`,
       )
       throw new Error('Cannot derive models endpoint')
     }
     log.debug(
-      `fetchModels trying ${candidates.length} endpoint(s), provider=${providerType}, `
-      + `id=${params.id ?? '(draft)'}`,
+      `fetchModels trying ${candidates.length} endpoint(s), provider=${providerType}, ` +
+        `id=${params.id ?? '(draft)'}`,
     )
 
     let lastNotFound: string | null = null
@@ -1028,18 +1077,18 @@ export class ProviderService {
         signal: AbortSignal.timeout(PROVIDER_HTTP_TIMEOUT_MS),
       })
       if (res.ok) {
-        const json = await res.json() as ModelsListResponse
+        const json = (await res.json()) as ModelsListResponse
         const models = normalizeFetchedModels(json)
         log.info(
-          `fetchModels success, provider=${providerType}, id=${params.id ?? '(draft)'}, `
-          + `url=${url}, count=${models.length}`,
+          `fetchModels success, provider=${providerType}, id=${params.id ?? '(draft)'}, ` +
+            `url=${url}, count=${models.length}`,
         )
         return models
       }
       const body = truncateResponseBody(await res.text().catch(() => ''))
       log.warn(
-        `fetchModels endpoint failed, provider=${providerType}, id=${params.id ?? '(draft)'}, `
-        + `url=${url}, status=${res.status}, body="${body}"`,
+        `fetchModels endpoint failed, provider=${providerType}, id=${params.id ?? '(draft)'}, ` +
+          `url=${url}, status=${res.status}, body="${body}"`,
       )
       if (res.status === 404 || res.status === 405) {
         lastNotFound = `HTTP ${res.status}: ${body}`
@@ -1048,8 +1097,8 @@ export class ProviderService {
       throw new Error(`HTTP ${res.status}: ${body}`)
     }
     log.warn(
-      `fetchModels all-endpoints-failed, provider=${providerType}, id=${params.id ?? '(draft)'}, `
-      + `lastNotFound=${lastNotFound ?? '(none)'}`,
+      `fetchModels all-endpoints-failed, provider=${providerType}, id=${params.id ?? '(draft)'}, ` +
+        `lastNotFound=${lastNotFound ?? '(none)'}`,
     )
     throw new Error(`All model endpoints failed: ${lastNotFound ?? 'no candidates'}`)
   }
@@ -1061,18 +1110,26 @@ export class ProviderService {
     apiKey: string
     credentialState?: 'ready' | 'session_conflict' | 'quota_exhausted' | 'unavailable'
   }): Promise<ProviderProfile> {
-    const availableModelIds = [...new Set(params.modelIds.map(model => model.trim()).filter(Boolean))]
+    const availableModelIds = [
+      ...new Set(params.modelIds.map((model) => model.trim()).filter(Boolean)),
+    ]
     const existing = this.repo.get(PLATFORM_NEWAPI_PROVIDER_ID)
-    const existingConfig = existing && isManagedProviderRow(existing)
-      ? normalizeProviderConfig(JSON.parse(existing.config_json) as ProviderConfig)
-      : null
-    const preferredModelIds = existingConfig?.modelIds.filter(model => availableModelIds.includes(model)) ?? []
+    const existingConfig =
+      existing && isManagedProviderRow(existing)
+        ? normalizeProviderConfig(JSON.parse(existing.config_json) as ProviderConfig)
+        : null
+    const preferredModelIds =
+      existingConfig?.modelIds.filter((model) => availableModelIds.includes(model)) ?? []
     const modelIds = preferredModelIds.length > 0 ? preferredModelIds : availableModelIds
-    const defaultModel = existingConfig && modelIds.includes(existingConfig.defaultModel)
-      ? existingConfig.defaultModel
-      : modelIds[0]
+    const defaultModel =
+      existingConfig && modelIds.includes(existingConfig.defaultModel)
+        ? existingConfig.defaultModel
+        : modelIds[0]
     if (!defaultModel) throw new Error('平台账户当前没有可用模型')
-    const keystoreRef = keystore.makeKeystoreRef('newapi', `spark-user-${params.ownerUserId}-api-key`)
+    const keystoreRef = keystore.makeKeystoreRef(
+      'newapi',
+      `spark-user-${params.ownerUserId}-api-key`,
+    )
     await keystore.setSecret(keystoreRef, params.apiKey)
     const config = normalizeProviderConfig({
       defaultModel,
@@ -1099,14 +1156,16 @@ export class ProviderService {
       if (!updated) throw new Error('平台官方 Provider 更新后无法读取')
       return rowToProfile(updated)
     }
-    return rowToProfile(this.repo.create({
-      id: PLATFORM_NEWAPI_PROVIDER_ID,
-      providerType: 'anthropic',
-      name: 'Spark 平台模型',
-      config,
-      keystoreRef,
-      isDefault: false,
-    }))
+    return rowToProfile(
+      this.repo.create({
+        id: PLATFORM_NEWAPI_PROVIDER_ID,
+        providerType: 'anthropic',
+        name: 'Spark 平台模型',
+        config,
+        keystoreRef,
+        isDefault: false,
+      }),
+    )
   }
 
   async updateManagedNewApiModelPreferences(params: {
@@ -1117,7 +1176,13 @@ export class ProviderService {
     if (!row || !isManagedProviderRow(row)) throw new Error('平台官方 Provider 尚未就绪')
     const config = normalizeProviderConfig(JSON.parse(row.config_json) as ProviderConfig)
     const availableModelIds = config.availableModelIds ?? config.modelIds
-    const selected = [...new Set(params.modelIds.map(model => model.trim()).filter(model => availableModelIds.includes(model)))]
+    const selected = [
+      ...new Set(
+        params.modelIds
+          .map((model) => model.trim())
+          .filter((model) => availableModelIds.includes(model)),
+      ),
+    ]
     const firstSelected = selected[0]
     if (!firstSelected) throw new Error('至少启用一个平台模型')
     const requestedDefault = params.defaultModel.trim()
@@ -1158,7 +1223,10 @@ export class ProviderService {
     })
   }
 
-  private async resolveProviderApiKey(id: string | undefined, apiKey: string | undefined): Promise<string> {
+  private async resolveProviderApiKey(
+    id: string | undefined,
+    apiKey: string | undefined,
+  ): Promise<string> {
     const direct = apiKey?.trim()
     if (direct) return direct
     if (!id) return ''
@@ -1167,7 +1235,10 @@ export class ProviderService {
     return (await keystore.getSecret(row.keystore_ref as keystore.KeystoreRef))?.trim() ?? ''
   }
 
-  private async resolveProviderEndpoint(id: string | undefined, apiEndpoint: string | null | undefined): Promise<string | undefined> {
+  private async resolveProviderEndpoint(
+    id: string | undefined,
+    apiEndpoint: string | null | undefined,
+  ): Promise<string | undefined> {
     const direct = apiEndpoint?.trim()
     if (direct) return direct
     if (apiEndpoint === null) return undefined
@@ -1179,11 +1250,11 @@ export class ProviderService {
   }
 
   /**
-   * 导出 provider 配置为 ExportPayload（含 apiKey）。
+   * 导出 provider 配置为 ExportPayload（不含 apiKey）。
    *
    * - ids 为空时导出全部
    * - id 不存在时静默跳过（不抛错），方便前端多选时无需严格校验
-   * - apiKey 从 Keychain 读取后附带到导出 profile 中
+   * - Keychain 凭据不读取、不写入普通导出文件
    */
   async exportProviders(ids: string[] = []): Promise<ProviderExportPayload> {
     const rows = this.repo.listAll()
@@ -1192,15 +1263,12 @@ export class ProviderService {
     for (const row of rows) {
       if (idSet !== null && !idSet.has(row.id)) continue
       if (isManagedProviderRow(row)) continue
-      const apiKey = row.keystore_ref
-        ? await keystore.getSecret(row.keystore_ref as keystore.KeystoreRef)
-        : null
-      profiles.push(rowToExportProfile(row, apiKey ?? undefined))
+      profiles.push(rowToExportProfile(row))
     }
     return {
       version: PROVIDER_EXPORT_VERSION,
       exportedAt: new Date().toISOString(),
-      exportedBy: 'spark-agent',
+      exportedBy: 'spark-canvas',
       profiles,
     }
   }
@@ -1243,10 +1311,7 @@ export class ProviderService {
           // replace: 更新已存在的（保留 keystoreRef、本地 isDefault）
           // 若导入数据包含 apiKey，则更新 Keychain 中的 key
           if (profile.apiKey && match.keystore_ref) {
-            await keystore.setSecret(
-              match.keystore_ref as keystore.KeystoreRef,
-              profile.apiKey,
-            )
+            await keystore.setSecret(match.keystore_ref as keystore.KeystoreRef, profile.apiKey)
             log.info(`Updated API key during import for id=${match.id} name=${profile.name}`)
           }
           this.repo.update(match.id, {
@@ -1331,22 +1396,24 @@ function fetchOpenAiCompatiblePing(
       signal: AbortSignal.timeout(PROVIDER_CONNECTION_TIMEOUT_MS),
     })
   }
-  const endpoint = codexApiKind === 'responses'
-    ? getOpenAiResponsesEndpoint(apiEndpoint)
-    : getOpenAiChatCompletionsEndpoint(apiEndpoint)
-  const body = codexApiKind === 'responses'
-    ? {
-      model,
-      input: 'ping',
-      max_output_tokens: 1,
-      stream: false,
-    }
-    : {
-      model,
-      messages: [{ role: 'user', content: 'ping' }],
-      max_tokens: 1,
-      stream: false,
-    }
+  const endpoint =
+    codexApiKind === 'responses'
+      ? getOpenAiResponsesEndpoint(apiEndpoint)
+      : getOpenAiChatCompletionsEndpoint(apiEndpoint)
+  const body =
+    codexApiKind === 'responses'
+      ? {
+          model,
+          input: 'ping',
+          max_output_tokens: 1,
+          stream: false,
+        }
+      : {
+          model,
+          messages: [{ role: 'user', content: 'ping' }],
+          max_tokens: 1,
+          stream: false,
+        }
 
   return fetch(endpoint, {
     method: 'POST',
@@ -1364,9 +1431,9 @@ function formatProviderConnectionError(err: unknown, timeoutMs: number): string 
   if (!(err instanceof Error)) return fallback
   const normalized = `${err.name}: ${err.message}`.toLowerCase()
   if (
-    err.name === 'TimeoutError'
-    || normalized.includes('timed out')
-    || normalized.includes('aborted due to timeout')
+    err.name === 'TimeoutError' ||
+    normalized.includes('timed out') ||
+    normalized.includes('aborted due to timeout')
   ) {
     return `连接测试超时（>${Math.ceil(timeoutMs / 1000)}s），请检查网络、代理或接口地址后重试`
   }
@@ -1428,7 +1495,7 @@ interface ModelsListResponse {
 
 function normalizeProviderType(providerType: string): TextProviderKind {
   return TEXT_PROVIDER_KINDS.has(providerType as TextProviderKind)
-    ? providerType as TextProviderKind
+    ? (providerType as TextProviderKind)
     : 'openai'
 }
 
@@ -1439,7 +1506,9 @@ function normalizeModelIds(defaultModel: string, modelIds?: string[]): string[] 
   return [...new Set(normalized)]
 }
 
-function normalizeProviderIcon(icon: ProviderConfig['providerIcon']): ProviderIconConfig | undefined {
+function normalizeProviderIcon(
+  icon: ProviderConfig['providerIcon'],
+): ProviderIconConfig | undefined {
   if (icon == null || typeof icon !== 'object') return undefined
   const id = typeof icon.id === 'string' ? icon.id.trim().toLowerCase() : ''
   if (!id) return undefined
@@ -1447,8 +1516,7 @@ function normalizeProviderIcon(icon: ProviderConfig['providerIcon']): ProviderIc
   return { id, style }
 }
 
-type NormalizedProviderConfig =
-  Required<Pick<ProviderConfig, 'defaultModel' | 'modelIds'>> &
+type NormalizedProviderConfig = Required<Pick<ProviderConfig, 'defaultModel' | 'modelIds'>> &
   Omit<ProviderConfig, 'defaultModel' | 'modelIds' | 'providerIcon'> & {
     providerIcon?: ProviderIconConfig
   }
@@ -1487,15 +1555,13 @@ function normalizeMediaCapabilities(
 
 function normalizeProviderConfig(config: ProviderConfig): NormalizedProviderConfig {
   const defaultModel = (config.defaultModel ?? config.model ?? '').trim()
-  const modelType = config.modelType !== undefined ? normalizeModelType(config.modelType) : undefined
+  const modelType =
+    config.modelType !== undefined ? normalizeModelType(config.modelType) : undefined
   const providerIcon = normalizeProviderIcon(config.providerIcon)
   const { providerIcon: _rawProviderIcon, ...configWithoutProviderIcon } = config
-  const imageProvider = modelType === 'image'
-    ? (config.imageProvider?.trim() || 'openai')
-    : undefined
-  const imageApiType = modelType === 'image'
-    ? normalizeImageApiType(config.imageApiType)
-    : undefined
+  const imageProvider = modelType === 'image' ? config.imageProvider?.trim() || 'openai' : undefined
+  const imageApiType =
+    modelType === 'image' ? normalizeImageApiType(config.imageApiType) : undefined
   const normalized: NormalizedProviderConfig = {
     ...configWithoutProviderIcon,
     defaultModel,
@@ -1514,7 +1580,7 @@ function normalizeProviderConfig(config: ProviderConfig): NormalizedProviderConf
   // 并保证 mediaCapabilities 至少包含 image.generate（design doc §5.1 兼容规则）。
   if (modelType === 'image') {
     const inferredProvider = mediaProviderFromImageProvider(
-      config.mediaProvider ?? (config.imageProvider ?? 'openai'),
+      config.mediaProvider ?? config.imageProvider ?? 'openai',
     )
     const inferredApiType =
       config.mediaApiType != null && isMediaApiType(config.mediaApiType)
@@ -1552,11 +1618,16 @@ function normalizeProviderConfig(config: ProviderConfig): NormalizedProviderConf
   }
   if (Array.isArray(config.mediaModelRefs)) {
     normalized.mediaModelRefs = config.mediaModelRefs
-      .filter((ref) => ref != null && typeof ref.manifestId === 'string' && ref.manifestId.trim().length > 0)
+      .filter(
+        (ref) =>
+          ref != null && typeof ref.manifestId === 'string' && ref.manifestId.trim().length > 0,
+      )
       .map((ref) => {
         const normalizedRef: ProviderMediaModelRef = {
           manifestId: ref.manifestId.trim(),
-          ...(ref.modelId != null && ref.modelId.trim().length > 0 ? { modelId: ref.modelId.trim() } : {}),
+          ...(ref.modelId != null && ref.modelId.trim().length > 0
+            ? { modelId: ref.modelId.trim() }
+            : {}),
           ...(ref.enabled !== undefined ? { enabled: ref.enabled } : {}),
           ...(ref.defaults !== undefined ? { defaults: ref.defaults } : {}),
           ...(ref.manifest !== undefined ? { manifest: ref.manifest } : {}),
@@ -1593,12 +1664,17 @@ function shouldDefaultOpenAiCodexResponses(apiEndpoint?: string): boolean {
   const base = apiEndpoint?.trim().replace(/\/+$/, '').toLowerCase()
   if (!base) return false
   if (base.endsWith('/api/coding')) return true
-  return base === 'https://open.bigmodel.cn/api/coding/paas/v4' ||
+  return (
+    base === 'https://open.bigmodel.cn/api/coding/paas/v4' ||
     base === 'https://coding.dashscope.aliyuncs.com/v1' ||
     base === 'https://api.lkeap.cloud.tencent.com/coding/v3'
+  )
 }
 
-function normalizeLocalCliProviderConfig(providerId: string, config: ProviderConfig): NormalizedProviderConfig {
+function normalizeLocalCliProviderConfig(
+  providerId: string,
+  config: ProviderConfig,
+): NormalizedProviderConfig {
   if (providerId === LOCAL_CODEX_CLI_PROVIDER_ID) {
     return normalizeProviderConfig({
       ...config,
@@ -1616,21 +1692,24 @@ function normalizeLocalCliProviderConfig(providerId: string, config: ProviderCon
 
 function normalizeModelType(value: unknown): ProviderModelType {
   return typeof value === 'string' && PROVIDER_MODEL_TYPES.has(value as ProviderModelType)
-    ? value as ProviderModelType
+    ? (value as ProviderModelType)
     : 'multimodal'
 }
 
 function normalizeImageApiType(value: unknown): ImageGenApiType {
   return typeof value === 'string' && IMAGE_API_TYPES.has(value as ImageGenApiType)
-    ? value as ImageGenApiType
+    ? (value as ImageGenApiType)
     : 'sync'
 }
 
 function getDefaultEndpointBase(providerType: string): string {
   switch (providerType) {
-    case 'anthropic': return 'https://api.anthropic.com'
-    case 'openai': return 'https://api.openai.com/v1'
-    default: return 'https://api.openai.com/v1'
+    case 'anthropic':
+      return 'https://api.anthropic.com'
+    case 'openai':
+      return 'https://api.openai.com/v1'
+    default:
+      return 'https://api.openai.com/v1'
   }
 }
 
@@ -1653,7 +1732,8 @@ function getOpenAiChatCompletionsEndpoint(apiEndpoint: string): string {
 function getOpenAiResponsesEndpoint(apiEndpoint: string): string {
   const base = apiEndpoint.replace(/\/+$/, '')
   if (base.endsWith('/responses')) return base
-  if (base.endsWith('/chat/completions')) return `${base.slice(0, -'/chat/completions'.length)}/responses`
+  if (base.endsWith('/chat/completions'))
+    return `${base.slice(0, -'/chat/completions'.length)}/responses`
   if (endsWithVersionSegment(base)) return `${base}/responses`
   if (base.endsWith('/v1')) return `${base}/responses`
   return `${base}/v1/responses`
@@ -1662,7 +1742,8 @@ function getOpenAiResponsesEndpoint(apiEndpoint: string): string {
 function getOpenAiEmbeddingsEndpoint(apiEndpoint: string): string {
   const base = apiEndpoint.replace(/\/+$/, '')
   if (base.endsWith('/embeddings')) return base
-  if (base.endsWith('/chat/completions')) return `${base.slice(0, -'/chat/completions'.length)}/embeddings`
+  if (base.endsWith('/chat/completions'))
+    return `${base.slice(0, -'/chat/completions'.length)}/embeddings`
   if (base.endsWith('/responses')) return `${base.slice(0, -'/responses'.length)}/embeddings`
   if (endsWithVersionSegment(base)) return `${base}/embeddings`
   if (base.endsWith('/v1')) return `${base}/embeddings`
@@ -1697,7 +1778,8 @@ function getModelsUrlCandidates(
     const v1Index = trimmed.indexOf('/v1/')
     if (v1Index >= 0) candidates.push(`${trimmed.slice(0, v1Index)}/v1/models`)
     const lastSlash = trimmed.lastIndexOf('/')
-    if (lastSlash > trimmed.indexOf('://') + 2) candidates.push(`${trimmed.slice(0, lastSlash)}/models`)
+    if (lastSlash > trimmed.indexOf('://') + 2)
+      candidates.push(`${trimmed.slice(0, lastSlash)}/models`)
     return uniqStrings(candidates)
   }
 
@@ -1737,11 +1819,12 @@ function normalizeFetchedModels(response: ModelsListResponse): ProviderFetchedMo
     .flatMap((item): ProviderFetchedModel[] => {
       const id = typeof item.id === 'string' ? item.id.trim() : ''
       if (!id) return []
-      const ownedBy = typeof item.owned_by === 'string'
-        ? item.owned_by
-        : typeof item.ownedBy === 'string'
-          ? item.ownedBy
-          : null
+      const ownedBy =
+        typeof item.owned_by === 'string'
+          ? item.owned_by
+          : typeof item.ownedBy === 'string'
+            ? item.ownedBy
+            : null
       return [{ id, ownedBy }]
     })
     .sort((a, b) => a.id.localeCompare(b.id))
@@ -1803,8 +1886,10 @@ function rowToExportProfile(
     modelIds: config.modelIds,
     ...(config.providerIcon !== undefined && { providerIcon: config.providerIcon }),
     supportsMillionContext: config.supportsMillionContext === true,
-    ...(typeof config.contextWindow === 'number' && config.contextWindow > 0 && { contextWindow: config.contextWindow }),
-    ...(typeof config.maxTokens === 'number' && config.maxTokens > 0 && { maxTokens: config.maxTokens }),
+    ...(typeof config.contextWindow === 'number' &&
+      config.contextWindow > 0 && { contextWindow: config.contextWindow }),
+    ...(typeof config.maxTokens === 'number' &&
+      config.maxTokens > 0 && { maxTokens: config.maxTokens }),
     isDefault: row.is_default === 1,
     ...(config.haikuModel !== undefined && { haikuModel: config.haikuModel }),
     ...(config.sonnetModel !== undefined && { sonnetModel: config.sonnetModel }),
@@ -1856,17 +1941,24 @@ function buildConfigFromExport(profile: ProviderExportProfile): {
     ...(profile.apiEndpoint != null && { apiEndpoint: profile.apiEndpoint }),
     ...(profile.codexApiKind !== undefined && { codexApiKind: profile.codexApiKind }),
     supportsMillionContext: profile.supportsMillionContext,
-    ...(typeof profile.contextWindow === 'number' && profile.contextWindow > 0 && { contextWindow: profile.contextWindow }),
-    ...(typeof profile.maxTokens === 'number' && profile.maxTokens > 0 && { maxTokens: profile.maxTokens }),
-    ...(profile.haikuModel != null && profile.haikuModel.length > 0 && { haikuModel: profile.haikuModel }),
-    ...(profile.sonnetModel != null && profile.sonnetModel.length > 0 && { sonnetModel: profile.sonnetModel }),
-    ...(profile.opusModel != null && profile.opusModel.length > 0 && { opusModel: profile.opusModel }),
+    ...(typeof profile.contextWindow === 'number' &&
+      profile.contextWindow > 0 && { contextWindow: profile.contextWindow }),
+    ...(typeof profile.maxTokens === 'number' &&
+      profile.maxTokens > 0 && { maxTokens: profile.maxTokens }),
+    ...(profile.haikuModel != null &&
+      profile.haikuModel.length > 0 && { haikuModel: profile.haikuModel }),
+    ...(profile.sonnetModel != null &&
+      profile.sonnetModel.length > 0 && { sonnetModel: profile.sonnetModel }),
+    ...(profile.opusModel != null &&
+      profile.opusModel.length > 0 && { opusModel: profile.opusModel }),
     ...(profile.modelType !== undefined && { modelType: profile.modelType }),
     ...(profile.imageProvider !== undefined && { imageProvider: profile.imageProvider }),
     ...(profile.imageApiType !== undefined && { imageApiType: profile.imageApiType }),
     ...(profile.mediaProvider !== undefined && { mediaProvider: profile.mediaProvider }),
     ...(profile.mediaApiType !== undefined && { mediaApiType: profile.mediaApiType }),
-    ...(profile.mediaCapabilities !== undefined && { mediaCapabilities: profile.mediaCapabilities }),
+    ...(profile.mediaCapabilities !== undefined && {
+      mediaCapabilities: profile.mediaCapabilities,
+    }),
     ...(profile.mediaDefaults !== undefined && { mediaDefaults: profile.mediaDefaults }),
     ...(profile.mediaModelRefs !== undefined && { mediaModelRefs: profile.mediaModelRefs }),
   }

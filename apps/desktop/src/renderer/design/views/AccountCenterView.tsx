@@ -80,7 +80,7 @@ function AccountCenter(): React.ReactElement {
   }, [])
 
   const handleBack = (): void => {
-    setTweak('view', 'chat')
+    setTweak('view', 'canvas')
   }
 
   // ─── 昵称 ────────────────────────────────────────────────────────────────────
@@ -157,7 +157,7 @@ function AccountCenter(): React.ReactElement {
   const handleLogout = async (): Promise<void> => {
     const ok = await requestConfirm({
       title: '退出登录',
-      description: '确定要退出当前账号吗？本机的同步数据不会被删除。',
+      description: '确定要退出当前账号吗？本地项目和模型配置不会被删除。',
       confirmText: '退出',
       cancelText: '取消',
       danger: true,
@@ -215,7 +215,11 @@ function AccountCenter(): React.ReactElement {
                   className="account-profile-avatar-image"
                 />
                 <span className="account-profile-avatar-overlay">
-                  {uploadingAvatar ? <Icons.Spinner size={16} className="spin" /> : <Icons.Upload size={16} />}
+                  {uploadingAvatar ? (
+                    <Icons.Spinner size={16} className="spin" />
+                  ) : (
+                    <Icons.Upload size={16} />
+                  )}
                 </span>
               </button>
 
@@ -437,7 +441,9 @@ function ChangePasswordForm({
         <Input.Password />
       </Form.Item>
       <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
-        <Button type="text" onClick={onClose}>取消</Button>
+        <Button type="text" onClick={onClose}>
+          取消
+        </Button>
         <Button type="primary" loading={submitting} onClick={() => void handleSubmit()}>
           确认
         </Button>

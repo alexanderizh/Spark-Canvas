@@ -1,3 +1,4 @@
+import { useRef, type WheelEvent as ReactWheelEvent } from 'react'
 import type { ParsedShotRow } from './canvasShotTableParse'
 
 type ShotDetail = {
@@ -22,12 +23,37 @@ function ShotDetailStack({ items }: { items: ShotDetail[] }) {
 }
 
 /** 分镜脚本产物的只读全字段表格，可复用于普通产物节点和操作节点内嵌产物。 */
-export function CanvasShotScriptTable({ rows }: { rows: ParsedShotRow[] }) {
+export function CanvasShotScriptTable({
+  rows,
+  isolateWheel = true,
+}: {
+  rows: ParsedShotRow[]
+  /** 位于未选中的画布节点中时关闭，让滚轮继续交给画布。 */
+  isolateWheel?: boolean
+}) {
+  const tableWrapRef = useRef<HTMLDivElement | null>(null)
   const totalSec = rows.reduce((sum, row) => sum + (row.durationSec ?? 0), 0)
   const hasDuration = rows.some((row) => row.durationSec != null)
+  const handleTableWheel = (event: ReactWheelEvent<HTMLDivElement>) => {
+    if (!isolateWheel) return
+    const tableWrap = tableWrapRef.current
+    if (!tableWrap || tableWrap.scrollWidth <= tableWrap.clientWidth) return
+    const hasHorizontalIntent = event.shiftKey || Math.abs(event.deltaX) > Math.abs(event.deltaY)
+    if (!hasHorizontalIntent) return
+    const delta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY
+    if (delta === 0) return
+    event.preventDefault()
+    tableWrap.scrollLeft += delta
+  }
 
   return (
-    <div className="canvas-node-shot-table-wrap nowheel">
+    <div
+      ref={tableWrapRef}
+      className={`canvas-node-shot-table-wrap${isolateWheel ? ' nowheel' : ''}`}
+      aria-label="分镜脚本表格，可横向滚动查看更多字段"
+      tabIndex={isolateWheel ? 0 : undefined}
+      onWheel={handleTableWheel}
+    >
       <table className="canvas-node-shot-table">
         <colgroup>
           <col className="canvas-node-shot-col-idx" />
@@ -80,7 +106,10 @@ export function CanvasShotScriptTable({ rows }: { rows: ParsedShotRow[] }) {
                     { label: '场次', value: row.groupName },
                     { label: '场景', value: row.sceneName },
                     { label: '布局', value: row.sceneLayout },
+                    { label: '构图', value: row.composition },
                     { label: '画面', value: row.description },
+                    { label: '首帧', value: row.firstFrame },
+                    { label: '尾帧', value: row.lastFrame },
                   ]}
                 />
               </td>
@@ -89,6 +118,8 @@ export function CanvasShotScriptTable({ rows }: { rows: ParsedShotRow[] }) {
                   items={[
                     { label: '调度', value: row.blocking },
                     { label: '表演', value: row.performance },
+                    { label: '节拍', value: row.actionBeats },
+                    { label: '连续', value: row.continuity },
                   ]}
                 />
               </td>
@@ -110,6 +141,8 @@ export function CanvasShotScriptTable({ rows }: { rows: ParsedShotRow[] }) {
                   items={[
                     { label: '对白', value: row.dialogue },
                     { label: '旁白', value: row.narration },
+                    { label: '音效', value: row.soundEffects },
+                    { label: '转场', value: row.transition },
                   ]}
                 />
               </td>
@@ -123,6 +156,7 @@ export function CanvasShotScriptTable({ rows }: { rows: ParsedShotRow[] }) {
                           ? row.characterNames.join('、')
                           : undefined,
                     },
+                    { label: '参考', value: row.characterReferences },
                     { label: '造型', value: row.costume },
                   ]}
                 />

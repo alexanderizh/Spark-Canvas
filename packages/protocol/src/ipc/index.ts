@@ -25,6 +25,7 @@ import type {
   MediaCapabilityId,
   CanvasOperationType,
   MediaRequestCall,
+  MediaInputMetadata,
 } from '../media-config.js'
 import type { MediaModelManifest, ProviderMediaModelRef } from '../media-model-manifest.js'
 import type {
@@ -37,11 +38,6 @@ import type {
   ProviderImportResult,
   ProviderImportMode,
 } from '../provider-export.js'
-import type {
-  ScheduledTaskExportPayload,
-  ScheduledTaskImportResult,
-  ScheduledTaskImportMode,
-} from '../scheduled-task-export.js'
 import type {
   HistoryImportSource,
   HistoryImportScanRequest,
@@ -57,6 +53,7 @@ import type {
   ConnectorCapabilityKind,
   GitHubConnectorConnection,
 } from '../connectors.js'
+import type { ProviderFilesIpcChannelMap } from '../provider-files.js'
 
 export type SessionChatMode = 'agent' | 'ask' | 'edit' | 'review'
 export type SessionReasoningEffort = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
@@ -153,6 +150,8 @@ export interface SessionGoalResponse {
 
 // ─── Session Channels ─────────────────────────────────────────────────────────
 
+export type SessionSurface = 'canvas'
+
 export interface SessionCreateRequest {
   /** Provider 配置 Profile ID */
   providerProfileId: string
@@ -171,6 +170,8 @@ export interface SessionCreateRequest {
   title?: string
   /** 关联的 Workspace ID（可选）*/
   workspaceId?: string
+  /** Product surface that owns this session. Omitted for legacy/general sessions. */
+  surface?: SessionSurface
 }
 
 export interface SessionCreateResponse {
@@ -304,6 +305,7 @@ export interface SessionGetHistoryResponse {
 
 export interface SessionListRequest {
   workspaceId?: string
+  surface?: SessionSurface
   includeArchived?: boolean
   limit?: number
   offset?: number
@@ -515,6 +517,8 @@ export interface SessionListResponse {
     importedFrom?: HistoryImportSource
     /** 调试模式（per-session 能力开关）：与权限模式正交，开启后挂载 spark_debug + 显示快捷回复 */
     debugMode?: boolean
+    /** Product surface parsed from persisted session metadata. */
+    surface?: SessionSurface
   }>
   total: number
 }
@@ -624,7 +628,9 @@ export interface PlatformModelSubscription {
   nextResetTime?: number
 }
 
-export interface PlatformModelRedeemRequest { code: string }
+export interface PlatformModelRedeemRequest {
+  code: string
+}
 export interface PlatformModelRedeemResponse {
   benefitType: 'quota' | 'subscription'
   quotaAdded?: number
@@ -2810,6 +2816,8 @@ export interface LogReadRequest {
   maxLines?: number
   /** 仅返回这些级别的行；为空/缺省表示不过滤。 */
   levels?: LogLevel[]
+  /** canvas 会聚合画布生命周期、媒体 adapter 与轮询诊断。 */
+  scope?: 'all' | 'canvas'
 }
 
 export interface LogReadResponse {
@@ -3243,39 +3251,6 @@ export interface UpdateSettingsResponse {
   ok: boolean
 }
 
-// ─── File Watcher Channels ─────────────────────────────────────────────────
-
-export interface WorkspaceWatchStartRequest {
-  workspaceId: string
-  /** 需要忽略的 glob 模式（默认包含 node_modules, .git 等） */
-  ignorePatterns?: string[]
-}
-
-export interface WorkspaceWatchStartResponse {
-  watching: boolean
-}
-
-export interface WorkspaceWatchStopRequest {
-  workspaceId: string
-}
-
-export interface WorkspaceWatchStopResponse {
-  stopped: boolean
-}
-
-/** 外部文件变更事件（由 fs.watch 检测，推送至渲染进程） */
-export interface WorkspaceFileChangePayload {
-  workspaceId: string
-  /** 变更类型 */
-  changeType: 'create' | 'modify' | 'delete' | 'rename'
-  /** 文件路径（相对于 workspace root） */
-  path: string
-  /** rename 时的旧路径 */
-  oldPath?: string
-  /** 时间戳 */
-  timestamp: string
-}
-
 // ─── External Tool Channels ────────────────────────────────────────────────
 
 export type ExternalToolKind = 'ide' | 'terminal' | 'document'
@@ -3323,140 +3298,6 @@ export interface ToolOpenFolderResponse {
   /** Error message returned by shell.openPath when it fails; undefined on success */
   error?: string
 }
-
-// ─── Built-in Terminal Panel (session-scoped PTY dock) ─────────────────────
-
-/**
- * PTY terminal id, opaque to renderer.
- *
- * Identifies a node-pty process owned by the main process. Lifecycle is
- * independent of the renderer panel — closing the panel only hides UI; only
- * explicit `terminal:kill` (e.g. closing the last tab) terminates the PTY.
- */
-export type TerminalId = string
-
-export type TerminalStatus = 'running' | 'exited' | 'error'
-
-export interface TerminalSessionInfo {
-  id: TerminalId
-  sessionId: SessionId
-  workspaceId?: string
-  title: string
-  cwd: string
-  shell: string
-  pid?: number
-  cols: number
-  rows: number
-  status: TerminalStatus
-  createdAt: string
-  updatedAt: string
-  exitCode?: number
-  signal?: number
-}
-
-export interface TerminalListRequest {
-  sessionId: SessionId
-}
-
-export interface TerminalListResponse {
-  terminals: TerminalSessionInfo[]
-}
-
-export interface TerminalListActiveRequest {}
-
-export interface TerminalSessionActivity {
-  sessionId: SessionId
-  running: number
-  total: number
-}
-
-export interface TerminalListActiveResponse {
-  sessions: TerminalSessionActivity[]
-}
-
-export interface TerminalCreateRequest {
-  sessionId: SessionId
-  workspaceId?: string
-  /** Override cwd; main process validates against the workspace root. */
-  cwd?: string
-  /** Tab title; defaults to workspace name. */
-  title?: string
-  /** Initial pty cols; ignored if omitted, fit on first renderer resize. */
-  cols?: number
-  /** Initial pty rows. */
-  rows?: number
-}
-
-export interface TerminalCreateResponse {
-  terminal: TerminalSessionInfo
-  /** Optional welcome output captured before stream subscription (usually empty). */
-  initialOutput?: string
-}
-
-export interface TerminalInputRequest {
-  terminalId: TerminalId
-  data: string
-}
-
-export interface TerminalInputResponse {
-  accepted: boolean
-}
-
-export interface TerminalResizeRequest {
-  terminalId: TerminalId
-  cols: number
-  rows: number
-}
-
-export interface TerminalResizeResponse {
-  resized: boolean
-}
-
-export interface TerminalKillRequest {
-  terminalId: TerminalId
-}
-
-export interface TerminalKillResponse {
-  killed: boolean
-}
-
-export interface TerminalRenameRequest {
-  terminalId: TerminalId
-  title: string
-}
-
-export interface TerminalRenameResponse {
-  terminal: TerminalSessionInfo
-}
-
-export interface TerminalGetBufferRequest {
-  terminalId: TerminalId
-}
-
-export interface TerminalGetBufferResponse {
-  /** Cached output since the last renderer attach; may be empty if the PTY just started. */
-  output: string
-}
-
-/**
- * Streamed events for the built-in terminal panel. Main → renderer fan-out.
- *
- * Renderer filters by `sessionId` to keep tabs isolated when the user
- * switches sessions.
- */
-export type TerminalStreamEvent =
-  | { type: 'created'; terminal: TerminalSessionInfo }
-  | { type: 'data'; terminalId: TerminalId; sessionId: SessionId; data: string }
-  | {
-      type: 'exit'
-      terminalId: TerminalId
-      sessionId: SessionId
-      exitCode?: number
-      signal?: number
-    }
-  | { type: 'updated'; terminal: TerminalSessionInfo }
-  | { type: 'removed'; terminalId: TerminalId; sessionId: SessionId }
-  | { type: 'error'; terminalId?: TerminalId; sessionId?: SessionId; message: string }
 
 // ─── Command Channels ────────────────────────────────────────────────────────
 
@@ -3719,12 +3560,13 @@ export interface FfmpegStatusResponse {
   binaryPath: string | null
   /** 上次安装/检测的错误信息 */
   lastError: string | null
+  /** 当前构建是否包含已批准的 Spark Canvas 托管安装描述符 */
+  managedInstallAvailable: boolean
+  /** 托管安装不可用时的发布 Gate 说明 */
+  managedInstallMessage: string | null
 }
 
-export interface FfmpegInstallRequest {
-  /** 可选：指定 manifest 里的 artifactId；缺省按当前平台自动选 */
-  artifactId?: string
-}
+export interface FfmpegInstallRequest {}
 
 export interface FfmpegInstallResponse {
   success: boolean
@@ -3769,6 +3611,10 @@ export interface VideoProcessRequest {
   requestId: string
 }
 
+export interface VideoProbeRequest extends Omit<VideoProcessRequest, 'operation'> {
+  operation: 'probe'
+}
+
 export interface VideoProcessResponse {
   success: boolean
   /** 操作结果（结构因 operation 而异，如 probe 返回 VideoProbeInfo、抽帧返回帧列表） */
@@ -3780,23 +3626,6 @@ export interface VideoProcessProgress {
   requestId: string
   percent: number
   stage: string
-}
-
-/** 通用二进制产物安装（ffmpeg 等非技能包） */
-export interface BinaryInstallRequest {
-  artifactId: string
-}
-
-export interface BinaryInstallResponse {
-  success: boolean
-  destPath?: string
-  message?: string
-}
-
-export interface BinaryInstallProgress {
-  artifactId: string
-  downloaded: number
-  total: number
 }
 
 export interface BrowserOpenExternalRequest {
@@ -3980,6 +3809,20 @@ export interface FileSavePastedImageResponse {
   fileName: string
 }
 
+/** 把可编辑图片标注文档写入画布项目的 assets/annotations 目录。 */
+export interface FileSaveCanvasAnnotationRequest {
+  documentJson: string
+  suggestedBaseName?: string
+  projectRootPath?: string
+  /** 自动草稿与完成保存复用同一侧车文件；仅允许覆盖 annotations 目录内文件。 */
+  existingFilePath?: string
+}
+
+export interface FileSaveCanvasAnnotationResponse {
+  filePath: string
+  fileName: string
+}
+
 export interface FilePrepareImagePreviewRequest {
   sourcePath: string
 }
@@ -4000,289 +3843,6 @@ export interface FileStatKindRequest {
 export interface FileStatKindResponse {
   /** 路径不存在时为 'absent' */
   kind: FileStatKind
-}
-
-// ─── Scheduled Task Channels ──────────────────────────────────────────────────
-
-export type ScheduledTaskTriggerType = 'interval' | 'cron' | 'once'
-export type ScheduledTaskStatus = 'idle' | 'running' | 'disabled' | 'error'
-export type ScheduledTaskConcurrencyPolicy = 'skip' | 'queue' | 'cancel'
-export type ScheduledTaskRetryBackoff = 'fixed' | 'linear' | 'exponential'
-
-export interface ScheduledTaskNotification {
-  id: string
-  url: string
-  triggers: ('onSuccess' | 'onFailure' | 'onRetry' | 'onDisabled')[]
-  headers?: Record<string, string>
-  bodyTemplate?: string
-}
-
-export interface ScheduledTaskItem {
-  id: string
-  name: string
-  description: string
-  enabled: boolean
-  triggerType: ScheduledTaskTriggerType
-  intervalSeconds: number | null
-  cronExpression: string | null
-  runAt: string | null
-  timezone: string
-  startAt: string | null
-  endAt: string | null
-  maxExecutions: number
-  agentId: string | null
-  teamId: string | null
-  modelId: string | null
-  workspaceId: string | null
-  promptTemplate: string
-  permissionMode: string
-  permissionProfileId: string | null
-  timeoutSeconds: number
-  maxRetries: number
-  retryDelaySeconds: number
-  retryBackoff: ScheduledTaskRetryBackoff
-  notifications: ScheduledTaskNotification[]
-  concurrencyPolicy: ScheduledTaskConcurrencyPolicy
-  tags: string[]
-  historyRetentionDays: number
-  status: ScheduledTaskStatus
-  executionCount: number
-  successCount: number
-  failureCount: number
-  lastRunAt: string | null
-  nextRunAt: string | null
-  lastError: string | null
-  currentExecutionId: string | null
-  createdAt: string
-  updatedAt: string
-}
-
-export interface ScheduledTaskCreateRequest {
-  name: string
-  description?: string
-  enabled?: boolean
-  triggerType: ScheduledTaskTriggerType
-  intervalSeconds?: number | null
-  cronExpression?: string | null
-  runAt?: string | null
-  timezone?: string
-  startAt?: string | null
-  endAt?: string | null
-  maxExecutions?: number
-  agentId?: string | null
-  teamId?: string | null
-  modelId?: string | null
-  workspaceId?: string | null
-  promptTemplate: string
-  permissionMode?: string
-  permissionProfileId?: string | null
-  timeoutSeconds?: number
-  maxRetries?: number
-  retryDelaySeconds?: number
-  retryBackoff?: ScheduledTaskRetryBackoff
-  notifications?: ScheduledTaskNotification[]
-  concurrencyPolicy?: ScheduledTaskConcurrencyPolicy
-  tags?: string[]
-  historyRetentionDays?: number
-}
-
-export interface ScheduledTaskCreateResponse {
-  task: ScheduledTaskItem
-}
-
-export interface ScheduledTaskUpdateRequest {
-  id: string
-  name?: string
-  description?: string
-  enabled?: boolean
-  triggerType?: ScheduledTaskTriggerType
-  intervalSeconds?: number | null
-  cronExpression?: string | null
-  runAt?: string | null
-  timezone?: string
-  startAt?: string | null
-  endAt?: string | null
-  maxExecutions?: number
-  agentId?: string | null
-  teamId?: string | null
-  modelId?: string | null
-  workspaceId?: string | null
-  promptTemplate?: string
-  permissionMode?: string
-  permissionProfileId?: string | null
-  timeoutSeconds?: number
-  maxRetries?: number
-  retryDelaySeconds?: number
-  retryBackoff?: ScheduledTaskRetryBackoff
-  notifications?: ScheduledTaskNotification[]
-  concurrencyPolicy?: ScheduledTaskConcurrencyPolicy
-  tags?: string[]
-  historyRetentionDays?: number
-}
-
-export interface ScheduledTaskUpdateResponse {
-  task: ScheduledTaskItem
-}
-
-export interface ScheduledTaskDeleteRequest {
-  id: string
-}
-
-export interface ScheduledTaskDeleteResponse {
-  success: boolean
-}
-
-export interface ScheduledTaskListRequest {
-  status?: string
-  enabled?: boolean
-  tags?: string[]
-  query?: string
-}
-
-export interface ScheduledTaskListResponse {
-  tasks: ScheduledTaskItem[]
-}
-
-export interface ScheduledTaskGetRequest {
-  id: string
-}
-
-export interface ScheduledTaskGetResponse {
-  task: ScheduledTaskItem | null
-}
-
-export interface ScheduledTaskToggleRequest {
-  id: string
-  enabled: boolean
-}
-
-export interface ScheduledTaskToggleResponse {
-  task: ScheduledTaskItem
-}
-
-export interface ScheduledTaskRunNowRequest {
-  id: string
-}
-
-export interface ScheduledTaskRunNowResponse {
-  execution: TaskExecutionItem
-}
-
-// ─── Scheduled Task Import/Export ────────────────────────────────────────────
-
-/**
- * `scheduled-task:export` — 内存内构造 ExportPayload（不写文件）。
- * 调用方一般会立刻跟 `scheduled-task:export-to-file` 写盘。
- */
-export interface ScheduledTaskExportRequest {
-  /** 要导出的任务 id 列表；空数组表示导出全部 */
-  ids: string[]
-}
-
-export interface ScheduledTaskExportResponse {
-  payload: ScheduledTaskExportPayload
-}
-
-/**
- * `scheduled-task:import` — 直接在内存里导入 ExportPayload。
- * 主要被 `scheduled-task:import-from-file` 在读取文件后调用。
- */
-export interface ScheduledTaskImportRequest {
-  payload: ScheduledTaskExportPayload
-  mode: ScheduledTaskImportMode
-}
-
-export interface ScheduledTaskImportResponse extends ScheduledTaskImportResult {}
-
-/**
- * `scheduled-task:export-to-file` — 弹保存对话框并写入 .json。
- * 返回 filePath 供 UI 提示用户。
- */
-export interface ScheduledTaskExportToFileRequest {
-  ids: string[]
-}
-
-export interface ScheduledTaskExportToFileResponse {
-  /** 实际写入路径；用户取消时为空字符串 */
-  filePath: string
-  /** 写入的任务数量（仅用于 UI 反馈）*/
-  count: number
-}
-
-/**
- * `scheduled-task:import-from-file` — 弹打开对话框、读文件、解析为 payload。
- * 实际写入数据库需要再调用 `scheduled-task:import`（让 UI 走预览流程）。
- */
-export interface ScheduledTaskImportFromFileRequest {}
-
-export interface ScheduledTaskImportFromFileResponse {
-  /** 用户取消时为 null */
-  payload: ScheduledTaskExportPayload | null
-  /** 实际读取路径（成功或失败时都填，方便 UI 提示）*/
-  filePath: string
-}
-
-// ─── Task Execution ──────────────────────────────────────────────────────────
-
-export type TaskExecutionStatus = 'running' | 'completed' | 'failed' | 'cancelled' | 'timeout'
-
-export interface TaskExecutionItem {
-  id: string
-  taskId: string
-  sessionId: string | null
-  startedAt: string
-  completedAt: string | null
-  durationMs: number | null
-  status: TaskExecutionStatus
-  output: string | null
-  error: string | null
-  tokenUsage: unknown | null
-  retryAttempt: number
-  parentExecutionId: string | null
-  triggerType: string | null
-  createdAt: string
-}
-
-export interface TaskExecutionListRequest {
-  taskId: string
-  page?: number
-  pageSize?: number
-  status?: string
-}
-
-export interface TaskExecutionListResponse {
-  executions: TaskExecutionItem[]
-  total: number
-}
-
-export interface TaskExecutionGetRequest {
-  id: string
-}
-
-export interface TaskExecutionGetResponse {
-  execution: TaskExecutionItem | null
-}
-
-export interface TaskExecutionCancelRequest {
-  id: string
-}
-
-export interface TaskExecutionCancelResponse {
-  success: boolean
-}
-
-export interface TaskExecutionStatsRequest {
-  taskId: string
-}
-
-export interface TaskExecutionStatsResponse {
-  stats: {
-    total: number
-    completed: number
-    failed: number
-    avgDurationMs: number | null
-    totalTokenUsage: number
-  }
 }
 
 // ─── Remote Connections Channels ────────────────────────────────────────────
@@ -4548,7 +4108,6 @@ export type SystemNotificationViewTarget =
   | 'agents'
   | 'board'
   | 'canvas'
-  | 'scheduled-tasks'
   | 'skills'
   | 'skill-store'
   | 'mcp'
@@ -4668,12 +4227,14 @@ export interface CanvasMediaPruneModelParamsRequest {
   manifestId: string
   providerProfileId?: string | undefined
   capabilityId: string
+  modelId?: string | undefined
+  prompt?: string | undefined
+  validateSubmission?: boolean | undefined
   modelParams: Record<string, unknown>
   /**
-   * 输入文件类型摘要，供 conditionals.drop_when_input_kind 判定（如 image_to_video
-   * 场景下禁止 maxImages 等）。仅传 type/role 字符串数组，避免传整个文件 buffer。
+   * 最终提交预校验会携带输入文件的传输描述；不传原始 Buffer 或完整 base64。
    */
-  inputFiles?: Array<{ type: string; role?: string | undefined }> | undefined
+  inputFiles?: CanvasMediaTaskInputFile[] | undefined
 }
 
 export interface CanvasMediaPruneModelParamsResponse {
@@ -4717,7 +4278,8 @@ export interface CanvasMediaPruneModelParamsByInlineManifestResponse {
  * 主进程解析可用 provider + API key（不外泄），调用 MediaRouterService，
  * 把产物落盘到 `.spark-artifacts/media/<kind>`，返回 asset 元信息。
  */
-export interface CanvasMediaTaskInputFile {
+export interface CanvasMediaTaskInputFile extends MediaInputMetadata {
+  fileId?: string
   path?: string
   url?: string
   dataUrl?: string
@@ -4742,6 +4304,8 @@ export interface CanvasMediaTaskCreateRequest {
   /** 指定 provider 内实际调用的模型；缺省使用 Provider defaultModel / manifest 默认模型 */
   modelId?: string | null
   modelParams?: Record<string, unknown>
+  /** 用户确认预检提示后允许继续执行。 */
+  skipParameterValidation?: boolean
   /** false means return immediately and push completion through stream:canvas:media-task. */
   waitForCompletion?: boolean
   /** 产物落盘根目录；缺省使用 userData/.spark-artifacts/media */
@@ -4770,6 +4334,8 @@ export interface CanvasMediaTaskCreateResponse {
   mode: 'sync' | 'async'
   requestId?: string
   assets: CanvasMediaTaskAsset[]
+  /** 轮询任务提交接口的响应摘要。 */
+  submitResponse?: unknown
   rawResponse?: unknown
   /** 实际发给 provider 的请求摘要（method + url + 已截断 body），用于任务详情展示。 */
   requestCall?: MediaRequestCall
@@ -4948,13 +4514,14 @@ export interface CanvasWindowCloseRequestPayload {
   projectId: string | null
 }
 
-/** `canvas:project:delete` — 软删除（status=deleted）或物理删除项目+快照 */
+/** `canvas:project:delete` — 软删除保留目录；hard delete 才物理清理项目目录与记录 */
 export interface CanvasProjectDeleteRequest {
   projectId: string
   hard?: boolean
 }
 export interface CanvasProjectDeleteResponse {
   deleted: boolean
+  directoryRemoved?: boolean
 }
 
 /**
@@ -5024,6 +4591,14 @@ export interface CanvasAssetCopyToProjectResponse {
   error?: string
 }
 
+/** Preload-only bridge for native paths extracted from user-selected or dropped File objects. */
+export interface CanvasDroppedFileGrantRequest {
+  paths: string[]
+}
+export interface CanvasDroppedFileGrantResponse {
+  paths: string[]
+}
+
 export interface CanvasAssetDownloadRequest {
   sourcePath?: string
   sourceUrl?: string
@@ -5083,6 +4658,10 @@ export interface CanvasProjectMigrateAssetsRequest {
   projectId: string
   projectRootPath?: string | null
   snapshotJson: string
+  /** 跨设备导入包在本机的 project.json 绝对路径。 */
+  sourceFilePath?: string
+  /** 导出包记录的源电脑项目根，用于把绝对资产路径映射到本机包根。 */
+  exportedPackageRoot?: string | null
 }
 export interface CanvasProjectMigrateAssetsResponse {
   migrated: boolean
@@ -5117,7 +4696,7 @@ export interface CanvasProjectCleanupOrphansResponse {
  * const res = await invoke('session:create', { providerProfileId: '...' })
  * //    ^-- 类型自动推断为 SessionCreateResponse
  */
-export interface IpcChannelMap {
+export interface IpcChannelMap extends ProviderFilesIpcChannelMap {
   // Session
   'session:create': [SessionCreateRequest, SessionCreateResponse]
   'session:send-turn': [SessionSendTurnRequest, SessionSendTurnResponse]
@@ -5212,9 +4791,6 @@ export interface IpcChannelMap {
   'workspace:list-worktrees': [WorkspaceListWorktreesRequest, WorkspaceListWorktreesResponse]
   'workspace:create-worktree': [WorkspaceCreateWorktreeRequest, WorkspaceCreateWorktreeResponse]
   'workspace:remove-worktree': [WorkspaceRemoveWorktreeRequest, WorkspaceRemoveWorktreeResponse]
-  'workspace:watch-start': [WorkspaceWatchStartRequest, WorkspaceWatchStartResponse]
-  'workspace:watch-stop': [WorkspaceWatchStopRequest, WorkspaceWatchStopResponse]
-
   // Native dialog
   'dialog:open-directory': [DialogOpenDirectoryRequest, DialogOpenDirectoryResponse]
   'dialog:open-file': [DialogOpenFileRequest, DialogOpenFileResponse]
@@ -5359,16 +4935,6 @@ export interface IpcChannelMap {
   'tool:open-project': [ToolOpenProjectRequest, ToolOpenProjectResponse]
   'tool:open-folder': [ToolOpenFolderRequest, ToolOpenFolderResponse]
 
-  // Built-in Terminal Panel (session-scoped PTY dock)
-  'terminal:list': [TerminalListRequest, TerminalListResponse]
-  'terminal:list-active': [TerminalListActiveRequest, TerminalListActiveResponse]
-  'terminal:create': [TerminalCreateRequest, TerminalCreateResponse]
-  'terminal:input': [TerminalInputRequest, TerminalInputResponse]
-  'terminal:resize': [TerminalResizeRequest, TerminalResizeResponse]
-  'terminal:kill': [TerminalKillRequest, TerminalKillResponse]
-  'terminal:rename': [TerminalRenameRequest, TerminalRenameResponse]
-  'terminal:get-buffer': [TerminalGetBufferRequest, TerminalGetBufferResponse]
-
   // Command
   'command:execute': [CommandExecuteRequest, CommandExecuteResponse]
   'command:list': [CommandListRequest, CommandListResponse]
@@ -5458,6 +5024,7 @@ export interface IpcChannelMap {
   // File Save Image — show save dialog and copy a local image to the user's chosen path
   'file:save-image': [FileSaveImageRequest, FileSaveImageResponse]
   'file:save-pasted-image': [FileSavePastedImageRequest, FileSavePastedImageResponse]
+  'file:save-canvas-annotation': [FileSaveCanvasAnnotationRequest, FileSaveCanvasAnnotationResponse]
   'file:prepare-image-preview': [FilePrepareImagePreviewRequest, FilePrepareImagePreviewResponse]
   'file:stat-kind': [FileStatKindRequest, FileStatKindResponse]
 
@@ -5504,11 +5071,12 @@ export interface IpcChannelMap {
     CanvasAssetCopyToProjectRequest,
     CanvasAssetCopyToProjectResponse,
   ]
-  'canvas:asset:download': [CanvasAssetDownloadRequest, CanvasAssetDownloadResponse]
-  'canvas:asset:download-batch': [
-    CanvasAssetDownloadBatchRequest,
-    CanvasAssetDownloadBatchResponse,
+  'canvas:file:grant-dropped-paths': [
+    CanvasDroppedFileGrantRequest,
+    CanvasDroppedFileGrantResponse,
   ]
+  'canvas:asset:download': [CanvasAssetDownloadRequest, CanvasAssetDownloadResponse]
+  'canvas:asset:download-batch': [CanvasAssetDownloadBatchRequest, CanvasAssetDownloadBatchResponse]
   'canvas:project:export-package': [
     CanvasProjectExportPackageRequest,
     CanvasProjectExportPackageResponse,
@@ -5544,9 +5112,8 @@ export interface IpcChannelMap {
   // FFmpeg Integrity & Video Processing
   'ffmpeg:status': [FfmpegStatusRequest, FfmpegStatusResponse]
   'ffmpeg:install': [FfmpegInstallRequest, FfmpegInstallResponse]
-  'video:probe': [VideoProcessRequest, VideoProcessResponse]
+  'video:probe': [VideoProbeRequest, VideoProcessResponse]
   'video:process': [VideoProcessRequest, VideoProcessResponse]
-  'binary:install': [BinaryInstallRequest, BinaryInstallResponse]
 
   // Browser helpers
   'browser:open-external': [BrowserOpenExternalRequest, BrowserOpenExternalResponse]
@@ -5559,29 +5126,6 @@ export interface IpcChannelMap {
   'window:set-zoom': [WindowSetZoomRequest, WindowSetZoomResponse]
   'window:ensure-width': [WindowEnsureWidthRequest, WindowEnsureWidthResponse]
 
-  // Scheduled Tasks
-  'scheduled-task:list': [ScheduledTaskListRequest, ScheduledTaskListResponse]
-  'scheduled-task:get': [ScheduledTaskGetRequest, ScheduledTaskGetResponse]
-  'scheduled-task:create': [ScheduledTaskCreateRequest, ScheduledTaskCreateResponse]
-  'scheduled-task:update': [ScheduledTaskUpdateRequest, ScheduledTaskUpdateResponse]
-  'scheduled-task:delete': [ScheduledTaskDeleteRequest, ScheduledTaskDeleteResponse]
-  'scheduled-task:toggle': [ScheduledTaskToggleRequest, ScheduledTaskToggleResponse]
-  'scheduled-task:run-now': [ScheduledTaskRunNowRequest, ScheduledTaskRunNowResponse]
-  'scheduled-task:export': [ScheduledTaskExportRequest, ScheduledTaskExportResponse]
-  'scheduled-task:import': [ScheduledTaskImportRequest, ScheduledTaskImportResponse]
-  'scheduled-task:export-to-file': [
-    ScheduledTaskExportToFileRequest,
-    ScheduledTaskExportToFileResponse,
-  ]
-  'scheduled-task:import-from-file': [
-    ScheduledTaskImportFromFileRequest,
-    ScheduledTaskImportFromFileResponse,
-  ]
-  'task-execution:list': [TaskExecutionListRequest, TaskExecutionListResponse]
-  'task-execution:get': [TaskExecutionGetRequest, TaskExecutionGetResponse]
-  'task-execution:cancel': [TaskExecutionCancelRequest, TaskExecutionCancelResponse]
-  'task-execution:stats': [TaskExecutionStatsRequest, TaskExecutionStatsResponse]
-
   // ─── Cloud Auth (对接 spark-edugen/edu-server 的登录/注册/微信扫码) ────────
 
   /** 获取图片验证码 */
@@ -5592,7 +5136,7 @@ export interface IpcChannelMap {
   'auth:register': [AuthRegisterRequest, AuthRegisterResponse]
   /** 登录（password 模式 / emailCode 模式）*/
   'auth:login': [AuthLoginRequest, AuthLoginResponse]
-  /** refreshToken 换发新 token */
+  /** 主进程刷新云会话，仅返回非敏感登录状态。 */
   'auth:refresh': [AuthRefreshRequest, AuthRefreshResponse]
   /** 退出登录（撤销服务端 session）*/
   'auth:logout': [AuthLogoutRequest, AuthLogoutResponse]
@@ -5761,8 +5305,6 @@ export interface IpcStreamChannelMap {
   }
   /** 工具审批请求（主进程推送，渲染进程弹窗）*/
   'stream:permission:approval-request': PermissionApprovalRequest
-  /** 工作区文件变更（由 fs.watch 检测外部文件变化，主进程推送）*/
-  'stream:workspace:file-change': WorkspaceFileChangePayload
   /** 可安装技能下载进度（主进程推送，渲染进程显示进度条）*/
   'stream:skill:install-progress': SkillInstallCatalogProgress
   /** 更新可用（主进程推送，渲染进程显示通知）*/
@@ -5775,10 +5317,8 @@ export interface IpcStreamChannelMap {
   'stream:update:status': UpdateStatus
 
   // ─── Cloud Auth 流式事件 ──────────────────────────────────────────────────
-  /** token 续期成功（主进程推送，渲染端刷新内存缓存 + 状态）*/
+  /** token 续期成功（主进程仅推送非敏感状态，凭据不离开主进程）*/
   'stream:auth:token-refreshed': {
-    token: string
-    refreshToken: string
     userId: string
   }
   /** session 过期（refresh 也失败，渲染端跳到登录页）*/
@@ -5802,8 +5342,6 @@ export interface IpcStreamChannelMap {
   'stream:ffmpeg:install-progress': FfmpegInstallProgress
   /** 视频处理进度推送（按 requestId 关联请求）*/
   'stream:video:process-progress': VideoProcessProgress
-  /** 通用二进制产物下载进度推送 */
-  'stream:binary:install-progress': BinaryInstallProgress
   /** Embedded browser view screenshot/page update (Renderer listens for live preview) */
   'stream:playwright:view': {
     title: string | null
@@ -5811,21 +5349,10 @@ export interface IpcStreamChannelMap {
     /** PNG screenshot encoded as base64 data URL (omitted when unchanged) */
     dataUrl?: string
   }
-  /** Scheduled task execution event (main → renderer push) */
-  'stream:scheduled-task:execution': {
-    taskId: string
-    executionId: string
-    type: 'started' | 'completed' | 'failed' | 'timeout' | 'retrying'
-    durationMs?: number
-    error?: string
-    sessionId?: string
-  }
   /** 用户从系统托盘菜单触发「新建会话」（主进程展示主窗口后推送，渲染端走新建会话流程）*/
   'stream:tray:new-session': Record<string, never>
   /** 用户从系统托盘菜单点击某个最近会话（主进程展示主窗口后推送，渲染端切换到该会话）*/
   'stream:tray:open-session': { sessionId: string }
-  /** Built-in terminal panel events: data / exit / removed / etc. */
-  'stream:terminal:event': TerminalStreamEvent
 }
 
 export type IpcStreamChannel = keyof IpcStreamChannelMap
@@ -5862,6 +5389,11 @@ export interface AuthSession {
   userId: string
 }
 
+/** Renderer 可见的登录状态；凭据只保留在主进程。 */
+export interface AuthSessionState {
+  userId: string
+}
+
 /** 图片验证码响应 */
 export interface AuthCaptchaRequest {
   /** 强制刷新（默认 true，避免缓存）*/
@@ -5891,7 +5423,7 @@ export interface AuthRegisterRequest {
   code: string
   inviteCode?: string
 }
-export type AuthRegisterResponse = AuthSession
+export type AuthRegisterResponse = AuthSessionState
 
 /** 登录 */
 export interface AuthLoginRequest {
@@ -5902,14 +5434,11 @@ export interface AuthLoginRequest {
   captchaText?: string
   emailCode?: string
 }
-export type AuthLoginResponse = AuthSession
+export type AuthLoginResponse = AuthSessionState
 
-/** 刷新 token */
-export interface AuthRefreshRequest {
-  /** 可选 — 主进程默认从 keytar 自动读取 */
-  refreshToken?: string
-}
-export type AuthRefreshResponse = AuthSession
+/** 主进程使用 Keychain 中的 refresh token 刷新会话。 */
+export type AuthRefreshRequest = Record<string, never>
+export type AuthRefreshResponse = AuthSessionState
 
 /** 退出登录 */
 export interface AuthLogoutRequest {}
@@ -5955,8 +5484,6 @@ export interface AuthWechatPollRequest {
 }
 export type AuthWechatPollResponse = {
   status: 'pending' | 'success' | 'pending_bind' | 'error'
-  token?: string
-  refreshToken?: string
   userId?: string
   isNew?: boolean
   needsSetup?: boolean
@@ -5980,7 +5507,7 @@ export interface AuthWechatBindEmailRequest {
   bindSession: string
   code: string
 }
-export type AuthWechatBindEmailResponse = AuthSession & { isNew: boolean }
+export type AuthWechatBindEmailResponse = AuthSessionState & { isNew: boolean }
 
 /** 设置 edu-server base URL */
 export interface AuthSetBaseUrlRequest {
@@ -6062,8 +5589,8 @@ export interface AuthLoginSmsRequest {
   phone: string
   smsCode: string
 }
-/** 登录成功：会话 + 是否为新注册用户 */
-export type AuthLoginSmsResponse = AuthSession & {
+/** 登录成功：非敏感会话状态 + 是否为新注册用户。 */
+export type AuthLoginSmsResponse = AuthSessionState & {
   isNew: boolean
 }
 

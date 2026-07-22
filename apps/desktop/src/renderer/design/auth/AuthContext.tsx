@@ -8,34 +8,28 @@
  *
  * 设计要点：
  *   - 不在渲染端存 token（主进程 keytar 持久化）
- *   - 只在内存里放一份副本供 UI 显示
+ *   - 登录、注册和续期 IPC 只返回非敏感 userId，Renderer 不接收凭据
  *   - 401 由主进程 EduServerClient 自动处理，渲染端不用感知
  */
 
-import React, {
-  createContext,
-  useCallback,
-  useContext,
-  useEffect,
-  useMemo,
-  useState,
-} from 'react'
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
 import type {
   AuthBootstrapResponse,
   AuthCapabilities,
   AuthCaptchaResponse,
   AuthClientConfigResponse,
+  AuthLoginResponse,
   AuthLoginMode,
   AuthLoginSmsResponse,
   AuthMeResponse,
+  AuthRegisterResponse,
   AuthSendCodeType,
-  AuthSession,
 } from '@spark/protocol'
 
 export type AuthFlow = 'login' | 'register'
 
 export interface AuthContextValue {
-  /** 是否已登录（token + userId 都有）*/
+  /** 主进程是否持有有效登录会话。 */
   isAuthenticated: boolean
   /** 当前用户信息 */
   user: AuthMeResponse | null
@@ -64,17 +58,15 @@ export interface AuthContextValue {
     captchaId?: string
     captchaText?: string
     emailCode?: string
-  }) => Promise<AuthSession>
+  }) => Promise<AuthLoginResponse>
   register: (params: {
     account: string
     password: string
     code: string
     inviteCode?: string
-  }) => Promise<AuthSession>
+  }) => Promise<AuthRegisterResponse>
   logout: () => Promise<void>
   refreshMe: () => Promise<AuthMeResponse | null>
-  /** 主动 refresh token */
-  refreshToken: () => Promise<AuthSession | null>
   /** 更新昵称（PUT /me），成功后刷新本地 user */
   updateNickname: (nickname: string) => Promise<AuthMeResponse>
   /** 上传/更新头像（POST /me/avatar），成功后刷新本地 user，返回完整 avatarUrl */
@@ -208,14 +200,19 @@ export function AuthProvider({ children }: AuthProviderProps): React.ReactElemen
   }, [])
 
   const sendCode = useCallback(
-    async (params: { account: string; type: AuthSendCodeType; captchaId: string; captchaText: string }) => {
+    async (params: {
+      account: string
+      type: AuthSendCodeType
+      captchaId: string
+      captchaText: string
+    }) => {
       return (await window.spark!.invoke('auth:send-code', params)) as { expire_in: number }
     },
     [],
   )
 
   const login = useCallback(async (params: Parameters<AuthContextValue['login']>[0]) => {
-    const session = (await window.spark!.invoke('auth:login', params)) as AuthSession
+    const session = (await window.spark!.invoke('auth:login', params)) as AuthLoginResponse
     // 登录成功后再拉 /me 获取完整用户信息
     const me = (await window.spark!.invoke('auth:me', {})) as AuthMeResponse
     setIsAuthenticated(true)
@@ -224,7 +221,7 @@ export function AuthProvider({ children }: AuthProviderProps): React.ReactElemen
   }, [])
 
   const register = useCallback(async (params: Parameters<AuthContextValue['register']>[0]) => {
-    const session = (await window.spark!.invoke('auth:register', params)) as AuthSession
+    const session = (await window.spark!.invoke('auth:register', params)) as AuthRegisterResponse
     const me = (await window.spark!.invoke('auth:me', {})) as AuthMeResponse
     setIsAuthenticated(true)
     setUser(me)
@@ -248,14 +245,6 @@ export function AuthProvider({ children }: AuthProviderProps): React.ReactElemen
     }
   }, [])
 
-  const refreshToken = useCallback(async () => {
-    try {
-      return (await window.spark!.invoke('auth:refresh', {})) as AuthSession | null
-    } catch {
-      return null
-    }
-  }, [])
-
   const updateNickname = useCallback(async (nickname: string) => {
     const me = (await window.spark!.invoke('auth:update-me', { nickname })) as AuthMeResponse
     setUser(me)
@@ -270,7 +259,10 @@ export function AuthProvider({ children }: AuthProviderProps): React.ReactElemen
         ...(mimeType !== undefined ? { mimeType } : {}),
       })) as { avatarUrl: string }
       // 上传成功后刷新本地用户信息（avatarUrl 已落库）
-      await window.spark!.invoke('auth:me', {}).then((me) => setUser(me as AuthMeResponse)).catch(() => undefined)
+      await window
+        .spark!.invoke('auth:me', {})
+        .then((me) => setUser(me as AuthMeResponse))
+        .catch(() => undefined)
       return res
     },
     [],
@@ -307,7 +299,6 @@ export function AuthProvider({ children }: AuthProviderProps): React.ReactElemen
       register,
       logout,
       refreshMe,
-      refreshToken,
       updateNickname,
       uploadAvatar,
       authCapabilities,
@@ -327,7 +318,6 @@ export function AuthProvider({ children }: AuthProviderProps): React.ReactElemen
       register,
       logout,
       refreshMe,
-      refreshToken,
       updateNickname,
       uploadAvatar,
       authCapabilities,

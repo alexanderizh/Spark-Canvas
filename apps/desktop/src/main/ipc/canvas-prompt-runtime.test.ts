@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest'
+import type { AgentEvent } from '@spark/protocol'
 import {
   buildCanvasMediaProviderPrompt,
   buildCanvasRuntimeRequest,
   buildCanvasSystemPrompt,
+  resolveCanvasAgentTurnResult,
 } from './canvas-prompt-runtime'
 
 describe('canvas prompt runtime adapter', () => {
@@ -35,6 +37,36 @@ describe('canvas prompt runtime adapter', () => {
     expect(
       buildCanvasMediaProviderPrompt({ systemPrompt: '能力约束', userPrompt: '用户要求' }),
     ).toBe('能力约束\n\n用户要求')
-    expect(buildCanvasMediaProviderPrompt({ systemPrompt: '', userPrompt: '用户要求' })).toBe('用户要求')
+    expect(buildCanvasMediaProviderPrompt({ systemPrompt: '', userPrompt: '用户要求' })).toBe(
+      '用户要求',
+    )
+  })
+
+  it('waits for terminal agent status before cleaning up a final text turn', () => {
+    const base = {
+      sessionId: 'session-1',
+      turnId: 'turn-1',
+      timestamp: '2026-07-22T00:00:00.000Z',
+      seq: 1,
+    }
+    const finalMessage = {
+      ...base,
+      id: 'message-1',
+      type: 'assistant_message',
+      mode: 'complete',
+      content: '{"shots":[]}',
+      isFinal: true,
+    } as AgentEvent
+    expect(resolveCanvasAgentTurnResult([finalMessage])).toEqual({
+      terminal: false,
+      text: '{"shots":[]}',
+    })
+
+    expect(
+      resolveCanvasAgentTurnResult([
+        finalMessage,
+        { ...base, id: 'status-1', type: 'agent_status', status: 'completed' } as AgentEvent,
+      ]),
+    ).toEqual({ terminal: true, text: '{"shots":[]}' })
   })
 })

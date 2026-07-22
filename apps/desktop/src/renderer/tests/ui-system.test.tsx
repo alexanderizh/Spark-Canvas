@@ -6,11 +6,10 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Dropdown } from 'antd'
 import { Checkbox as LobeCheckbox, TextArea as LobeTextArea } from '@lobehub/ui'
-import { AppProvider, useApp } from '../design/AppContext'
+import { AppDialogHost, AppProvider, useApp } from '../design/AppContext'
 import { ComposerActionsMenu } from '../design/components/ComposerActionsMenu'
 import { ToastProvider } from '../design/components/Toast'
-
-(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
+;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
 class ResizeObserverMock {
   observe = vi.fn()
@@ -26,19 +25,11 @@ function mouseOver(element: Element) {
   element.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, cancelable: true }))
 }
 
-function pointerDown(element: Element) {
-  element.dispatchEvent(new PointerEvent('pointerdown', {
-    bubbles: true,
-    cancelable: true,
-    button: 0,
-    ctrlKey: false,
-  }))
-}
-
 function setInputValue(input: HTMLInputElement | HTMLTextAreaElement, value: string) {
-  const proto = input instanceof HTMLTextAreaElement
-    ? HTMLTextAreaElement.prototype
-    : HTMLInputElement.prototype
+  const proto =
+    input instanceof HTMLTextAreaElement
+      ? HTMLTextAreaElement.prototype
+      : HTMLInputElement.prototype
   const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set
   expect(setter).toBeDefined()
   setter?.call(input, value)
@@ -46,10 +37,16 @@ function setInputValue(input: HTMLInputElement | HTMLTextAreaElement, value: str
 }
 
 function buttonByText(text: string): HTMLButtonElement {
-  const button = Array.from(document.body.querySelectorAll<HTMLButtonElement>('button'))
-    .find((candidate) => candidate.textContent?.includes(text))
-  expect(button).toBeDefined()
-  if (button == null) throw new Error(`Button not found: ${text}`)
+  const buttons = Array.from(document.body.querySelectorAll<HTMLButtonElement>('button'))
+  const normalizedText = text.replace(/\s+/g, '')
+  const button = buttons.find((candidate) =>
+    candidate.textContent?.replace(/\s+/g, '').includes(normalizedText),
+  )
+  if (button == null) {
+    throw new Error(
+      `Button not found: ${text}; available=${JSON.stringify(buttons.map((item) => item.textContent))}`,
+    )
+  }
   return button
 }
 
@@ -62,6 +59,19 @@ describe('Desktop UI system overlays', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     vi.stubGlobal('ResizeObserver', ResizeObserverMock)
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn().mockImplementation((query: string) => ({
+        matches: false,
+        media: query,
+        onchange: null,
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      })),
+    )
     if (!('PointerEvent' in window)) {
       vi.stubGlobal('PointerEvent', MouseEvent)
     }
@@ -81,7 +91,7 @@ describe('Desktop UI system overlays', () => {
     function ClippedMenu() {
       return (
         <div data-testid="clipper" style={{ overflow: 'hidden', width: 80, height: 32 }}>
-          <Dropdown menu={{ items: [{ key: '7d', label: '最近 7 天' }] }}>
+          <Dropdown trigger={['click']} menu={{ items: [{ key: '7d', label: '最近 7 天' }] }}>
             <button type="button">筛选</button>
           </Dropdown>
         </div>
@@ -94,11 +104,12 @@ describe('Desktop UI system overlays', () => {
     })
 
     await act(async () => {
-      pointerDown(buttonByText('筛选'))
+      click(buttonByText('筛选'))
+      await Promise.resolve()
     })
 
     const clipper = container.querySelector('[data-testid="clipper"]')
-    const menu = document.body.querySelector('[data-testid="filter-menu"]')
+    const menu = document.body.querySelector('.ant-dropdown')
 
     expect(menu).not.toBeNull()
     expect(clipper?.contains(menu)).toBe(false)
@@ -130,7 +141,12 @@ describe('Desktop UI system overlays', () => {
 
     act(() => {
       root = createRoot(container)
-      root.render(<AppProvider><ConfirmHarness /></AppProvider>)
+      root.render(
+        <AppProvider>
+          <ConfirmHarness />
+          <AppDialogHost />
+        </AppProvider>,
+      )
     })
 
     await act(async () => {
@@ -173,7 +189,12 @@ describe('Desktop UI system overlays', () => {
 
     act(() => {
       root = createRoot(container)
-      root.render(<AppProvider><PromptHarness /></AppProvider>)
+      root.render(
+        <AppProvider>
+          <PromptHarness />
+          <AppDialogHost />
+        </AppProvider>,
+      )
     })
 
     await act(async () => {
@@ -191,7 +212,9 @@ describe('Desktop UI system overlays', () => {
       await Promise.resolve()
     })
 
-    expect(container.querySelector('[data-testid="prompt-result"]')?.textContent).toBe('Research Agent')
+    expect(container.querySelector('[data-testid="prompt-result"]')?.textContent).toBe(
+      'Research Agent',
+    )
   })
 
   it('keeps custom textarea and checkbox controls usable', () => {
@@ -201,10 +224,7 @@ describe('Desktop UI system overlays', () => {
       return (
         <>
           <LobeTextArea value={notes} onChange={(event) => setNotes(event.target.value)} />
-          <LobeCheckbox
-            checked={enabled}
-            onChange={(checked) => setEnabled(checked)}
-          >
+          <LobeCheckbox checked={enabled} onChange={(checked) => setEnabled(checked)}>
             启用技能
           </LobeCheckbox>
           <span data-testid="form-state">{`${notes}:${String(enabled)}`}</span>
@@ -221,8 +241,9 @@ describe('Desktop UI system overlays', () => {
     const textarea = container.querySelector<HTMLTextAreaElement>('textarea')
     // Lobe's Checkbox is a div with onClick (no <input type="checkbox">).
     // Find the clickable wrapper that contains the label text.
-    const labelSpan = Array.from(container.querySelectorAll('span'))
-      .find((el) => el.textContent === '启用技能')
+    const labelSpan = Array.from(container.querySelectorAll('span')).find(
+      (el) => el.textContent === '启用技能',
+    )
     const checkbox = labelSpan?.parentElement
     expect(textarea).not.toBeNull()
     expect(checkbox).not.toBeNull()
@@ -241,10 +262,7 @@ describe('Desktop UI system overlays', () => {
       root = createRoot(container)
       root.render(
         <ToastProvider>
-          <ComposerActionsMenu
-            onAddAttachments={vi.fn()}
-            onInsertSkillMention={vi.fn()}
-          />
+          <ComposerActionsMenu onAddAttachments={vi.fn()} onInsertSkillMention={vi.fn()} />
         </ToastProvider>,
       )
     })
@@ -271,10 +289,7 @@ describe('Desktop UI system overlays', () => {
       root = createRoot(container)
       root.render(
         <ToastProvider>
-          <ComposerActionsMenu
-            onAddAttachments={vi.fn()}
-            onInsertSkillMention={vi.fn()}
-          />
+          <ComposerActionsMenu onAddAttachments={vi.fn()} onInsertSkillMention={vi.fn()} />
         </ToastProvider>,
       )
     })
@@ -286,10 +301,12 @@ describe('Desktop UI system overlays', () => {
       click(trigger)
     })
 
-    const addItem = Array.from(container.querySelectorAll<HTMLElement>('.composer-actions-item'))
-      .find((item) => item.textContent?.includes('添加文件或图片'))
-    const skillItem = Array.from(container.querySelectorAll<HTMLElement>('.composer-actions-item'))
-      .find((item) => item.textContent?.includes('技能'))
+    const addItem = Array.from(
+      container.querySelectorAll<HTMLElement>('.composer-actions-item'),
+    ).find((item) => item.textContent?.includes('添加文件或图片'))
+    const skillItem = Array.from(
+      container.querySelectorAll<HTMLElement>('.composer-actions-item'),
+    ).find((item) => item.textContent?.includes('技能'))
 
     expect(addItem).toBeDefined()
     expect(skillItem).toBeDefined()

@@ -4,9 +4,8 @@ import {
   appendStylePrompt,
   buildCanvasStyleContext,
 } from './canvasStyleContext'
-import { checkCanvasTaskConsistency } from './canvasConsistencyCheck'
 import { writeProductionBible } from './canvasPipeline'
-import type { CanvasProject, CanvasTask } from './canvas.types'
+import type { CanvasProject } from './canvas.types'
 
 function project(): CanvasProject {
   return {
@@ -39,22 +38,19 @@ describe('canvasStyleContext', () => {
     expect(appendStylePrompt('hero shot', ctx)).toContain('warm cinematic')
   })
 
-  it('一致性检查能发现缺失的项目约束', () => {
-    const task = {
-      operation: 'text_to_image',
-      prompt: 'hero shot',
-      negativePrompt: '',
-      modelParams: {},
-      inputNodeIds: [],
-    } as Pick<
-      CanvasTask,
-      'operation' | 'prompt' | 'negativePrompt' | 'modelParams' | 'inputNodeIds'
-    >
-    const result = checkCanvasTaskConsistency(task, project())
-    expect(result.level).toBe('low')
-    expect(result.missing).toEqual(
-      expect.arrayContaining(['未继承项目视觉圣经提示词', '未继承项目宽高比 2.39:1']),
+  it('媒体任务在缺少本地约束时会补齐项目视觉总设定', () => {
+    const ctx = buildCanvasStyleContext(project())
+
+    const task = applyCanvasStyleToTask(
+      'text_to_image',
+      { prompt: 'hero shot' },
+      ctx,
     )
+
+    expect(task.prompt).toContain('hero shot')
+    expect(task.prompt).toContain('warm cinematic')
+    expect(task.negativePrompt).toBe('no watermark')
+    expect(task.modelParams).toMatchObject({ aspectRatio: '2.39:1', seed: 42 })
   })
 
   it('媒体任务提交前会继承项目视觉总设定', () => {

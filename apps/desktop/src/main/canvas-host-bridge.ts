@@ -23,11 +23,16 @@ import { createLogger } from '@spark/shared'
 const log = createLogger('canvas-host-bridge')
 
 interface Attachment {
+  sessionId: string
   webContents: WebContents
   projectId: string
 }
 
 interface PendingCall {
+  /** 发起调用时的 attachment 归属，回包只能由同一渲染端完成 */
+  webContents: WebContents
+  sessionId: string
+  projectId: string
   resolve: (value: unknown) => void
   reject: (reason: Error) => void
   /** ACK 宽限期计时器（dispatch 后等待渲染端确认收到） */
@@ -58,23 +63,66 @@ export class CanvasHostBridge implements CanvasToolCallBridge {
 
   /** 渲染端 attach 一个画布 session（来自 canvas:host-attach IPC） */
   attach(sessionId: string, webContents: WebContents, projectId: string): void {
+    const previous = this.attachments.get(sessionId)
+    if (previous != null) {
+      this.rejectPendingCallsForAttachment(
+        previous,
+        new Error(`画布 session ${sessionId} 的 attachment 已替换，工具调用已取消`),
+      )
+    }
     // 之前 attach 过同 sessionId 则覆盖（弹窗重开场景）
-    this.attachments.set(sessionId, { webContents, projectId })
+    this.attachments.set(sessionId, { sessionId, webContents, projectId })
     log.info(`session ${sessionId} attached to canvas project ${projectId}`)
 
     // 渲染端窗口关闭时自动 detach，避免残留映射
-    const cleanup = () => this.detach(sessionId)
+    const cleanup = () => this.detach(sessionId, webContents)
     webContents.once('destroyed', cleanup)
   }
 
-  detach(sessionId: string): void {
-    if (this.attachments.delete(sessionId)) {
-      log.info(`session ${sessionId} detached from canvas`)
+  detach(sessionId: string, webContents: WebContents): void {
+    const attachment = this.attachments.get(sessionId)
+    if (attachment == null) return
+    if (attachment.webContents !== webContents) {
+      log.warn(`canvas detach ignored (sender is not attachment owner): sessionId=${sessionId}`)
+      return
+    }
+    this.attachments.delete(sessionId)
+    this.rejectPendingCallsForAttachment(
+      attachment,
+      new Error(`画布 session ${sessionId} 已 detach，工具调用已取消`),
+    )
+    log.info(`session ${sessionId} detached from canvas`)
+  }
+
+  private rejectPendingCallsForAttachment(attachment: Attachment, reason: Error): void {
+    for (const [requestId, pending] of this.pendingCalls) {
+      if (
+        pending.webContents !== attachment.webContents ||
+        pending.sessionId !== attachment.sessionId ||
+        pending.projectId !== attachment.projectId
+      ) {
+        continue
+      }
+      this.pendingCalls.delete(requestId)
+      if (pending.ackTimer != null) clearTimeout(pending.ackTimer)
+      if (pending.timer != null) clearTimeout(pending.timer)
+      pending.reject(reason)
     }
   }
 
   isAttached(sessionId: string): boolean {
     return this.attachments.has(sessionId)
+  }
+
+  sendToAttachedSession(sessionId: string, channel: string, payload: unknown): boolean {
+    const attachment = this.attachments.get(sessionId)
+    if (attachment == null) return false
+    if (attachment.webContents.isDestroyed()) {
+      this.detach(sessionId, attachment.webContents)
+      return false
+    }
+    attachment.webContents.send(channel, payload)
+    return true
   }
 
   /** SDK 工具回调 → 通过 IPC 转发到渲染端等待结果 */
@@ -89,7 +137,7 @@ export class CanvasHostBridge implements CanvasToolCallBridge {
       )
     }
     if (attachment.webContents.isDestroyed()) {
-      this.attachments.delete(sessionId)
+      this.detach(sessionId, attachment.webContents)
       log.warn(
         `canvas tool call refused (window destroyed): sessionId=${sessionId} tool=${toolName}`,
       )
@@ -116,6 +164,9 @@ export class CanvasHostBridge implements CanvasToolCallBridge {
         }
       }, TOOL_CALL_ACK_GRACE_MS)
       this.pendingCalls.set(requestId, {
+        webContents: attachment.webContents,
+        sessionId: attachment.sessionId,
+        projectId: attachment.projectId,
         resolve,
         reject,
         ackTimer,
@@ -138,10 +189,14 @@ export class CanvasHostBridge implements CanvasToolCallBridge {
    * 渲染端确认已收到工具调用（canvas:tool-ack IPC）。
    * 收到 ACK 后清除宽限期计时器，启动真正的 60s 执行超时。
    */
-  handleToolAck(requestId: string): void {
+  handleToolAck(requestId: string, sender: WebContents): void {
     const pending = this.pendingCalls.get(requestId)
     if (pending == null) {
       log.warn(`canvas tool ack ignored (no pending call): requestId=${requestId}`)
+      return
+    }
+    if (pending.webContents !== sender) {
+      log.warn(`canvas tool ack ignored (sender mismatch): requestId=${requestId}`)
       return
     }
     if (pending.acked) return // 已 ack（重复 ack 防御）
@@ -169,10 +224,14 @@ export class CanvasHostBridge implements CanvasToolCallBridge {
     ok: boolean
     result?: unknown
     error?: string
-  }): void {
+  }, sender: WebContents): void {
     const pending = this.pendingCalls.get(payload.requestId)
     if (pending == null) {
       log.warn(`canvas tool result ignored (no pending call): requestId=${payload.requestId}`)
+      return
+    }
+    if (pending.webContents !== sender) {
+      log.warn(`canvas tool result ignored (sender mismatch): requestId=${payload.requestId}`)
       return
     }
     this.pendingCalls.delete(payload.requestId)

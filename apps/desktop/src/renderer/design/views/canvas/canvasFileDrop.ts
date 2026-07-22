@@ -201,6 +201,19 @@ export function extractDroppedFiles(dataTransfer: DataTransfer | null): File[] {
   return files
 }
 
+/** Keep canonical preload-granted paths associated with their original File objects. */
+export function mapDroppedFilePaths(
+  files: readonly File[],
+  paths: readonly (string | null)[],
+): ReadonlyMap<File, string> {
+  const mapped = new Map<File, string>()
+  files.forEach((file, index) => {
+    const path = paths[index]
+    if (path) mapped.set(file, path)
+  })
+  return mapped
+}
+
 /**
  * 多文件落地时的级联偏移布局。
  *

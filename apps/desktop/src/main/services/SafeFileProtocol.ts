@@ -12,8 +12,8 @@
  * 安全约束
  * ────────
  * - 协议 URL 必须是 base64 编码的绝对路径，避免编码歧义。
- * - 路径必须落在白名单目录（userData、临时目录、已登记 workspace / canvas 项目根目录）下，
- *   防止越权读用户项目之外的 home/系统盘文件。
+ * - 路径只允许落在应用自有媒体目录或 Canvas 项目的 assets/thumbnails 子目录，
+ *   不把整个 userData、temp、workspace 或项目根暴露给 renderer。
  * - 协议在 `registerSafeFileSchemes()` 阶段被声明为 `standard/secure/supportFetchAPI`，
  *   与 `file://` 同等安全等级。
  *
@@ -27,9 +27,10 @@
 import { app, protocol } from 'electron'
 import { createLogger } from '@spark/shared'
 import { createReadStream, existsSync, statSync } from 'node:fs'
-import { resolve as resolvePath, isAbsolute, sep, extname } from 'node:path'
+import { resolve as resolvePath, isAbsolute, extname, join } from 'node:path'
 import { Readable } from 'node:stream'
 import { getDatabase } from '../db.js'
+import { isCanonicalPathSameOrChild } from './FilePathBoundary.js'
 
 const log = createLogger('safe-file')
 
@@ -60,88 +61,38 @@ const MIME_BY_EXT: Record<string, string> = {
  * 路径白名单根目录集合。
  *
  * 渲染进程通过 `safe-file://...` 只能读取以下目录下的文件：
- *   - userData（应用数据目录，包含 no-project 的 .spark-artifacts 等生成图片）
- *   - 系统临时目录（粘贴图片、预览副本等）
- *   - 已登记 workspace 根目录（项目里的任意文件，供内置文档/图片预览读取；
- *     .spark-artifacts 生成图片作为子目录天然包含在内）
- *   - canvas 项目根目录
+ *   - 应用自有的 .spark-artifacts/media 目录
+ *   - 活跃 Canvas 项目的 assets / thumbnails 子目录
  *
  * 任何落在白名单之外的请求都会被拒绝（返回 403）。
  */
 export function getSafeFileAllowedRoots(): string[] {
   const roots: string[] = []
   try {
-    roots.push(resolvePath(app.getPath('userData')))
+    roots.push(resolvePath(app.getPath('userData'), '.spark-artifacts', 'media'))
   } catch (err) {
     log.warn(`Failed to resolve userData path: ${String(err)}`)
   }
-  try {
-    roots.push(resolvePath(app.getPath('temp')))
-  } catch (err) {
-    log.warn(`Failed to resolve temp path: ${String(err)}`)
-  }
-  roots.push(...getWorkspaceRoots())
-  roots.push(...getCanvasProjectRoots())
+  roots.push(...getCanvasProjectMediaRoots())
   return [...new Set(roots)]
 }
 
-/**
- * 已登记（未归档）workspace 的根目录集合。
- *
- * 内置文档/图片预览需要读取项目里的任意文件（PDF、docx、图片等），因此整体放行
- * workspace 根目录，而非只放行 .spark-artifacts 子目录。workspace 是用户主动登记的
- * 项目目录，agent 本就对其有完整读写权限，预览暴露给渲染进程不构成额外越权面；
- * 项目之外的 home/系统盘文件仍被拦截。
- */
-function getWorkspaceRoots(): string[] {
+function getCanvasProjectMediaRoots(): string[] {
   try {
-    const rows = getDatabase().raw
-      .prepare('SELECT root_path FROM workspaces WHERE archived_at IS NULL')
-      .all() as Array<{ root_path?: unknown }>
-    return rows
-      .map((row) => (typeof row.root_path === 'string' ? row.root_path : ''))
-      .filter((rootPath) => rootPath.length > 0)
-      .map((rootPath) => resolvePath(rootPath))
-  } catch {
-    // The protocol is registered before DB initialization; workspace roots become
-    // available on later requests after the database is ready.
-    return []
-  }
-}
-
-function getCanvasProjectRoots(): string[] {
-  const roots: string[] = []
-  try {
-    const settingsRows = getDatabase().raw
-      .prepare(`SELECT value FROM app_settings WHERE category = 'canvas' AND key = 'data'`)
-      .all() as Array<{ value?: unknown }>
-    for (const row of settingsRows) {
-      try {
-        const parsed = typeof row.value === 'string' ? JSON.parse(row.value) as { projectsRootPath?: unknown } : null
-        if (typeof parsed?.projectsRootPath === 'string' && parsed.projectsRootPath.trim().length > 0) {
-          roots.push(resolvePath(parsed.projectsRootPath))
-        }
-      } catch {
-        // Ignore malformed user settings; userData remains allowed.
-      }
-    }
-  } catch {
-    // app_settings may not exist during early startup/migration.
-  }
-  try {
-    const rows = getDatabase().raw
-      .prepare('SELECT root_path FROM canvas_projects WHERE root_path IS NOT NULL AND status != ?')
+    const rows = getDatabase()
+      .raw.prepare(
+        'SELECT root_path FROM canvas_projects WHERE root_path IS NOT NULL AND status != ?',
+      )
       .all('deleted') as Array<{ root_path?: unknown }>
-    roots.push(
-      ...rows
-        .map((row) => (typeof row.root_path === 'string' ? row.root_path : ''))
-        .filter((rootPath) => rootPath.length > 0)
-        .map((rootPath) => resolvePath(rootPath)),
-    )
+    return rows.flatMap((row) => {
+      const rootPath = typeof row.root_path === 'string' ? row.root_path.trim() : ''
+      if (!rootPath) return []
+      return [resolvePath(join(rootPath, 'assets')), resolvePath(join(rootPath, 'thumbnails'))]
+    })
   } catch {
     // canvas_projects/root_path may not exist until migrations complete.
+    return []
   }
-  return roots
 }
 
 /**
@@ -192,20 +143,9 @@ export function isSafeFilePathAllowed(absolutePath: string): boolean {
   const resolved = resolvePath(absolutePath)
   const allowedRoots = getSafeFileAllowedRoots()
   for (const root of allowedRoots) {
-    if (isSamePathOrChild(resolved, root)) return true
+    if (isCanonicalPathSameOrChild(resolved, root)) return true
   }
   return false
-}
-
-function isSamePathOrChild(targetPath: string, rootPath: string): boolean {
-  const resolvedTarget = normalizePathForCompare(resolvePath(targetPath))
-  const resolvedRoot = normalizePathForCompare(resolvePath(rootPath))
-  if (resolvedTarget === resolvedRoot) return true
-  return resolvedTarget.startsWith(resolvedRoot + sep)
-}
-
-function normalizePathForCompare(filePath: string): string {
-  return process.platform === 'win32' ? filePath.toLowerCase() : filePath
 }
 
 /**
@@ -316,9 +256,12 @@ export function createSafeFileResponse(absolutePath: string, request: Request): 
   }
   if (range) headers['content-range'] = `bytes ${start}-${end}/${size}`
 
-  const body = request.method === 'HEAD'
-    ? null
-    : Readable.toWeb(createReadStream(absolutePath, { start, end })) as unknown as ConstructorParameters<typeof Response>[0]
+  const body =
+    request.method === 'HEAD'
+      ? null
+      : (Readable.toWeb(
+          createReadStream(absolutePath, { start, end }),
+        ) as unknown as ConstructorParameters<typeof Response>[0])
 
   return new Response(body, {
     status: range ? 206 : 200,

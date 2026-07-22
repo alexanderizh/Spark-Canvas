@@ -19,12 +19,14 @@
  *
  * 配置来自环境变量（由 session.service 注入）：
  *   SPARK_PLATFORM_BRIDGE_PORT  PlatformBridgeService 端口（必需，与 platform-management MCP 同源）
+ *   SPARK_MEMORY_BRIDGE_TOKEN   session-scoped bearer token（必需）
  *   SPARK_MEMORY_SID            本对话对应的 spark 会话 id（必需，用于解析 scope 集合）
  */
 import readline from 'node:readline'
 
 const env = process.env
 const PORT = Number.parseInt(env.SPARK_PLATFORM_BRIDGE_PORT || '', 10) || 0
+const TOKEN = (env.SPARK_MEMORY_BRIDGE_TOKEN || '').trim()
 const SID = (env.SPARK_MEMORY_SID || '').trim()
 const BASE = PORT ? `http://127.0.0.1:${PORT}` : ''
 
@@ -41,11 +43,17 @@ function error(id, code, message) {
 
 // ── HTTP bridge to PlatformBridgeService ────────────────────────────────────
 async function rpc(method, params) {
-  if (!BASE) throw new Error('Platform bridge port not configured (SPARK_PLATFORM_BRIDGE_PORT missing)')
+  if (!BASE)
+    throw new Error('Platform bridge port not configured (SPARK_PLATFORM_BRIDGE_PORT missing)')
+  if (!TOKEN)
+    throw new Error('Platform bridge token not configured (SPARK_MEMORY_BRIDGE_TOKEN missing)')
   if (!SID) throw new Error('Session id not configured (SPARK_MEMORY_SID missing)')
   const res = await fetch(`${BASE}/rpc`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${TOKEN}`,
+    },
     body: JSON.stringify({ method, params }),
   })
   const text = await res.text()
@@ -107,7 +115,9 @@ const TOOLS = [
       '读取一条长期记忆的完整正文（含 Why / How to apply）。传入 search_memory 返回或 system prompt 摘要里方括号内的 id。',
     inputSchema: {
       type: 'object',
-      properties: { id: { type: 'string', description: '记忆条目 id（search_memory 返回的方括号内值）。' } },
+      properties: {
+        id: { type: 'string', description: '记忆条目 id（search_memory 返回的方括号内值）。' },
+      },
       required: ['id'],
     },
   },

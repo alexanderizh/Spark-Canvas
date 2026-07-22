@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
   ProviderEditPanel,
+  getMediaRequestPreviewUrl,
   resolveCodexApiKind,
   resolveProviderCardKind,
   sortProviderProfilesForCards,
@@ -365,7 +366,7 @@ describe('ProviderEditPanel progressive configuration', () => {
     expect(container.textContent).toContain('deepseek:avatar')
   })
 
-  it('keeps template-derived media controls collapsed until requested', async () => {
+  it('keeps template-derived media routing read-only until converted to custom configuration', async () => {
     await act(async () => {
       root = createRoot(container)
       root.render(
@@ -388,8 +389,22 @@ describe('ProviderEditPanel progressive configuration', () => {
 
     act(() => toggle?.click())
 
+    expect(container.textContent).toContain('媒体调用配置')
+    expect(container.textContent).toContain('APIMart · auto 自动兼容')
+    expect(container.textContent).toContain('转为自定义配置')
+    expect(container.textContent).not.toContain('平台适配器')
+    expect(container.textContent).not.toContain('生图接口来源')
+
+    const convertButton = Array.from(container.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('转为自定义配置'),
+    )
+    expect(convertButton).toBeDefined()
+
+    act(() => convertButton?.click())
+
     expect(container.textContent).toContain('平台适配器')
-    expect(container.textContent).toContain('生图接口来源')
+    expect(container.textContent).toContain('调用方式')
+    expect(container.textContent).not.toContain('生图接口来源')
   })
 
   it('maps Volcengine Seedream template to Seedream image source before advanced settings are opened', async () => {
@@ -434,7 +449,7 @@ describe('ProviderEditPanel progressive configuration', () => {
     }))
   })
 
-  it('creates an editable manifest when a custom image model is added', async () => {
+  it('hides custom model input until the media flow is supported', async () => {
     await act(async () => {
       root = createRoot(container)
       root.render(
@@ -450,82 +465,8 @@ describe('ProviderEditPanel progressive configuration', () => {
     )
     act(() => advancedToggle?.click())
 
-    const adapterSelect = Array.from(container.querySelectorAll('select')).find((select) =>
-      select.querySelector('option[value="volcengine-ark"]'),
-    )
-    expect(adapterSelect).toBeDefined()
-    act(() => {
-      if (!adapterSelect) return
-      adapterSelect.value = 'custom'
-      adapterSelect.dispatchEvent(new Event('change', { bubbles: true }))
-    })
-
-    const modelInput = container.querySelector(
-      'input[placeholder*="nano-banana"]',
-    ) as HTMLInputElement | null
-    expect(modelInput).not.toBeNull()
-    act(() => {
-      if (!modelInput) return
-      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(
-        modelInput,
-        'studio-image-v1',
-      )
-      modelInput.dispatchEvent(new Event('input', { bubbles: true }))
-    })
-    const addButton = Array.from(container.querySelectorAll('button')).find(
-      (button) => button.textContent?.trim() === '添加',
-    )
-    act(() => addButton?.click())
-
-    expect(container.textContent).toContain('协议已配置')
-    const editButton = Array.from(container.querySelectorAll('button')).find((button) =>
-      button.textContent?.includes('编辑协议'),
-    )
-    act(() => editButton?.click())
-
-    const editor = container.querySelector(
-      'textarea[aria-label="自定义模型 Manifest JSON"]',
-    ) as HTMLTextAreaElement | null
-    expect(editor?.value).toContain('"endpoint": "/images/generations"')
-    expect(editor?.value).toContain('"image.generate"')
-
-    const saveManifestButton = Array.from(container.querySelectorAll('button')).find((button) =>
-      button.textContent?.includes('检查并保存'),
-    )
-    act(() => saveManifestButton?.click())
-
-    const apiKeyInput = container.querySelector(
-      'input[placeholder="媒体平台 API Key"]',
-    ) as HTMLInputElement | null
-    expect(apiKeyInput).not.toBeNull()
-    act(() => {
-      if (!apiKeyInput) return
-      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(
-        apiKeyInput,
-        'sk-studio',
-      )
-      apiKeyInput.dispatchEvent(new Event('input', { bubbles: true }))
-    })
-
-    const saveButton = Array.from(container.querySelectorAll('button')).find(
-      (button) => button.textContent?.trim() === '保存',
-    )
-    await act(async () => {
-      saveButton?.click()
-      await new Promise((resolve) => window.setTimeout(resolve, 10))
-    })
-
-    const createProvider = mocks.invokers.get('provider:create')
-    expect(createProvider).toHaveBeenCalledWith(expect.objectContaining({
-      mediaModelRefs: expect.arrayContaining([
-        expect.objectContaining({
-          manifest: expect.objectContaining({
-            id: 'custom:studio-image-v1',
-            invocation: expect.objectContaining({ endpoint: '/images/generations' }),
-          }),
-        }),
-      ]),
-    }))
+    expect(container.textContent).not.toContain('添加自定义模型')
+    expect(container.querySelector('input[placeholder*="nano-banana"]')).toBeNull()
   })
 
   it('preserves Agnes media refs when saving a multimodal preset', async () => {
@@ -1071,5 +1012,32 @@ describe('sortProviderProfilesForCards', () => {
       localCli,
       custom,
     ])
+  })
+})
+
+describe('getMediaRequestPreviewUrl', () => {
+  const baseUrl = 'https://dashscope.aliyuncs.com/api/v1/services/aigc'
+  type MediaProvider = Parameters<typeof getMediaRequestPreviewUrl>[2]
+  const preview = (modelType: 'image' | 'video', mediaProvider: MediaProvider) =>
+    getMediaRequestPreviewUrl(
+      baseUrl,
+      { modelType, defaultModel: '', mediaCapabilities: [] },
+      mediaProvider,
+    )
+
+  it('uses the native DashScope endpoints for Bailian media', () => {
+    expect(preview('image', 'bailian')).toBe(`${baseUrl}/multimodal-generation/generation`)
+    expect(preview('video', 'bailian')).toBe(`${baseUrl}/video-generation/video-synthesis`)
+  })
+
+  it('keeps provider-specific image and video endpoint previews', () => {
+    expect(preview('image', 'apimart')).toBe(`${baseUrl}/images/generations`)
+    expect(preview('video', 'xai')).toBe(`${baseUrl}/videos/generations`)
+    expect(preview('image', 'google-generative-ai')).toBe(`${baseUrl}/interactions`)
+    expect(preview('video', 'volcengine-ark')).toBe(
+      `${baseUrl}/contents/generations/tasks`,
+    )
+    expect(preview('video', 'agnes')).toBe(`${baseUrl}/videos`)
+    expect(preview('image', 'midjourney')).toBe(`${baseUrl}/imagine`)
   })
 })

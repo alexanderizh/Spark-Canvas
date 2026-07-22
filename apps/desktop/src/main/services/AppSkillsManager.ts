@@ -15,11 +15,22 @@
  */
 
 import { app } from 'electron'
-import { existsSync, mkdirSync, cpSync, lstatSync, readdirSync, readlinkSync, rmSync, symlinkSync, statSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  cpSync,
+  lstatSync,
+  readdirSync,
+  readlinkSync,
+  rmSync,
+  symlinkSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs'
 import { homedir } from 'node:os'
 import { join, basename, resolve } from 'node:path'
 import { is } from '@electron-toolkit/utils'
-import { createLogger } from '@spark/shared'
+import { APP_NAME, createLogger } from '@spark/shared'
 
 const log = createLogger('AppSkillsManager')
 
@@ -75,10 +86,7 @@ export class AppSkillsManager {
   /** 宿主机上 Claude / Codex 的技能目录（自动软链导入的来源） */
   getHostSkillRoots(): string[] {
     const home = homedir()
-    return [
-      join(home, '.claude', 'skills'),
-      join(home, '.codex', 'skills'),
-    ]
+    return [join(home, '.claude', 'skills'), join(home, '.codex', 'skills')]
   }
 
   // ─── Host Auto-Import ──────────────────────────────────────────────
@@ -91,7 +99,11 @@ export class AppSkillsManager {
    *
    * @returns 本次有效的链接路径列表（供上层登记到数据库）
    */
-  autoImportHostSkills(): Array<{ linkPath: string; targetPath: string; source: 'claude' | 'codex' }> {
+  autoImportHostSkills(): Array<{
+    linkPath: string
+    targetPath: string
+    source: 'claude' | 'codex'
+  }> {
     const results: Array<{ linkPath: string; targetPath: string; source: 'claude' | 'codex' }> = []
     const roots: Array<{ root: string; source: 'claude' | 'codex' }> = [
       { root: join(homedir(), '.claude', 'skills'), source: 'claude' },
@@ -152,7 +164,8 @@ export class AppSkillsManager {
     const metaDir = join(this.managedPluginDir, '.claude-plugin')
     // 全量重建，确保禁用/卸载的技能不残留
     try {
-      if (existsSync(this.managedPluginDir)) rmSync(this.managedPluginDir, { recursive: true, force: true })
+      if (existsSync(this.managedPluginDir))
+        rmSync(this.managedPluginDir, { recursive: true, force: true })
     } catch {
       // 忽略，下面继续尝试创建
     }
@@ -165,7 +178,7 @@ export class AppSkillsManager {
         {
           name: 'spark-managed-skills',
           version: '1.0.0',
-          description: 'SparkWork 托管技能集合（内置 / 应用内安装 / 宿主软链）',
+          description: `${APP_NAME} 托管技能集合（内置 / 应用内安装 / 宿主软链）`,
         },
         null,
         2,
@@ -333,7 +346,7 @@ export class AppSkillsManager {
     const linkPath = join(this.linksDir, name)
     if (!existsSync(linkPath)) return null
     try {
-      return resolve(lstatSync(linkPath).isSymbolicLink() ? linkPath : null as unknown as string)
+      return resolve(lstatSync(linkPath).isSymbolicLink() ? linkPath : (null as unknown as string))
     } catch {
       return null
     }

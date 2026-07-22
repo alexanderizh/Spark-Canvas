@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
@@ -18,7 +18,7 @@
       http-equiv="Content-Security-Policy"
       content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: safe-file: https: http: blob:; media-src 'self' data: safe-file: https: http: blob:; connect-src 'self' safe-file:; frame-src 'self' safe-file:"
     />
-    <title>SparkWork</title>
+    <title>Spark Canvas</title>
     <!--
       首帧防白闪：
       macOS 启动窗口为 transparent（vibrancy 毛玻璃所需），React 挂载前 html/data-theme
@@ -28,9 +28,17 @@
       React 挂载后由 AppContext 设置 html[data-theme]，主题变量接管，此规则被覆盖。
     -->
     <style>
-      html, body { margin: 0; padding: 0; background: #fdfdfc; }
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        background: #fdfdfc;
+      }
       @media (prefers-color-scheme: dark) {
-        html, body { background: #1f1f1f; }
+        html,
+        body {
+          background: #1f1f1f;
+        }
       }
     </style>
   </head>

@@ -1,31 +1,24 @@
 #!/usr/bin/env node
 /**
- * Desktop CI: 把当前 matrix 的安装包元数据注册到 edu-server。
+ * Register one Spark Canvas matrix build as a v2 candidate release.
  *
- * 上游流程（workflow 中已完成）：
- *   1. electron-builder --publish always         → 推 GitHub Release（保留）
- *   2. aws s3 cp apps/desktop/dist/ s3://...     → 上传到 MinIO 公网桶
- *   3. node apps/desktop/scripts/register-release.mjs  ← 本脚本
+ * Required environment variables:
+ *   PRODUCT                    must be spark-canvas
+ *   VERSION                    semantic version (for example 1.4.2)
+ *   PLATFORM                   mac | win | linux
+ *   ARCH                       arm64 | x64 | universal
+ *   COMMIT                     source commit for the built artifact
+ *   RELEASE_API_BASE           shared version-center base URL
+ *   RELEASE_CI_TOKEN           scoped v2 CI token
+ *   RELEASE_MANIFEST_SHA256    approved release-manifest digest
+ *   SIGNATURE_EVIDENCE_DIGEST  approved signature-evidence digest
  *
- * 本脚本职责：
- *   - 扫 dist/，找出当前 matrix (PLATFORM, ARCH) 对应的安装包 + 可选 blockmap
- *   - 计算 sha512（base64）
- *   - POST /api/v1/ci/desktop/releases/register（带 X-Release-Token）
+ * Optional:
+ *   CHANNEL                    defaults to stable
+ *   DIST_DIR                   defaults to apps/desktop/dist
  *
- * 必填环境变量：
- *   VERSION              语义化版本（如 1.4.2）
- *   PLATFORM             mac | win | linux （electron-builder os 值）
- *   ARCH                 arm64 | x64 | universal
- *   RELEASE_API_BASE     edu-server 公网地址（例 https://spark.yiqibyte.com）
- *   RELEASE_CI_TOKEN     CI 鉴权 token（X-Release-Token header）
- *
- * 可选：
- *   CHANNEL              默认 stable
- *   DIST_DIR             默认 apps/desktop/dist
- *   RELEASE_OBJECT_PREFIX  MinIO 对象 key 前缀，默认 "{channel}/{version}"
- *   RELEASE_AUTO_PUBLISH  默认 true；false 时仅落草稿，待 admin 手动发布
- *
- * 失败行为：默认 retry 3 次后 exit 1（让 CI 标红）。
+ * The script never promotes or publishes a candidate. Promotion remains an
+ * explicit, approved server-side action after release evidence is complete.
  */
 import { createHash } from 'node:crypto'
 import { createReadStream } from 'node:fs'
@@ -33,89 +26,151 @@ import { readdir, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 
 const tag = '[register-release]'
+const PRODUCT_ID = 'spark-canvas'
+const APP_ID = 'com.spark.canvas.desktop'
+const RELEASE_STATE = 'candidate'
+const INSTALLER_EXTS = new Set(['.dmg', '.exe', '.AppImage', '.zip', '.deb', '.rpm'])
 
 function required(name) {
-  const v = process.env[name]
-  if (!v) {
+  const value = process.env[name]?.trim()
+  if (!value) {
     console.error(`${tag} missing required env: ${name}`)
     process.exit(1)
   }
-  return v
+  return value
+}
+
+function isEncodedDigest(value, byteLength) {
+  if (new RegExp(`^[a-fA-F0-9]{${byteLength * 2}}$`).test(value)) return true
+  const base64Length = Math.ceil(byteLength / 3) * 4
+  return (
+    value.length === base64Length &&
+    /^[A-Za-z0-9+/]+={0,2}$/.test(value) &&
+    Buffer.from(value, 'base64').byteLength === byteLength
+  )
+}
+
+const PRODUCT = required('PRODUCT')
+if (PRODUCT !== PRODUCT_ID) {
+  console.error(`${tag} PRODUCT must be ${PRODUCT_ID}`)
+  process.exit(1)
 }
 
 const VERSION = required('VERSION')
 const PLATFORM = required('PLATFORM').toLowerCase()
 const ARCH = required('ARCH').toLowerCase()
-const API_BASE = required('RELEASE_API_BASE').replace(/\/$/, '')
+const COMMIT = required('COMMIT')
+const rawApiBase = required('RELEASE_API_BASE')
+let apiBaseUrl
+try {
+  apiBaseUrl = new URL(rawApiBase)
+} catch {
+  console.error(`${tag} RELEASE_API_BASE must be credential-free HTTPS`)
+  process.exit(1)
+}
+if (
+  apiBaseUrl.protocol !== 'https:' ||
+  apiBaseUrl.username.length > 0 ||
+  apiBaseUrl.password.length > 0 ||
+  apiBaseUrl.search.length > 0 ||
+  apiBaseUrl.hash.length > 0
+) {
+  console.error(`${tag} RELEASE_API_BASE must be credential-free HTTPS`)
+  process.exit(1)
+}
+const API_BASE = apiBaseUrl.toString().replace(/\/+$/, '')
 const CI_TOKEN = required('RELEASE_CI_TOKEN')
-const CHANNEL = (process.env.CHANNEL || 'stable').toLowerCase()
+const RELEASE_MANIFEST_SHA256 = required('RELEASE_MANIFEST_SHA256')
+const SIGNATURE_EVIDENCE_DIGEST = required('SIGNATURE_EVIDENCE_DIGEST')
+const CHANNEL = (process.env.CHANNEL || 'stable').trim().toLowerCase()
 const DIST_DIR = process.env.DIST_DIR || 'apps/desktop/dist'
-const OBJECT_PREFIX = (
-  process.env.RELEASE_OBJECT_PREFIX || `${CHANNEL}/${VERSION}`
-).replace(/^\/+|\/+$/g, '')
-const AUTO_PUBLISH = (process.env.RELEASE_AUTO_PUBLISH || 'true').toLowerCase() !== 'false'
+const OBJECT_PREFIX = `${PRODUCT_ID}/${RELEASE_STATE}/${CHANNEL}/${VERSION}`
 
-const INSTALLER_EXTS = ['.dmg', '.exe', '.AppImage', '.zip', '.deb', '.rpm']
+if (!isEncodedDigest(RELEASE_MANIFEST_SHA256, 32)) {
+  console.error(`${tag} RELEASE_MANIFEST_SHA256 must be a 256-bit digest`)
+  process.exit(1)
+}
+if (!isEncodedDigest(SIGNATURE_EVIDENCE_DIGEST, 32)) {
+  console.error(`${tag} SIGNATURE_EVIDENCE_DIGEST must be a 256-bit digest`)
+  process.exit(1)
+}
+
+if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.test(VERSION)) {
+  console.error(`${tag} VERSION must use semantic versioning`)
+  process.exit(1)
+}
+if (!['mac', 'win', 'linux'].includes(PLATFORM)) {
+  console.error(`${tag} unsupported PLATFORM: ${PLATFORM}`)
+  process.exit(1)
+}
+if (!['arm64', 'x64', 'universal'].includes(ARCH)) {
+  console.error(`${tag} unsupported ARCH: ${ARCH}`)
+  process.exit(1)
+}
+if (!/^[a-z0-9][a-z0-9-]*$/.test(CHANNEL)) {
+  console.error(`${tag} CHANNEL must be a lowercase release channel name`)
+  process.exit(1)
+}
 
 async function listDistFiles() {
   const entries = await readdir(DIST_DIR, { withFileTypes: true })
-  return entries.filter(e => e.isFile()).map(e => e.name)
+  return entries.filter(entry => entry.isFile()).map(entry => entry.name).sort()
 }
 
-/**
- * 匹配当前 matrix 的安装包。artifactName 模板：
- *   ${productName}-${version}-${os}-${arch}.${ext}
- * 例：`Spark Agent-1.4.2-mac-arm64.dmg`
- *
- * 用 "-{platform}-{arch}." 作为子串识别，避免硬编码 productName，
- * 同时兼容 productName 改名场景。
- */
-function pickInstallersFor(platform, arch, names) {
-  const tagSubstr = `-${platform}-${arch}.`.toLowerCase()
-  const out = []
-  for (const name of names) {
-    const lower = name.toLowerCase()
-    if (!lower.includes(tagSubstr)) continue
-    if (!INSTALLER_EXTS.some(ext => lower.endsWith(ext.toLowerCase()))) continue
-    const blockmap = `${name}.blockmap`
-    out.push({
-      fileName: name,
-      blockmap: names.includes(blockmap) ? blockmap : null,
-    })
-  }
-  return out
-}
-
-async function sha512Base64(absPath) {
-  return await new Promise((resolve, reject) => {
-    const hash = createHash('sha512')
-    const stream = createReadStream(absPath)
-    stream.on('error', reject)
-    stream.on('data', chunk => hash.update(chunk))
-    stream.on('end', () => resolve(hash.digest('base64')))
+function pickInstallers(platform, arch, names) {
+  const prefix = `Spark Canvas-${VERSION}-${platform}-${arch}`
+  return names.filter(name => {
+    if (!name.startsWith(`${prefix}.`)) return false
+    return INSTALLER_EXTS.has(name.slice(prefix.length))
   })
 }
 
-async function buildFileEntry({ fileName, blockmap }) {
+async function fileDigests(absPath) {
+  return await new Promise((resolve, reject) => {
+    const sha256 = createHash('sha256')
+    const sha512 = createHash('sha512')
+    const stream = createReadStream(absPath)
+    stream.on('error', reject)
+    stream.on('data', chunk => {
+      sha256.update(chunk)
+      sha512.update(chunk)
+    })
+    stream.on('end', () => {
+      resolve({
+        sha256: sha256.digest('hex'),
+        sha512: sha512.digest('base64'),
+      })
+    })
+  })
+}
+
+async function buildFileEntry(fileName) {
   const absPath = join(DIST_DIR, fileName)
-  const [hash, fileStat] = await Promise.all([
-    sha512Base64(absPath),
-    stat(absPath),
-  ])
+  const [digests, fileStat] = await Promise.all([fileDigests(absPath), stat(absPath)])
+  if (!fileStat.isFile() || fileStat.size <= 0) {
+    throw new Error(`installer must be a non-empty file: ${fileName}`)
+  }
   return {
     platform: PLATFORM,
     arch: ARCH,
     fileName,
     fileSize: fileStat.size,
-    sha512: hash,
+    sha256: digests.sha256,
+    sha512: digests.sha512,
     objectKey: `${OBJECT_PREFIX}/${fileName}`,
-    blockmapKey: blockmap ? `${OBJECT_PREFIX}/${blockmap}` : null,
+    signatureEvidenceDigest: SIGNATURE_EVIDENCE_DIGEST,
   }
 }
 
+function idempotencyDigest(files) {
+  if (files.length === 1) return files[0].sha256
+  const artifactSet = files.map(file => `${file.fileName}:${file.sha256}`).sort().join('\n')
+  return createHash('sha256').update(artifactSet).digest('hex')
+}
+
 async function postRegister(body) {
-  const url = `${API_BASE}/api/v1/ci/desktop/releases/register`
-  const res = await fetch(url, {
+  const url = `${API_BASE}/api/v2/ci/desktop/releases/register`
+  const response = await fetch(url, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -124,10 +179,11 @@ async function postRegister(body) {
     },
     body: JSON.stringify(body),
   })
-  const text = await res.text()
-  if (!res.ok) {
-    throw new Error(`HTTP ${res.status} ${res.statusText}: ${text.slice(0, 500)}`)
+  const text = await response.text()
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status} ${response.statusText}: ${text.slice(0, 500)}`)
   }
+
   let json
   try {
     json = JSON.parse(text)
@@ -141,56 +197,64 @@ async function postRegister(body) {
 }
 
 async function withRetry(fn, attempts = 3) {
-  let lastErr
-  for (let i = 1; i <= attempts; i++) {
+  let lastError
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
       return await fn()
-    } catch (e) {
-      lastErr = e
-      const wait = i * 2000
-      console.warn(`${tag} attempt ${i}/${attempts} failed: ${e instanceof Error ? e.message : e}`)
-      if (i < attempts) await new Promise(r => setTimeout(r, wait))
+    } catch (error) {
+      lastError = error
+      console.warn(
+        `${tag} attempt ${attempt}/${attempts} failed: ${error instanceof Error ? error.message : error}`,
+      )
+      if (attempt < attempts) {
+        await new Promise(resolve => setTimeout(resolve, attempt * 2000))
+      }
     }
   }
-  throw lastErr
+  throw lastError
 }
 
 async function main() {
   console.log(
-    `${tag} version=${VERSION} channel=${CHANNEL} platform=${PLATFORM} arch=${ARCH} prefix=${OBJECT_PREFIX} autoPublish=${AUTO_PUBLISH}`,
+    `${tag} product=${PRODUCT_ID} state=${RELEASE_STATE} version=${VERSION} channel=${CHANNEL} platform=${PLATFORM} arch=${ARCH} prefix=${OBJECT_PREFIX}`,
   )
 
   const names = await listDistFiles()
-  const matches = pickInstallersFor(PLATFORM, ARCH, names)
-  if (matches.length === 0) {
-    console.error(
-      `${tag} 没在 ${DIST_DIR} 找到匹配 -${PLATFORM}-${ARCH} 的安装包。dist 内容：\n  ${names.join('\n  ')}`,
+  const installers = pickInstallers(PLATFORM, ARCH, names)
+  if (installers.length === 0) {
+    const expected = `Spark Canvas-${VERSION}-${PLATFORM}-${ARCH}.<ext>`
+    throw new Error(
+      `no strict Spark Canvas installer found; expected ${expected}. dist contains:\n  ${names.join('\n  ')}`,
     )
-    process.exit(1)
   }
-  console.log(`${tag} matched installers: ${matches.map(m => m.fileName).join(', ')}`)
 
   const files = []
-  for (const m of matches) {
-    const entry = await buildFileEntry(m)
+  for (const fileName of installers) {
+    const entry = await buildFileEntry(fileName)
     console.log(
-      `${tag}   - ${entry.fileName} size=${entry.fileSize} sha512=${entry.sha512.slice(0, 16)}…`,
+      `${tag} file=${entry.fileName} size=${entry.fileSize} sha256=${entry.sha256.slice(0, 16)}... sha512=${entry.sha512.slice(0, 16)}...`,
     )
     files.push(entry)
   }
 
   const body = {
+    schemaVersion: 2,
+    product: PRODUCT_ID,
+    appId: APP_ID,
     version: VERSION,
     channel: CHANNEL,
+    releaseState: RELEASE_STATE,
+    commit: COMMIT,
+    releaseManifestSha256: RELEASE_MANIFEST_SHA256,
+    idempotencyKey: `${PRODUCT_ID}:${CHANNEL}:${VERSION}:${PLATFORM}:${ARCH}:${idempotencyDigest(files)}`,
     files,
-    autoPublish: AUTO_PUBLISH,
   }
 
   const result = await withRetry(() => postRegister(body), 3)
-  console.log(`${tag} registered ok: ${JSON.stringify(result.data)}`)
+  console.log(`${tag} registered candidate: ${JSON.stringify(result.data)}`)
 }
 
-main().catch(err => {
-  console.error(`${tag} fatal:`, err instanceof Error ? err.stack : err)
+main().catch(error => {
+  console.error(`${tag} fatal:`, error instanceof Error ? error.stack : error)
   process.exit(1)
 })

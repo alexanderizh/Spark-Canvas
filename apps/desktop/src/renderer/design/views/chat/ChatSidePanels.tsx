@@ -2,11 +2,10 @@ import React, { useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { Icons } from '../../Icons'
 
-export type UnifiedSidePanelKind = 'config' | 'terminal' | 'side-chat' | 'review' | 'plan'
+export type UnifiedSidePanelKind = 'config' | 'side-chat' | 'review' | 'plan'
 
 const UNIFIED_SIDE_PANEL_QUICK_ITEMS: UnifiedSidePanelKind[] = [
   'config',
-  'terminal',
   'side-chat',
   'review',
   'plan',
@@ -35,13 +34,6 @@ const getUnifiedSidePanelMeta = (
       title: '计划面板',
       shortcutLabel: '打开计划面板',
       icon: <Icons.Check size={14} />,
-    }
-  if (kind === 'terminal')
-    return {
-      label: '终端',
-      title: '终端',
-      shortcutLabel: '打开终端面板',
-      icon: <Icons.Terminal size={14} />,
     }
   return {
     label: '侧边聊天',

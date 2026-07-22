@@ -23,7 +23,12 @@ describe('spark_platform MCP server', () => {
     const node = existsSync(process.execPath) ? process.execPath : 'node'
     return spawn(node, [SERVER], {
       cwd: path.resolve('..', 'agent-runtime'),
-      env: { ...process.env, SPARK_PLATFORM_BRIDGE_PORT: '0', ...env },
+      env: {
+        ...process.env,
+        SPARK_PLATFORM_BRIDGE_PORT: '0',
+        SPARK_PLATFORM_MANAGEMENT_BRIDGE_TOKEN: 'platform-test-token',
+        ...env,
+      },
     })
   }
 
@@ -38,46 +43,54 @@ describe('spark_platform MCP server', () => {
     expect([...allowedNames].sort()).toEqual(
       toolNames.map((name) => `mcp__spark_platform__${name}`).sort(),
     )
-    expect(toolNames).toEqual(expect.arrayContaining([
-      'skills_load',
-      'skills_search_github',
-      'skills_install_github',
-      'artifacts_list',
-      'artifacts_resolve',
-      'teams_list',
-      'teams_get',
-      'teams_create',
-      'teams_update',
-      'teams_delete',
-    ]))
+    expect(toolNames).toEqual(
+      expect.arrayContaining([
+        'skills_load',
+        'skills_search_github',
+        'skills_install_github',
+        'artifacts_list',
+        'artifacts_resolve',
+        'teams_list',
+        'teams_get',
+        'teams_create',
+        'teams_update',
+        'teams_delete',
+      ]),
+    )
   })
 
   it('responds to optional MCP resource and prompt list methods without hanging', async () => {
     child = start()
 
-    await expect(callMcp(child, {
-      jsonrpc: '2.0',
-      id: 10,
-      method: 'resources/list',
-    })).resolves.toEqual({
+    await expect(
+      callMcp(child, {
+        jsonrpc: '2.0',
+        id: 10,
+        method: 'resources/list',
+      }),
+    ).resolves.toEqual({
       jsonrpc: '2.0',
       id: 10,
       result: { resources: [] },
     })
-    await expect(callMcp(child, {
-      jsonrpc: '2.0',
-      id: 11,
-      method: 'resources/templates/list',
-    })).resolves.toEqual({
+    await expect(
+      callMcp(child, {
+        jsonrpc: '2.0',
+        id: 11,
+        method: 'resources/templates/list',
+      }),
+    ).resolves.toEqual({
       jsonrpc: '2.0',
       id: 11,
       result: { resourceTemplates: [] },
     })
-    await expect(callMcp(child, {
-      jsonrpc: '2.0',
-      id: 12,
-      method: 'prompts/list',
-    })).resolves.toEqual({
+    await expect(
+      callMcp(child, {
+        jsonrpc: '2.0',
+        id: 12,
+        method: 'prompts/list',
+      }),
+    ).resolves.toEqual({
       jsonrpc: '2.0',
       id: 12,
       result: { prompts: [] },
@@ -86,23 +99,27 @@ describe('spark_platform MCP server', () => {
 
   it('routes team tool calls to the platform bridge', async () => {
     let lastRpc: { method?: string; params?: unknown } | null = null
+    let lastAuthorization = ''
     bridge = createServer((req, res) => {
+      lastAuthorization = req.headers.authorization ?? ''
       const chunks: Buffer[] = []
       req.on('data', (chunk) => chunks.push(Buffer.from(chunk)))
       req.on('end', () => {
         lastRpc = JSON.parse(Buffer.concat(chunks).toString('utf8'))
         res.writeHead(200, { 'content-type': 'application/json' })
-        res.end(JSON.stringify({
-          ok: true,
-          data: {
-            team: {
-              id: 'team-1',
-              name: '研发协作团队',
-              hostAgentId: 'platform-manager-agent',
-              memberAgentIds: ['fullstack-coding-agent'],
+        res.end(
+          JSON.stringify({
+            ok: true,
+            data: {
+              team: {
+                id: 'team-1',
+                name: '研发协作团队',
+                hostAgentId: 'platform-manager-agent',
+                memberAgentIds: ['fullstack-coding-agent'],
+              },
             },
-          },
-        }))
+          }),
+        )
       })
     })
     const port = await new Promise<number>((resolve) => {
@@ -129,6 +146,7 @@ describe('spark_platform MCP server', () => {
     })
 
     expect(res.error).toBeUndefined()
+    expect(lastAuthorization).toBe('Bearer platform-test-token')
     expect(lastRpc).toMatchObject({
       method: 'teams.create',
       params: {
@@ -147,16 +165,18 @@ describe('spark_platform MCP server', () => {
       req.on('end', () => {
         lastRpc = JSON.parse(Buffer.concat(chunks).toString('utf8'))
         res.writeHead(200, { 'content-type': 'application/json' })
-        res.end(JSON.stringify({
-          ok: true,
-          data: {
-            artifact: {
-              id: 'runtime.python-3.11.9.win32-x64',
-              type: 'runtime',
-              url: 'https://minio.yiqibyte.com/spark-desktop/artifact-repository/v1/runtimes/python/python-3.11.9-amd64.exe',
+        res.end(
+          JSON.stringify({
+            ok: true,
+            data: {
+              artifact: {
+                id: 'runtime.python-3.11.9.win32-x64',
+                type: 'runtime',
+                url: 'https://minio.yiqibyte.com/spark-desktop/artifact-repository/v1/runtimes/python/python-3.11.9-amd64.exe',
+              },
             },
-          },
-        }))
+          }),
+        )
       })
     })
     const port = await new Promise<number>((resolve) => {

@@ -235,7 +235,7 @@ export function CanvasProjectsView({
   const handleDeleteProject = async (projectId: string) => {
     AntdModal.confirm({
       title: '删除 Canvas 项目？',
-      content: '项目会被标记为删除，后续可接入恢复机制。',
+      content: '项目会从列表中隐藏，项目文件夹会保留。需要时可通过“导入项目”重新接入。',
       okText: '删除',
       cancelText: '取消',
       okButtonProps: { danger: true },
@@ -246,7 +246,7 @@ export function CanvasProjectsView({
     })
   }
 
-  const handleImportProject = async () => {
+  const handleImportProject = async (mode: 'package' | 'legacy-json') => {
     setImporting(true)
     try {
       let targetParentDirectory = ''
@@ -255,16 +255,39 @@ export function CanvasProjectsView({
       } catch {
         targetParentDirectory = ''
       }
-      const selectedDirectory = await window.spark.invoke('dialog:open-directory', {
-        title: '选择导入项目保存位置',
-        ...(targetParentDirectory ? { defaultPath: targetParentDirectory } : {}),
-      })
-      if (!selectedDirectory.canceled && selectedDirectory.filePath) {
-        targetParentDirectory = selectedDirectory.filePath
+      let snapshot
+      if (mode === 'package') {
+        const selectedPackage = await window.spark.invoke('dialog:open-directory', {
+          title: '选择 Spark Canvas 项目包目录',
+        })
+        if (selectedPackage.canceled || !selectedPackage.filePath) return
+        snapshot = await canvasApi.importProjectFromDirectory(
+          selectedPackage.filePath,
+          targetParentDirectory || undefined,
+        )
+      } else {
+        const selectedDirectory = await window.spark.invoke('dialog:open-directory', {
+          title: '选择导入项目保存位置',
+          ...(targetParentDirectory ? { defaultPath: targetParentDirectory } : {}),
+        })
+        if (!selectedDirectory.canceled && selectedDirectory.filePath) {
+          targetParentDirectory = selectedDirectory.filePath
+        }
+        snapshot = await canvasApi.importProjectFromFile(targetParentDirectory || undefined)
       }
-      const snapshot = await canvasApi.importProjectFromFile(targetParentDirectory || undefined)
       if (!snapshot) return
-      message.success(`已导入「${snapshot.project.title}」`)
+      const importWarnings = Array.isArray(snapshot.project.metadata?.importWarnings)
+        ? snapshot.project.metadata.importWarnings.filter(
+            (warning): warning is string => typeof warning === 'string',
+          )
+        : []
+      if (importWarnings.length > 0) {
+        message.warning(
+          `已导入「${snapshot.project.title}」，有 ${importWarnings.length} 条兼容提示`,
+        )
+      } else {
+        message.success(`已导入「${snapshot.project.title}」`)
+      }
       await refresh()
       await handleOpenProject(snapshot.project.id)
     } catch (error) {
@@ -304,15 +327,30 @@ export function CanvasProjectsView({
           <p>以项目为入口管理无限画布、素材、任务和生成血缘。</p>
         </div>
         <div className="canvas-projects-header-actions">
-          <Button
-            size="medium"
-            type="text"
-            icon={<Icons.Upload size={15} />}
-            loading={importing}
-            onClick={() => void handleImportProject()}
+          <Dropdown
+            trigger={['click']}
+            menu={{
+              items: [
+                {
+                  key: 'package',
+                  label: '导入目录项目包',
+                  icon: <Icons.FolderOpen size={14} />,
+                  onClick: () => void handleImportProject('package'),
+                },
+                {
+                  key: 'legacy-json',
+                  label: '导入旧 JSON 快照',
+                  icon: <Icons.FileText size={14} />,
+                  onClick: () => void handleImportProject('legacy-json'),
+                },
+              ],
+            }}
           >
-            导入项目
-          </Button>
+            <Button size="medium" type="text" icon={<Icons.Upload size={15} />} loading={importing}>
+              导入项目
+              <Icons.ChevronDown size={13} />
+            </Button>
+          </Dropdown>
           <Button size="medium" type="primary" icon={<Icons.Plus size={15} />} onClick={openCreate}>
             新建项目
           </Button>

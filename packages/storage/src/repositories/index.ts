@@ -97,20 +97,6 @@ export type {
   UpdateAgentTeamParams,
   ListAgentTeamsParams,
 } from './team-definition.repository.js'
-export { ScheduledTaskRepository } from './scheduled-task.repository.js'
-export type {
-  ScheduledTaskRow,
-  CreateScheduledTaskParams,
-  UpdateScheduledTaskParams,
-  ScheduledTaskFilter,
-} from './scheduled-task.repository.js'
-export { TaskExecutionRepository } from './task-execution.repository.js'
-export type {
-  TaskExecutionRow,
-  CreateTaskExecutionParams,
-  ExecutionQueryOptions,
-  ExecutionStats,
-} from './task-execution.repository.js'
 export { MemoryRepository } from './memory.repository.js'
 export type { MemoryEntryRow, MemoryEntryInsert } from './memory.repository.js'
 export { MemorySearchRepository, upsertFtsRow, deleteFtsRow, ftsTableExists } from './memory-search.repository.js'

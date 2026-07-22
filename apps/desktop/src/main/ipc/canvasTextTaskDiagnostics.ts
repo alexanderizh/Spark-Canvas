@@ -1,28 +1,48 @@
-import {
-  ModelCapabilityRegistry,
-} from '@spark/shared'
+import { resolveModelContextWindow, resolveProviderContextWindow } from '@spark/shared'
 
-export const STORYBOARD_CONTEXT_DERIVED_MIN_MAX_TOKENS = 8_192
-export const STORYBOARD_CONTEXT_DERIVED_MAX_TOKENS_CAP = 65_536
-export const STORYBOARD_PROMPT_OVERHEAD_TOKENS = 2_048
-export const STORYBOARD_OUTPUT_RESERVE_TOKENS = 4_096
-export const GENERAL_CONTEXT_DERIVED_MIN_MAX_TOKENS = 8_192
-export const GENERAL_CONTEXT_DERIVED_MAX_TOKENS_CAP = 65_536
+/** 上下文只作越界保护，不再按窗口比例推导单次输出。 */
+export const CANVAS_TEXT_CONTEXT_SAFETY_TOKENS = 16_384
+
+export const CANVAS_TEXT_OUTPUT_TIERS = {
+  minimum: 16_384,
+  standard: 32_768,
+  long: 65_536,
+  explicitMaximum: 131_072,
+} as const
 
 export type CanvasTextMaxTokensSource =
   | 'request'
+  | 'learned_model_cap'
   | 'provider_profile'
-  | 'model_capability'
-  | 'context_window_derived'
+  | 'task_default'
+  | 'context_remaining'
+
+export class CanvasTextContextBudgetError extends Error {
+  readonly code = 'context_budget_exhausted'
+  readonly contextWindow: number
+  readonly promptTokensEstimate: number
+
+  constructor(contextWindow: number, promptTokensEstimate: number) {
+    super(
+      `画布文本输入已占满模型上下文（估算 ${promptTokensEstimate} / ${contextWindow} tokens），请减少输入或更换更大上下文模型。`,
+    )
+    this.name = 'CanvasTextContextBudgetError'
+    this.contextWindow = contextWindow
+    this.promptTokensEstimate = promptTokensEstimate
+  }
+}
 
 export type CanvasTextTokenBudget = {
-  maxTokens?: number
-  source?: CanvasTextMaxTokensSource
-  promptTokensEstimate?: number
+  maxTokens: number
+  source: CanvasTextMaxTokensSource
+  desiredMaxTokens: number
+  promptTokensEstimate: number
   providerMaxTokens?: number
-  providerContextWindow?: number
-  modelContextWindow?: number
-  modelMaxOutputTokens?: number
+  learnedMaxTokens?: number
+  providerContextWindow: number
+  contextWindow: number
+  remainingContextTokens: number
+  contextSafetyTokens: number
 }
 
 type CanvasTextRawResponseInput = {
@@ -31,106 +51,105 @@ type CanvasTextRawResponseInput = {
   providerName: string
   model: string
   apiKind: 'chat' | 'responses'
-  agentId?: string | null
-  agentName?: string | null
-  skillIds?: string[]
-  relationManifest?: unknown
-  taskPipelineRole?: string | null
-  outputText?: string
-  statusCode?: number
-  errorBody?: string
-  effectiveMaxTokens?: number
-  maxTokensSource?: CanvasTextMaxTokensSource
-  promptTokensEstimate?: number
-  providerMaxTokens?: number
-  providerContextWindow?: number
-  modelContextWindow?: number
-  modelMaxOutputTokens?: number
-  providerFinishReason?: string
-  usage?: { promptTokens?: number; completionTokens?: number; totalTokens?: number }
-  reasoningContentChars?: number
+  agentId?: string | null | undefined
+  agentName?: string | null | undefined
+  skillIds?: string[] | undefined
+  relationManifest?: unknown | undefined
+  taskPipelineRole?: string | null | undefined
+  outputText?: string | undefined
+  statusCode?: number | undefined
+  errorBody?: string | undefined
+  effectiveMaxTokens?: number | undefined
+  desiredMaxTokens?: number | undefined
+  maxTokensSource?: CanvasTextMaxTokensSource | undefined
+  promptTokensEstimate?: number | undefined
+  providerMaxTokens?: number | undefined
+  learnedMaxTokens?: number | undefined
+  providerContextWindow?: number | undefined
+  contextWindow?: number | undefined
+  remainingContextTokens?: number | undefined
+  contextSafetyTokens?: number | undefined
+  learnedOutputCap?: number | undefined
+  outputLimitRetryCount?: number | undefined
+  outputLimitAttempts?: number[] | undefined
+  outputLimitEvidence?: string | undefined
+  requestTimeoutMs?: number | undefined
+  providerFinishReason?: string | undefined
+  usage?: { promptTokens?: number; completionTokens?: number; totalTokens?: number } | undefined
+  reasoningContentChars?: number | undefined
 }
 
 export function resolveCanvasTextTokenBudget(input: {
-  requestedMaxTokens?: number
-  providerMaxTokens?: number
-  providerContextWindow?: number
-  providerSupportsMillionContext?: boolean
-  model?: string
-  taskPipelineRole?: string | null
+  operation?: string | undefined
+  modelId?: string | undefined
+  requestedMaxTokens?: number | undefined
+  providerMaxTokens?: number | undefined
+  learnedMaxTokens?: number | undefined
+  providerContextWindow?: number | undefined
+  providerSupportsMillionContext?: boolean | undefined
+  taskPipelineRole?: string | null | undefined
   prompt: string
+  systemPrompt?: string | undefined
 }): CanvasTextTokenBudget {
-  const requested = sanitizePositiveInteger(input.requestedMaxTokens)
-  if (requested != null) return { maxTokens: requested, source: 'request' }
-
+  const requestedValue = sanitizePositiveInteger(input.requestedMaxTokens)
+  const requested =
+    requestedValue == null
+      ? undefined
+      : Math.min(
+          CANVAS_TEXT_OUTPUT_TIERS.explicitMaximum,
+          Math.max(CANVAS_TEXT_OUTPUT_TIERS.minimum, requestedValue),
+        )
   const providerMaxTokens = sanitizePositiveInteger(input.providerMaxTokens)
-  const modelCapability =
-    typeof input.model === 'string' && input.model.trim().length > 0
-      ? ModelCapabilityRegistry.getCapabilities(input.model)
-      : undefined
-  const modelMaxOutputTokens = sanitizePositiveInteger(modelCapability?.maxOutputTokens)
-  const modelContextWindow = sanitizePositiveInteger(modelCapability?.contextWindow)
-  const providerContextWindow = sanitizePositiveInteger(
-    typeof input.providerContextWindow === 'number' && input.providerContextWindow > 0
-      ? input.providerContextWindow
-      : input.providerSupportsMillionContext === true
-        ? 1_000_000
-        : undefined,
+  const learnedMaxTokens = sanitizePositiveInteger(input.learnedMaxTokens)
+  const configuredContextWindow = sanitizePositiveInteger(input.providerContextWindow)
+  const providerContextWindow =
+    configuredContextWindow ??
+    (input.providerSupportsMillionContext === true
+      ? resolveProviderContextWindow(true)
+      : input.modelId?.trim()
+        ? resolveModelContextWindow(input.modelId)
+        : resolveProviderContextWindow())
+  const promptTokensEstimate = estimatePromptTokens(
+    [input.systemPrompt?.trim(), input.prompt.trim()].filter(Boolean).join('\n\n'),
   )
-  const promptTokensEstimate = estimatePromptTokens(input.prompt)
-
-  if (providerMaxTokens != null) {
-    return {
-      maxTokens: modelMaxOutputTokens != null
-        ? Math.min(providerMaxTokens, modelMaxOutputTokens)
-        : providerMaxTokens,
-      source: 'provider_profile',
-      promptTokensEstimate,
-      providerMaxTokens,
-      providerContextWindow,
-      modelContextWindow,
-      modelMaxOutputTokens,
-    }
+  const desiredMaxTokens =
+    requested ?? resolveTaskDefaultMaxTokens(input.operation, input.taskPipelineRole)
+  const remainingContextTokens =
+    providerContextWindow - promptTokensEstimate - CANVAS_TEXT_CONTEXT_SAFETY_TOKENS
+  if (remainingContextTokens <= 0) {
+    throw new CanvasTextContextBudgetError(providerContextWindow, promptTokensEstimate)
   }
-
-  if (modelMaxOutputTokens != null) {
-    return {
-      maxTokens: modelMaxOutputTokens,
-      source: 'model_capability',
-      promptTokensEstimate,
-      providerContextWindow,
-      modelContextWindow,
-      modelMaxOutputTokens,
-    }
-  }
-
-  const effectiveContextWindow = Math.max(providerContextWindow ?? 0, modelContextWindow ?? 0)
-  if (effectiveContextWindow <= 0) return {}
-  const isStoryboardTask = input.taskPipelineRole === 'shot'
-
-  const availableOutputTokens = effectiveContextWindow
-    - promptTokensEstimate
-    - STORYBOARD_PROMPT_OVERHEAD_TOKENS
-    - STORYBOARD_OUTPUT_RESERVE_TOKENS
+  const constraints: Array<{ value: number; source: CanvasTextMaxTokensSource }> = [
+    { value: desiredMaxTokens, source: requested != null ? 'request' : 'task_default' },
+    ...(learnedMaxTokens != null
+      ? [{ value: learnedMaxTokens, source: 'learned_model_cap' as const }]
+      : []),
+    ...(providerMaxTokens != null
+      ? [{ value: providerMaxTokens, source: 'provider_profile' as const }]
+      : []),
+    { value: remainingContextTokens, source: 'context_remaining' },
+  ]
+  const effective = constraints.reduce((smallest, item) =>
+    item.value < smallest.value ? item : smallest,
+  )
 
   return {
-    maxTokens: clamp(
-      availableOutputTokens,
-      isStoryboardTask
-        ? STORYBOARD_CONTEXT_DERIVED_MIN_MAX_TOKENS
-        : GENERAL_CONTEXT_DERIVED_MIN_MAX_TOKENS,
-      isStoryboardTask
-        ? STORYBOARD_CONTEXT_DERIVED_MAX_TOKENS_CAP
-        : GENERAL_CONTEXT_DERIVED_MAX_TOKENS_CAP,
-    ),
-    source: 'context_window_derived',
+    maxTokens: effective.value,
+    source: effective.source,
+    desiredMaxTokens,
     promptTokensEstimate,
     providerContextWindow,
-    modelContextWindow,
+    contextWindow: providerContextWindow,
+    remainingContextTokens,
+    contextSafetyTokens: CANVAS_TEXT_CONTEXT_SAFETY_TOKENS,
+    ...(providerMaxTokens != null ? { providerMaxTokens } : {}),
+    ...(learnedMaxTokens != null ? { learnedMaxTokens } : {}),
   }
 }
 
-export function resolveCanvasTextMaxTokens(input: Parameters<typeof resolveCanvasTextTokenBudget>[0]): number | undefined {
+export function resolveCanvasTextMaxTokens(
+  input: Parameters<typeof resolveCanvasTextTokenBudget>[0],
+): number | undefined {
   return resolveCanvasTextTokenBudget(input).maxTokens
 }
 
@@ -151,15 +170,43 @@ export function buildCanvasTextRawResponse(
     ...(input.errorBody !== undefined ? { errorBody: input.errorBody } : {}),
     ...(input.outputText !== undefined ? { outputText: input.outputText } : {}),
     ...(input.effectiveMaxTokens !== undefined ? { maxTokens: input.effectiveMaxTokens } : {}),
+    ...(input.desiredMaxTokens !== undefined ? { desiredMaxTokens: input.desiredMaxTokens } : {}),
     ...(input.maxTokensSource !== undefined ? { maxTokensSource: input.maxTokensSource } : {}),
-    ...(input.promptTokensEstimate !== undefined ? { promptTokensEstimate: input.promptTokensEstimate } : {}),
-    ...(input.providerMaxTokens !== undefined ? { providerMaxTokens: input.providerMaxTokens } : {}),
-    ...(input.providerContextWindow !== undefined ? { providerContextWindow: input.providerContextWindow } : {}),
-    ...(input.modelContextWindow !== undefined ? { modelContextWindow: input.modelContextWindow } : {}),
-    ...(input.modelMaxOutputTokens !== undefined ? { modelMaxOutputTokens: input.modelMaxOutputTokens } : {}),
-    ...(input.providerFinishReason !== undefined ? { providerFinishReason: input.providerFinishReason } : {}),
+    ...(input.promptTokensEstimate !== undefined
+      ? { promptTokensEstimate: input.promptTokensEstimate }
+      : {}),
+    ...(input.providerMaxTokens !== undefined
+      ? { providerMaxTokens: input.providerMaxTokens }
+      : {}),
+    ...(input.learnedMaxTokens !== undefined ? { learnedMaxTokens: input.learnedMaxTokens } : {}),
+    ...(input.providerContextWindow !== undefined
+      ? { providerContextWindow: input.providerContextWindow }
+      : {}),
+    ...(input.contextWindow !== undefined ? { contextWindow: input.contextWindow } : {}),
+    ...(input.remainingContextTokens !== undefined
+      ? { remainingContextTokens: input.remainingContextTokens }
+      : {}),
+    ...(input.contextSafetyTokens !== undefined
+      ? { contextSafetyTokens: input.contextSafetyTokens }
+      : {}),
+    ...(input.learnedOutputCap !== undefined ? { learnedOutputCap: input.learnedOutputCap } : {}),
+    ...(input.outputLimitRetryCount !== undefined
+      ? { outputLimitRetryCount: input.outputLimitRetryCount }
+      : {}),
+    ...(input.outputLimitAttempts !== undefined
+      ? { outputLimitAttempts: input.outputLimitAttempts }
+      : {}),
+    ...(input.outputLimitEvidence !== undefined
+      ? { outputLimitEvidence: input.outputLimitEvidence }
+      : {}),
+    ...(input.requestTimeoutMs !== undefined ? { requestTimeoutMs: input.requestTimeoutMs } : {}),
+    ...(input.providerFinishReason !== undefined
+      ? { providerFinishReason: input.providerFinishReason }
+      : {}),
     ...(input.usage !== undefined ? { usage: input.usage } : {}),
-    ...(input.reasoningContentChars !== undefined ? { reasoningContentChars: input.reasoningContentChars } : {}),
+    ...(input.reasoningContentChars !== undefined
+      ? { reasoningContentChars: input.reasoningContentChars }
+      : {}),
   } satisfies Record<string, unknown>
   const truncation = detectCanvasTextTruncation(
     input.taskPipelineRole,
@@ -174,6 +221,17 @@ function sanitizePositiveInteger(value: number | undefined): number | undefined 
   return Math.max(1, Math.floor(value))
 }
 
+function resolveTaskDefaultMaxTokens(
+  operation: string | undefined,
+  taskPipelineRole: string | null | undefined,
+): number {
+  if (taskPipelineRole === 'screenplay' || taskPipelineRole === 'shot') {
+    return CANVAS_TEXT_OUTPUT_TIERS.long
+  }
+  if (operation === 'prompt_optimize') return CANVAS_TEXT_OUTPUT_TIERS.minimum
+  return CANVAS_TEXT_OUTPUT_TIERS.standard
+}
+
 function detectCanvasTextTruncation(
   taskPipelineRole: string | null | undefined,
   outputText: string | undefined,
@@ -182,10 +240,10 @@ function detectCanvasTextTruncation(
   if (taskPipelineRole !== 'shot' || typeof outputText !== 'string') return undefined
   const trimmed = outputText.trim()
   if (trimmed.length === 0 || !/"shots"\s*:/.test(trimmed)) return undefined
-  if (providerFinishReason === 'length') {
+  if (providerFinishReason === 'length' || providerFinishReason === 'max_tokens') {
     return {
       suspected: true,
-      reason: 'provider_finish_reason_length',
+      reason: `provider_finish_reason_${providerFinishReason}`,
       tailPreview: trimmed.slice(-240),
     }
   }
@@ -229,15 +287,11 @@ function estimatePromptTokens(text: string): number {
       tokens += 0.8
       continue
     }
-    if (/[\x00-\x7f]/.test(char)) {
+    if ((char.codePointAt(0) ?? 0) <= 0x7f) {
       tokens += 0.35
       continue
     }
     tokens += 0.6
   }
   return Math.max(1, Math.ceil(tokens))
-}
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(max, Math.max(min, Math.floor(value)))
 }

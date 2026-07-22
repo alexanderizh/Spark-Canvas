@@ -18,7 +18,8 @@ import {
   shouldRunTurnPostProcessing,
 } from '../../services/session.service.js'
 import { normalizeWorkflowGraph } from '../../services/workflow-executor.js'
-import { CodexCliExecutor, CodexSdkExecutor } from '../../sdk/index.js'
+import { SessionQuestionGate } from '../../services/session-question-gate.js'
+import { CodexCliExecutor, CodexOpenAIExecutor, CodexSdkExecutor } from '../../sdk/index.js'
 
 function baseEvent(
   sessionId: string,
@@ -35,6 +36,59 @@ function baseEvent(
 }
 
 describe('SessionService recovery helpers', () => {
+  it('cancels and waits for only the requested session execution', async () => {
+    let finishTarget: (() => void) | undefined
+    const targetDone = new Promise<void>((resolve) => {
+      finishTarget = resolve
+    })
+    const targetExecution = { cancel: vi.fn() }
+    const otherExecution = { cancel: vi.fn() }
+    const cancelAll = vi.fn()
+    const onApprovalCancel = vi.fn()
+    const activeLoops = new Map<string, typeof targetExecution>([
+      ['target-session', targetExecution],
+      ['other-session', otherExecution],
+    ])
+    const trackedTarget = targetDone.then(() => {
+      activeLoops.delete('target-session')
+    })
+    const service = Object.create(SessionService.prototype) as {
+      activeExecutionPromises: Map<
+        typeof targetExecution,
+        { sessionId: string; promise: Promise<void> }
+      >
+      activeLoops: Map<string, typeof targetExecution>
+      cancelSessionExecution: (sessionId: string) => Promise<{ cancelled: boolean }>
+      onApprovalCancel: (sessionId: string) => void
+      pendingPlanApprovals: Set<string>
+      teamDispatchService: { cancelAll: () => void }
+    }
+    service.activeExecutionPromises = new Map([
+      [targetExecution, { sessionId: 'target-session', promise: trackedTarget }],
+    ])
+    service.activeLoops = activeLoops
+    service.onApprovalCancel = onApprovalCancel
+    service.pendingPlanApprovals = new Set(['target-session'])
+    service.teamDispatchService = { cancelAll }
+
+    let settled = false
+    const cancellation = service.cancelSessionExecution('target-session').then((result) => {
+      settled = true
+      return result
+    })
+    await Promise.resolve()
+
+    expect(targetExecution.cancel).toHaveBeenCalledOnce()
+    expect(otherExecution.cancel).not.toHaveBeenCalled()
+    expect(cancelAll).not.toHaveBeenCalled()
+    expect(onApprovalCancel).toHaveBeenCalledWith('target-session')
+    expect(settled).toBe(false)
+
+    finishTarget?.()
+    await expect(cancellation).resolves.toEqual({ cancelled: true })
+    expect(service.activeLoops.get('other-session')).toBe(otherExecution)
+  })
+
   it('cancels and waits for active executors before shutdown completes', async () => {
     let finishExecution: (() => void) | undefined
     const executionDone = new Promise<void>((resolve) => {
@@ -48,10 +102,7 @@ describe('SessionService recovery helpers', () => {
     const onApprovalCancel = vi.fn()
     const platformStop = vi.fn(async () => undefined)
     const service = Object.create(SessionService.prototype) as {
-      activeExecutionPromises: Map<
-        typeof execution,
-        { sessionId: string; promise: Promise<void> }
-      >
+      activeExecutionPromises: Map<typeof execution, { sessionId: string; promise: Promise<void> }>
       activeLoops: Map<string, typeof execution>
       dispose: () => Promise<void>
       startingSessions: Set<string>
@@ -59,6 +110,7 @@ describe('SessionService recovery helpers', () => {
       onApprovalCancel: (sessionId: string) => void
       platformBridge: { stop: () => Promise<void> }
       pendingPlanApprovals: Set<string>
+      pendingUserQuestionGate: SessionQuestionGate
       pendingTurns: Map<string, unknown[]>
       teamDispatchService: { cancelAllAndWait: () => Promise<void> }
       teamMcpHandlesByTurn: Map<string, unknown>
@@ -72,6 +124,7 @@ describe('SessionService recovery helpers', () => {
     service.onApprovalCancel = onApprovalCancel
     service.platformBridge = { stop: platformStop }
     service.pendingPlanApprovals = new Set()
+    service.pendingUserQuestionGate = new SessionQuestionGate()
     service.pendingTurns = new Map()
     service.teamDispatchService = { cancelAllAndWait: vi.fn(() => teamDispatchDone) }
     service.teamMcpHandlesByTurn = new Map()
@@ -118,11 +171,38 @@ describe('SessionService recovery helpers', () => {
     expect(service.pendingTurns.get('session-1')).toEqual([queuedTurn])
   })
 
-  it('routes bare Codex chat-compatible API configs through the Codex SDK executor', () => {
-    expect(createCodexExecutorForConfig({ codexApiKind: 'chat' })).toBeInstanceOf(CodexSdkExecutor)
+  it('does not start queued work while a structured user question is pending', () => {
+    const queuedTurn = { turnId: 'turn-1' }
+    const gate = new SessionQuestionGate()
+    gate.enter('session-1')
+    const service = Object.create(SessionService.prototype) as {
+      activeLoops: Map<string, unknown>
+      disposing: boolean
+      pendingPlanApprovals: Set<string>
+      pendingUserQuestionGate: SessionQuestionGate
+      pendingTurns: Map<string, unknown[]>
+      startingSessions: Set<string>
+      startNextQueuedTurn: (sessionId: string) => void
+    }
+    service.activeLoops = new Map()
+    service.disposing = false
+    service.pendingPlanApprovals = new Set()
+    service.pendingUserQuestionGate = gate
+    service.pendingTurns = new Map([['session-1', [queuedTurn]]])
+    service.startingSessions = new Set()
+
+    service.startNextQueuedTurn('session-1')
+
+    expect(service.pendingTurns.get('session-1')).toEqual([queuedTurn])
   })
 
-  it('routes OpenAI-compatible Codex provider configs through the Codex SDK executor for tool access', () => {
+  it('routes remote Chat Completions configs through the direct OpenAI executor', () => {
+    expect(createCodexExecutorForConfig({ codexApiKind: 'chat' })).toBeInstanceOf(
+      CodexOpenAIExecutor,
+    )
+  })
+
+  it('keeps Chat Completions off the Codex SDK even when a CLI provider config exists', () => {
     expect(
       createCodexExecutorForConfig({
         codexApiKind: 'chat',
@@ -133,7 +213,7 @@ describe('SessionService recovery helpers', () => {
           env: { SPARK_CODEX_API_KEY_TEST: 'sk-test' },
         },
       }),
-    ).toBeInstanceOf(CodexSdkExecutor)
+    ).toBeInstanceOf(CodexOpenAIExecutor)
   })
 
   it('keeps Codex Responses providers on the Codex SDK executor', () => {
@@ -141,6 +221,19 @@ describe('SessionService recovery helpers', () => {
       CodexSdkExecutor,
     )
     expect(createCodexExecutorForConfig({})).toBeInstanceOf(CodexSdkExecutor)
+  })
+
+  it('gives an explicit Responses selection precedence over stale Chat provider metadata', () => {
+    expect(
+      createCodexExecutorForConfig({
+        codexApiKind: 'responses',
+        codexCliProvider: {
+          id: 'spark-provider',
+          wireApi: 'chat',
+          envKey: 'SPARK_CODEX_API_KEY_TEST',
+        },
+      }),
+    ).toBeInstanceOf(CodexSdkExecutor)
   })
 
   it('keeps local Codex CLI providers on the CLI executor', () => {
@@ -160,6 +253,7 @@ describe('SessionService recovery helpers', () => {
         turnId: 'turn-1',
         seq: 7,
         code: 'APP_RESTARTED',
+        message: 'The previous turn was stopped because Spark Canvas restarted.',
         retryable: true,
       }),
     )
@@ -684,7 +778,7 @@ describe('resolveCodexMemberExecutionProfile (FR-0a codex member executor routin
 })
 
 describe('isOpenAiOnlyCodexConsumer legacy compatibility hook', () => {
-  it('does not mark Codex SDK chat-wire providers as OpenAI-only', () => {
+  it('marks remote Codex Chat Completions consumers as direct OpenAI consumers', () => {
     expect(
       isOpenAiOnlyCodexConsumer({
         isCodex: true,
@@ -692,7 +786,7 @@ describe('isOpenAiOnlyCodexConsumer legacy compatibility hook', () => {
         providerType: 'anthropic',
         codexApiKind: 'chat',
       }),
-    ).toBe(false)
+    ).toBe(true)
   })
 
   it('does not mark Codex SDK responses providers as OpenAI-only', () => {
@@ -706,7 +800,7 @@ describe('isOpenAiOnlyCodexConsumer legacy compatibility hook', () => {
     ).toBe(false)
   })
 
-  it('does not mark non-anthropic Codex SDK providers as OpenAI-only', () => {
+  it('marks non-anthropic remote Chat Completions providers as OpenAI-only', () => {
     expect(
       isOpenAiOnlyCodexConsumer({
         isCodex: true,
@@ -714,7 +808,7 @@ describe('isOpenAiOnlyCodexConsumer legacy compatibility hook', () => {
         providerType: 'openai',
         codexApiKind: 'chat',
       }),
-    ).toBe(false)
+    ).toBe(true)
   })
 
   it('does not mark local CLI codex as OpenAI-only', () => {

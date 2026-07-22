@@ -8,14 +8,22 @@
 
 import { createLogger } from '@spark/shared'
 import type { MediaRequestCall } from '@spark/protocol'
-import { toOpenAIResponsesReasoningEffort, type SparkReasoningEffort } from '../sdk/reasoning-effort.js'
+import {
+  toOpenAIResponsesReasoningEffort,
+  type SparkReasoningEffort,
+} from '../sdk/reasoning-effort.js'
+import { compactForLog } from './media/media-debug-log.js'
 
 const log = createLogger('canvas-text-generator')
 
-const REQUEST_TIMEOUT_MS = 120_000
-const DEFAULT_MAX_TOKENS = 4096
+const DEFAULT_REQUEST_TIMEOUT_MS = 10 * 60_000
+const MIN_CONFIGURED_REQUEST_TIMEOUT_MS = 10_000
+const MAX_CONFIGURED_REQUEST_TIMEOUT_MS = 30 * 60_000
+const DEFAULT_MAX_TOKENS = 16_384
 const ERROR_DETAIL_MAX_LENGTH = 2_000
-const REQUEST_TEXT_MAX_LENGTH = 4_000
+// Keep normal long-form screenplay/storyboard requests intact in diagnostics. Only
+// pathological payloads are bounded; base64/data URLs are still summarized separately.
+const REQUEST_TEXT_MAX_LENGTH = 100_000
 
 const ANTHROPIC_DEFAULT_ENDPOINT = 'https://api.anthropic.com'
 const OPENAI_DEFAULT_ENDPOINT = 'https://api.openai.com/v1'
@@ -32,6 +40,22 @@ export class CanvasTextProviderError extends Error {
     this.name = 'CanvasTextProviderError'
     this.statusCode = statusCode
     this.responseBody = responseBody
+    this.requestCall = requestCall
+  }
+}
+
+export class CanvasTextTimeoutError extends Error {
+  readonly code = 'request_timeout'
+  readonly timeoutMs: number
+  readonly requestCall?: MediaRequestCall | undefined
+
+  constructor(timeoutMs: number, requestCall?: MediaRequestCall) {
+    const timeoutSeconds = Math.ceil(timeoutMs / 1000)
+    super(
+      `画布文本请求超时（超过 ${timeoutSeconds} 秒）。模型或代理未在时限内完成响应，请降低最大输出长度、减少输入内容，或检查代理性能后重试。`,
+    )
+    this.name = 'CanvasTextTimeoutError'
+    this.timeoutMs = timeoutMs
     this.requestCall = requestCall
   }
 }
@@ -67,6 +91,8 @@ export interface GenerateCanvasTextParams {
   reasoningEffort?: SparkReasoningEffort
   disableThinking?: boolean
   responseFormat?: 'json' | 'text'
+  /** 单次 HTTP 请求超时；缺省读取 SPARK_CANVAS_TEXT_TIMEOUT_MS，默认 10 分钟。 */
+  timeoutMs?: number
 }
 
 export interface CanvasTextTokenUsage {
@@ -102,6 +128,15 @@ export async function generateCanvasText(
       ? { reasoningContentChars: result.reasoningContentChars }
       : {}),
   }
+}
+
+export function resolveCanvasTextRequestTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const configured = Number.parseInt(env.SPARK_CANVAS_TEXT_TIMEOUT_MS ?? '', 10)
+  if (!Number.isFinite(configured) || configured <= 0) return DEFAULT_REQUEST_TIMEOUT_MS
+  return Math.min(
+    MAX_CONFIGURED_REQUEST_TIMEOUT_MS,
+    Math.max(MIN_CONFIGURED_REQUEST_TIMEOUT_MS, configured),
+  )
 }
 
 function isAnthropic(providerType: string): boolean {
@@ -166,26 +201,63 @@ async function callAnthropic(
     ...(params.temperature != null ? { temperature: params.temperature } : {}),
   }
   const requestCall = buildRequestCall('POST', url, body)
-  const res = await fetchWithTimeout(url, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      'x-api-key': params.apiKey,
-      'anthropic-version': '2023-06-01',
+  const res = await fetchWithTimeout(
+    url,
+    {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-api-key': params.apiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify(body),
     },
-    body: JSON.stringify(body),
-  })
+    params.timeoutMs,
+    requestCall,
+  )
+  attachResponseMetadata(requestCall, res)
   if (!res.ok) {
     const detail = await safeText(res)
+    attachErrorResponseBody(requestCall, detail)
     log.warn(`Anthropic text request failed: HTTP ${res.status} ${detail}`)
     throw new CanvasTextProviderError(res.status, detail, requestCall)
   }
-  const data = (await res.json()) as { content?: Array<{ type?: string; text?: string }> }
+  const data = (await res.json()) as {
+    content?: Array<{ type?: string; text?: string }>
+    stop_reason?: string | null
+    usage?: {
+      input_tokens?: number
+      output_tokens?: number
+      total_tokens?: number
+    }
+  }
   const text = data.content
     ?.filter((item) => item.type === 'text')
     .map((item) => item.text ?? '')
     .join('')
-  return { text: typeof text === 'string' ? text : null, requestCall }
+  const normalizedText = typeof text === 'string' ? text : null
+  const usage = data.usage ? normalizeAnthropicUsage(data.usage) : undefined
+  log.info(
+    [
+      'event=response',
+      'provider=anthropic',
+      `model=${JSON.stringify(params.model)}`,
+      `maxTokens=${params.maxTokens ?? '(provider-default)'}`,
+      `textChars=${normalizedText?.length ?? 0}`,
+      `stopReason=${JSON.stringify(data.stop_reason ?? '(n/a)')}`,
+      usage?.promptTokens != null ? `promptTokens=${usage.promptTokens}` : null,
+      usage?.completionTokens != null ? `completionTokens=${usage.completionTokens}` : null,
+      usage?.totalTokens != null ? `totalTokens=${usage.totalTokens}` : null,
+    ]
+      .filter((part): part is string => part != null)
+      .join(' '),
+  )
+  return {
+    text: normalizedText,
+    requestCall,
+    ...(typeof data.stop_reason === 'string' ? { finishReason: data.stop_reason } : {}),
+    ...(usage ? { usage } : {}),
+  }
 }
 
 async function callOpenAICompatible(
@@ -230,16 +302,23 @@ async function callOpenAIChatCompletions(
       : {}),
   }
   const requestCall = buildRequestCall('POST', url, body)
-  const res = await fetchWithTimeout(url, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      authorization: `Bearer ${params.apiKey}`,
+  const res = await fetchWithTimeout(
+    url,
+    {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${params.apiKey}`,
+      },
+      body: JSON.stringify(body),
     },
-    body: JSON.stringify(body),
-  })
+    params.timeoutMs,
+    requestCall,
+  )
+  attachResponseMetadata(requestCall, res)
   if (!res.ok) {
     const detail = await safeText(res)
+    attachErrorResponseBody(requestCall, detail)
     log.warn(`OpenAI-compatible text request failed: HTTP ${res.status} ${detail}`)
     throw new CanvasTextProviderError(res.status, detail, requestCall)
   }
@@ -286,16 +365,23 @@ async function callOpenAIResponses(
     ...(reasoningEffort != null ? { reasoning: { effort: reasoningEffort } } : {}),
   }
   const requestCall = buildRequestCall('POST', url, body)
-  const res = await fetchWithTimeout(url, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      authorization: `Bearer ${params.apiKey}`,
+  const res = await fetchWithTimeout(
+    url,
+    {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${params.apiKey}`,
+      },
+      body: JSON.stringify(body),
     },
-    body: JSON.stringify(body),
-  })
+    params.timeoutMs,
+    requestCall,
+  )
+  attachResponseMetadata(requestCall, res)
   if (!res.ok) {
     const detail = await safeText(res)
+    attachErrorResponseBody(requestCall, detail)
     log.warn(`OpenAI Responses text request failed: HTTP ${res.status} ${detail}`)
     throw new CanvasTextProviderError(res.status, detail, requestCall)
   }
@@ -388,7 +474,39 @@ function shouldSendThinkingToggle(params: GenerateCanvasTextParams): boolean {
 }
 
 function buildRequestCall(method: string, url: string, body: unknown): MediaRequestCall {
-  return { method, url, body: sanitizeRequestBody(body) }
+  return {
+    method,
+    url,
+    headers: {
+      'content-type': 'application/json',
+      authorization: '[redacted]',
+    },
+    body: sanitizeRequestBody(compactForLog(body)),
+  }
+}
+
+function attachResponseMetadata(requestCall: MediaRequestCall, response: Response): void {
+  const headers: Record<string, string> = {}
+  for (const name of ['content-type', 'request-id', 'x-request-id']) {
+    const value = response.headers.get(name)
+    if (value) headers[name] = value
+  }
+  requestCall.response = {
+    status: response.status,
+    ...(response.statusText ? { statusText: response.statusText } : {}),
+    ...(Object.keys(headers).length > 0 ? { headers } : {}),
+  }
+}
+
+function attachErrorResponseBody(requestCall: MediaRequestCall, detail: string): void {
+  if (!requestCall.response || !detail) return
+  let body: unknown = detail
+  try {
+    body = JSON.parse(detail)
+  } catch {
+    // Keep the bounded text returned by safeText.
+  }
+  requestCall.response.body = sanitizeRequestBody(body)
 }
 
 function sanitizeRequestBody(value: unknown): unknown {
@@ -413,11 +531,29 @@ function sanitizeRequestBody(value: unknown): unknown {
   return value
 }
 
-async function fetchWithTimeout(url: string, init: RequestInit): Promise<Response> {
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit,
+  requestedTimeoutMs: number | undefined,
+  requestCall: MediaRequestCall,
+): Promise<Response> {
+  const timeoutMs =
+    typeof requestedTimeoutMs === 'number' &&
+    Number.isFinite(requestedTimeoutMs) &&
+    requestedTimeoutMs > 0
+      ? Math.floor(requestedTimeoutMs)
+      : resolveCanvasTextRequestTimeoutMs()
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
+  let timedOut = false
+  const timer = setTimeout(() => {
+    timedOut = true
+    controller.abort()
+  }, timeoutMs)
   try {
     return await fetch(url, { ...init, signal: controller.signal })
+  } catch (err) {
+    if (timedOut) throw new CanvasTextTimeoutError(timeoutMs, requestCall)
+    throw err
   } finally {
     clearTimeout(timer)
   }
@@ -438,7 +574,21 @@ function normalizeTokenUsage(usage: {
 }): CanvasTextTokenUsage {
   return {
     ...(typeof usage.prompt_tokens === 'number' ? { promptTokens: usage.prompt_tokens } : {}),
-    ...(typeof usage.completion_tokens === 'number' ? { completionTokens: usage.completion_tokens } : {}),
+    ...(typeof usage.completion_tokens === 'number'
+      ? { completionTokens: usage.completion_tokens }
+      : {}),
+    ...(typeof usage.total_tokens === 'number' ? { totalTokens: usage.total_tokens } : {}),
+  }
+}
+
+function normalizeAnthropicUsage(usage: {
+  input_tokens?: number
+  output_tokens?: number
+  total_tokens?: number
+}): CanvasTextTokenUsage {
+  return {
+    ...(typeof usage.input_tokens === 'number' ? { promptTokens: usage.input_tokens } : {}),
+    ...(typeof usage.output_tokens === 'number' ? { completionTokens: usage.output_tokens } : {}),
     ...(typeof usage.total_tokens === 'number' ? { totalTokens: usage.total_tokens } : {}),
   }
 }

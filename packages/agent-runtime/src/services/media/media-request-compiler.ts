@@ -26,6 +26,7 @@ import type {
   MediaParamConflictRule,
   MediaParamTransformRule,
 } from '@spark/protocol'
+import { isMediaProviderKind } from '@spark/protocol'
 
 /** 入参中"输入文件"的最小形态；conditionals.drop_when_input_kind 需要读 type。 */
 export interface CompilerInputFile {
@@ -48,6 +49,8 @@ export interface CompileMediaRequestInput {
   }
   /** Provider-level 默认值（来自 ProviderMediaDefaults），优先级低于 capability.defaults。 */
   providerDefaults?: Record<string, unknown> | undefined
+  /** 用户已确认参数提醒时保留原参数，让供应商最终决定是否接受。 */
+  skipParameterValidation?: boolean | undefined
   /**
    * 调用场景：
    *   - 'canvas'：MCP/skill 不在场的画布裁剪（不出 provider 错误，只产警告）。
@@ -66,6 +69,21 @@ export interface CompileMediaRequestResult {
   droppedParams: MediaDroppedParam[]
   warnings: MediaContractWarning[]
   validationIssues: MediaContractIssue[]
+}
+
+/**
+ * A `custom:*` ref without an inline manifest is synthesized from a built-in
+ * provider manifest for canvas presentation only. Its cloned schema must not
+ * validate or prune the custom model's provider parameters.
+ */
+export function isSynthesizedCustomManifest(
+  manifest: Pick<MediaModelManifest, 'id' | 'providerKind'>,
+): boolean {
+  return (
+    manifest.id.startsWith('custom:') &&
+    manifest.providerKind !== 'custom' &&
+    isMediaProviderKind(manifest.providerKind)
+  )
 }
 
 // 仅在本地产物命名使用、永远不应进入 provider 请求的字段。
@@ -89,11 +107,31 @@ const CANONICAL_ALIASES_FALLBACK: Record<string, string> = {
 
 export function compileMediaRequest(input: CompileMediaRequestInput): CompileMediaRequestResult {
   const mode = input.mode ?? 'adapter'
+  const rawParams = removeBlankParams(input.input.modelParams ?? {})
+  if (isSynthesizedCustomManifest(input.manifest)) {
+    const providerParams = { ...rawParams }
+    const droppedParams: MediaDroppedParam[] = []
+    if (Object.prototype.hasOwnProperty.call(providerParams, 'filename')) {
+      droppedParams.push({
+        name: 'filename',
+        providerName: 'filename',
+        valuePreview: String(providerParams.filename).slice(0, 80),
+        reason: 'local_only',
+      })
+      delete providerParams.filename
+    }
+    return {
+      canonicalParams: { ...rawParams },
+      providerParams,
+      droppedParams,
+      warnings: [],
+      validationIssues: [],
+    }
+  }
   const issues: MediaContractIssue[] = []
   const warnings: MediaContractWarning[] = []
   const dropped: MediaDroppedParam[] = []
 
-  const rawParams = removeBlankParams(input.input.modelParams ?? {})
   const canonicalFromRaw = normalizeCanonicalParams(rawParams)
   const defaults = mergeDefaults(input.providerDefaults, input.capability.defaults)
   const merged = { ...defaults, ...canonicalFromRaw }
@@ -103,6 +141,7 @@ export function compileMediaRequest(input: CompileMediaRequestInput): CompileMed
     merged,
     schema,
     input.capability.id,
+    input.skipParameterValidation === true,
   )
   dropped.push(...schemaDropped)
   issues.push(...schemaIssues)
@@ -123,22 +162,23 @@ export function compileMediaRequest(input: CompileMediaRequestInput): CompileMed
   )
   dropped.push(...transformDropped)
 
-  const { params: conflictResolved, dropped: conflictDropped, issues: conflictIssues } = resolveConflicts(
-    transformed,
-    policy.conflicts,
-    input.capability.id,
-  )
+  const { params: conflictResolved, dropped: conflictDropped, issues: conflictIssues } =
+    input.skipParameterValidation
+      ? { params: transformed, dropped: [], issues: [] }
+      : resolveConflicts(transformed, policy.conflicts, input.capability.id)
   dropped.push(...conflictDropped)
   issues.push(...conflictIssues)
 
   // 关键顺序：filter 在 canonical 空间做，避免 provider 字段反查；最后再做 aliases 映射。
-  const filtered = filterCanonicalParams(
-    conflictResolved,
-    policy,
-    schema,
-    mode,
-    input.capability.id,
-  )
+  const filtered = input.skipParameterValidation
+    ? { params: conflictResolved, dropped: [], issues: [], warnings: [] }
+    : filterCanonicalParams(
+        conflictResolved,
+        policy,
+        schema,
+        mode,
+        input.capability.id,
+      )
   dropped.push(...filtered.dropped)
   issues.push(...filtered.issues)
   for (const w of filtered.warnings) warnings.push(w)
@@ -185,6 +225,7 @@ function validateAgainstParamSchema(
   params: Record<string, unknown>,
   schema: Record<string, unknown>,
   capabilityId: string,
+  keepInvalid = false,
 ): {
   validated: Record<string, unknown>
   dropped: MediaDroppedParam[]
@@ -208,6 +249,7 @@ function validateAgainstParamSchema(
     const issue = validateParamValue(result.value, propSchema, key, capabilityId)
     if (issue) {
       issues.push(issue)
+      if (keepInvalid) validated[key] = result.value
       continue
     }
     validated[key] = result.value

@@ -118,6 +118,33 @@ describe('CanvasWindowService', () => {
     expect(created[0]?.focus).toHaveBeenCalledTimes(2)
   })
 
+  it('commits the project binding only after its renderer finishes loading', async () => {
+    const win = createFakeWindow(1)
+    let finishLoad: (() => void) | undefined
+    win.loadURL.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          finishLoad = resolve
+        }),
+    )
+    const service = new CanvasWindowService({
+      createWindow: () => win as never,
+      getRendererUrl: () => 'http://127.0.0.1:5173',
+      getRendererFile: () => '/app/out/renderer/index.html',
+      isDev: true,
+      openExternal: vi.fn(),
+    })
+
+    const opening = service.open({ projectId: 'canvas_project_1' })
+    await vi.waitFor(() => expect(win.loadURL).toHaveBeenCalledOnce())
+
+    expect(service.getActiveProjectId()).toBeNull()
+
+    finishLoad?.()
+    await opening
+    expect(service.getActiveProjectId()).toBe('canvas_project_1')
+  })
+
   it('keeps the current project and raises a readable error when navigation is cancelled', async () => {
     const created: FakeWindow[] = []
     const service = new CanvasWindowService({

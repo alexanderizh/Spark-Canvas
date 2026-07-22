@@ -1,8 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { rmSync, mkdirSync, readFileSync, existsSync } from 'node:fs'
+import { rmSync, mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
-import { createCanvas } from '@napi-rs/canvas'
 import { MediaRouterService } from '../../../services/media/media-router.service.js'
 import type { MediaProviderProfile } from '../../../services/media/media-router.service.js'
 import { AgnesMediaAdapter } from '../../../services/media/adapters/agnes-media.adapter.js'
@@ -103,12 +102,27 @@ describe('media HTTP util extractors', () => {
     expect(images.some((image) => image.kind === 'base64')).toBe(true)
   })
 
+  it('extractImages treats DashScope Wan image fields as signed URLs', () => {
+    const signedUrl =
+      'https://dashscope-7c2c.oss-accelerate.aliyuncs.com/result.png?Expires=1784470372&Signature=abc'
+    const images = extractImages({
+      output: {
+        choices: [{ message: { content: [{ type: 'image', image: signedUrl }] } }],
+      },
+    })
+
+    expect(images).toEqual([{ kind: 'url', value: signedUrl }])
+  })
+
   it('extractMediaUrls dedupes video urls', () => {
     const urls = extractMediaUrls(
-      { video_url: 'https://cdn/v.mp4', result: { url: 'https://cdn/v.mp4' } },
+      {
+        video_url: 'https://cdn/v.mp4',
+        result: { videos: [{ url: ['https://cdn/v.mp4', 'https://cdn/v2.mp4'] }] },
+      },
       { kind: 'video' },
     )
-    expect(urls).toEqual(['https://cdn/v.mp4'])
+    expect(urls).toEqual(['https://cdn/v.mp4', 'https://cdn/v2.mp4'])
   })
 
   it('extractTaskId prefers task_id then request_id then id', () => {
@@ -492,7 +506,7 @@ describe('MediaRouterService', () => {
     expect(fetchMock.calls.some((call) => call.url.includes('/tasks/task-123'))).toBe(true)
   })
 
-  it('APIMart image.generate maps aspect_ratio to vertical size instead of default square size', async () => {
+  it('APIMart GPT Image 2 maps legacy aspect_ratio to the documented size ratio', async () => {
     const captured: { body: Record<string, unknown> } = { body: {} }
     const fetchMock = makeFetch([
       {
@@ -518,7 +532,7 @@ describe('MediaRouterService', () => {
       },
     )
 
-    expect(captured.body.size).toBe('1024x1536')
+    expect(captured.body.size).toBe('9:16')
     expect(captured.body.aspect_ratio).toBeUndefined()
   })
 
@@ -638,26 +652,37 @@ describe('MediaRouterService', () => {
     expect(output.assets[0]?.contentText).toBe('transcribed words')
   })
 
-  it('APIMart video.generate (async): polls then downloads video url', async () => {
+  it('APIMart video.generate (async): polls the unified task endpoint and downloads the video', async () => {
     const videoBuf = Buffer.from([0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70]) // ftyp box
     const fetchMock = makeFetch([
       {
         match: '/videos/generations',
         respond: (init) =>
           init?.method === 'POST'
-            ? { ok: true, status: 200, body: { id: 'vid-1', status: 'pending' } }
+            ? {
+                ok: true,
+                status: 200,
+                body: { code: 200, data: [{ status: 'submitted', task_id: 'vid-1' }] },
+              }
             : { ok: true, status: 200, body: { id: 'vid-1' } },
       },
       {
-        match: '/videos/generations/vid-1',
+        match: '/tasks/vid-1',
         respond: (_init, count) =>
           count >= 2
             ? {
                 ok: true,
                 status: 200,
-                body: { status: 'completed', video: { url: 'https://cdn/v.mp4' } },
+                body: {
+                  code: 200,
+                  data: {
+                    id: 'vid-1',
+                    status: 'completed',
+                    result: { videos: [{ url: ['https://cdn/v.mp4'] }] },
+                  },
+                },
               }
-            : { ok: true, status: 200, body: { status: 'generating' } },
+            : { ok: true, status: 200, body: { code: 200, data: { status: 'processing' } } },
       },
       {
         match: 'https://cdn/v.mp4',
@@ -685,6 +710,440 @@ describe('MediaRouterService', () => {
     expect(output.requestId).toBe('vid-1')
     expect(output.assets[0]?.type).toBe('video')
     expect(readFileSync(output.assets[0]!.filePath!)).toEqual(videoBuf)
+    expect(fetchMock.calls.some((call) => call.url.endsWith('/tasks/vid-1'))).toBe(true)
+  })
+
+  it('APIMart video requests apply model-specific aspect-ratio aliases at the adapter boundary', async () => {
+    const captured: { body: Record<string, unknown> } = { body: {} }
+    const videoBuf = Buffer.from([0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70])
+    const manifest = BUILTIN_MEDIA_MODEL_MANIFESTS.find(
+      (entry) => entry.id === 'apimart:grok-imagine-1.5-video-apimart',
+    )
+    expect(manifest).toBeDefined()
+    const fetchMock = makeFetch([
+      {
+        match: '/videos/generations',
+        respond: (init) => {
+          captured.body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>
+          return { ok: true, status: 200, body: { video_url: 'https://cdn/aliased.mp4' } }
+        },
+      },
+      {
+        match: 'https://cdn/aliased.mp4',
+        respond: () => ({ ok: true, status: 200, body: null, binary: videoBuf }),
+      },
+    ])
+
+    await router.invoke(
+      {
+        operation: 'text_to_video',
+        capability: 'video.generate',
+        outputDir: tmpDir,
+        prompt: 'a cinematic camera move',
+        modelParams: { aspectRatio: '16:9', durationSeconds: 8 },
+      },
+      {
+        providers: [
+          makeProvider({
+            defaultModel: 'grok-imagine-1.5-video-apimart',
+            mediaCapabilities: ['video.generate'],
+            mediaModelManifests: manifest ? [manifest] : [],
+          }),
+        ],
+        fetch: fetchMock,
+      },
+    )
+
+    expect(captured.body).toMatchObject({ size: '16:9', duration: 8 })
+    expect(captured.body.aspect_ratio).toBeUndefined()
+  })
+
+  it('APIMart reference-to-video sends every role-tagged media input in provider arrays', async () => {
+    const captured: { body: Record<string, unknown> } = { body: {} }
+    const videoBuf = Buffer.from([0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70])
+    const manifest = BUILTIN_MEDIA_MODEL_MANIFESTS.find(
+      (entry) => entry.id === 'apimart:doubao-seedance-2.0',
+    )
+    expect(manifest).toBeDefined()
+    const fetchMock = makeFetch([
+      {
+        match: '/videos/generations',
+        respond: (init) => {
+          captured.body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>
+          return { ok: true, status: 200, body: { video_url: 'https://cdn/reference.mp4' } }
+        },
+      },
+      {
+        match: 'https://cdn/reference.mp4',
+        respond: () => ({ ok: true, status: 200, body: null, binary: videoBuf }),
+      },
+    ])
+
+    await router.invoke(
+      {
+        operation: 'image_to_video',
+        capability: 'video.reference_to_video',
+        outputDir: tmpDir,
+        prompt: '',
+        inputFiles: [
+          { type: 'image', role: 'reference', url: 'https://cdn/a.png' },
+          { type: 'image', role: 'reference', url: 'https://cdn/b.png' },
+          {
+            type: 'file',
+            role: 'reference',
+            mimeType: 'video/mp4',
+            url: 'https://cdn/motion.mp4',
+          },
+          {
+            type: 'file',
+            role: 'reference',
+            mimeType: 'audio/mpeg',
+            url: 'https://cdn/voice.mp3',
+          },
+        ],
+      },
+      {
+        providers: [
+          makeProvider({
+            defaultModel: 'doubao-seedance-2.0',
+            mediaCapabilities: ['video.reference_to_video'],
+            mediaModelManifests: manifest ? [manifest] : [],
+          }),
+        ],
+        fetch: fetchMock,
+      },
+    )
+
+    expect(captured.body.image_urls).toEqual(['https://cdn/a.png', 'https://cdn/b.png'])
+    expect(captured.body.video_urls).toEqual(['https://cdn/motion.mp4'])
+    expect(captured.body.audio_urls).toEqual(['https://cdn/voice.mp3'])
+    expect(captured.body.prompt).toBeUndefined()
+    expect(captured.body.first_frame_image).toBeUndefined()
+    expect(captured.body.reference_images).toBeUndefined()
+  })
+
+  it('APIMart Seedance 1.5 sends first and last frames with documented roles', async () => {
+    const captured: { body: Record<string, unknown> } = { body: {} }
+    const videoBuf = Buffer.from([0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70])
+    const manifest = BUILTIN_MEDIA_MODEL_MANIFESTS.find(
+      (entry) => entry.id === 'apimart:doubao-seedance-1-5-pro-apimart',
+    )
+    expect(manifest).toBeDefined()
+    const fetchMock = makeFetch([
+      {
+        match: '/videos/generations',
+        respond: (init) => {
+          captured.body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>
+          return { ok: true, status: 200, body: { video_url: 'https://cdn/seedance.mp4' } }
+        },
+      },
+      {
+        match: 'https://cdn/seedance.mp4',
+        respond: () => ({ ok: true, status: 200, body: null, binary: videoBuf }),
+      },
+    ])
+
+    await router.invoke(
+      {
+        operation: 'image_to_video',
+        capability: 'video.image_to_video',
+        outputDir: tmpDir,
+        prompt: 'transition between the supplied frames',
+        inputFiles: [
+          { type: 'image', role: 'first_frame', url: 'https://cdn/first.png' },
+          { type: 'image', role: 'last_frame', url: 'https://cdn/last.png' },
+        ],
+      },
+      {
+        providers: [
+          makeProvider({
+            defaultModel: 'doubao-seedance-1-5-pro',
+            mediaCapabilities: ['video.image_to_video'],
+            mediaModelManifests: manifest ? [manifest] : [],
+          }),
+        ],
+        fetch: fetchMock,
+      },
+    )
+
+    expect(captured.body.image_with_roles).toEqual([
+      { url: 'https://cdn/first.png', role: 'first_frame' },
+      { url: 'https://cdn/last.png', role: 'last_frame' },
+    ])
+    expect(captured.body.first_frame_image).toBeUndefined()
+    expect(captured.body.last_frame_image).toBeUndefined()
+  })
+
+  it('APIMart Seedance 1.5 infers first and last roles for two unassigned images', async () => {
+    const captured: { body: Record<string, unknown> } = { body: {} }
+    const videoBuf = Buffer.from([0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70])
+    const manifest = BUILTIN_MEDIA_MODEL_MANIFESTS.find(
+      (entry) => entry.id === 'apimart:doubao-seedance-1-5-pro-apimart',
+    )
+    expect(manifest).toBeDefined()
+    const fetchMock = makeFetch([
+      {
+        match: '/videos/generations',
+        respond: (init) => {
+          captured.body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>
+          return { ok: true, status: 200, body: { video_url: 'https://cdn/seedance-inferred.mp4' } }
+        },
+      },
+      {
+        match: 'https://cdn/seedance-inferred.mp4',
+        respond: () => ({ ok: true, status: 200, body: null, binary: videoBuf }),
+      },
+    ])
+
+    await router.invoke(
+      {
+        operation: 'image_to_video',
+        capability: 'video.image_to_video',
+        outputDir: tmpDir,
+        prompt: 'animate the supplied images',
+        inputFiles: [
+          { type: 'image', url: 'https://cdn/first.png' },
+          { type: 'image', url: 'https://cdn/last.png' },
+        ],
+      },
+      {
+        providers: [
+          makeProvider({
+            defaultModel: 'doubao-seedance-1-5-pro',
+            mediaCapabilities: ['video.image_to_video'],
+            mediaModelManifests: manifest ? [manifest] : [],
+          }),
+        ],
+        fetch: fetchMock,
+      },
+    )
+
+    expect(captured.body.image_with_roles).toEqual([
+      { url: 'https://cdn/first.png', role: 'first_frame' },
+      { url: 'https://cdn/last.png', role: 'last_frame' },
+    ])
+  })
+
+  it('APIMart omits ignored aspect-ratio fields for image and edit inputs', async () => {
+    const videoBuf = Buffer.from([0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70])
+    const captured: Record<string, Record<string, unknown>> = {}
+    const manifests = new Map(
+      ['wan2.6', 'happyhorse-1.0'].map((modelId) => [
+        modelId,
+        BUILTIN_MEDIA_MODEL_MANIFESTS.find(
+          (entry) => entry.providerKind === 'apimart' && entry.modelId === modelId,
+        ),
+      ]),
+    )
+    const fetchMock = makeFetch([
+      {
+        match: '/videos/generations',
+        respond: (init) => {
+          const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>
+          captured[String(body.model)] = body
+          return {
+            ok: true,
+            status: 200,
+            body: { video_url: `https://cdn/${String(body.model)}.mp4` },
+          }
+        },
+      },
+      {
+        match: 'https://cdn/',
+        respond: () => ({ ok: true, status: 200, body: null, binary: videoBuf }),
+      },
+    ])
+
+    await router.invoke(
+      {
+        operation: 'image_to_video',
+        capability: 'video.image_to_video',
+        outputDir: tmpDir,
+        prompt: 'animate the source image',
+        inputFiles: [{ type: 'image', role: 'first_frame', url: 'https://cdn/frame.png' }],
+        modelParams: { aspectRatio: '9:16' },
+      },
+      {
+        providers: [
+          makeProvider({
+            defaultModel: 'wan2.6',
+            mediaCapabilities: ['video.image_to_video'],
+            mediaModelManifests: [manifests.get('wan2.6')!],
+          }),
+        ],
+        fetch: fetchMock,
+      },
+    )
+
+    await router.invoke(
+      {
+        operation: 'video_edit',
+        capability: 'video.edit',
+        outputDir: tmpDir,
+        prompt: 'restyle the source video',
+        inputFiles: [{ type: 'video', role: 'input', url: 'https://cdn/source.mp4' }],
+        modelParams: { aspectRatio: '9:16' },
+      },
+      {
+        providers: [
+          makeProvider({
+            defaultModel: 'happyhorse-1.0',
+            mediaCapabilities: ['video.edit'],
+            mediaModelManifests: [manifests.get('happyhorse-1.0')!],
+          }),
+        ],
+        fetch: fetchMock,
+      },
+    )
+
+    expect(captured['wan2.6']?.aspect_ratio).toBeUndefined()
+    expect(captured['happyhorse-1.0']?.size).toBeUndefined()
+  })
+
+  it('APIMart sends the native dotted Seedance 2.0 model id', async () => {
+    const captured: { body: Record<string, unknown> } = { body: {} }
+    const videoBuf = Buffer.from([0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70])
+    const manifest = BUILTIN_MEDIA_MODEL_MANIFESTS.find(
+      (entry) => entry.id === 'apimart:doubao-seedance-2-0-fast-apimart',
+    )
+    expect(manifest).toBeDefined()
+    const fetchMock = makeFetch([
+      {
+        match: '/videos/generations',
+        respond: (init) => {
+          captured.body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>
+          return { ok: true, status: 200, body: { video_url: 'https://cdn/seedance-dotted.mp4' } }
+        },
+      },
+      {
+        match: 'https://cdn/seedance-dotted.mp4',
+        respond: () => ({ ok: true, status: 200, body: null, binary: videoBuf }),
+      },
+    ])
+
+    await router.invoke(
+      {
+        operation: 'text_to_video',
+        capability: 'video.generate',
+        outputDir: tmpDir,
+        prompt: 'a cinematic scene',
+      },
+      {
+        providers: [
+          makeProvider({
+            defaultModel: 'doubao-seedance-2-0-fast',
+            mediaCapabilities: ['video.generate'],
+            mediaModelManifests: manifest ? [manifest] : [],
+          }),
+        ],
+        fetch: fetchMock,
+      },
+    )
+
+    expect(captured.body.model).toBe('doubao-seedance-2.0-fast')
+  })
+
+  it('APIMart adapter uses the PixVerse model-specific reference field', async () => {
+    const captured: { body: Record<string, unknown> } = { body: {} }
+    const videoBuf = Buffer.from([0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70])
+    const manifest = BUILTIN_MEDIA_MODEL_MANIFESTS.find(
+      (entry) => entry.id === 'apimart:pixverse-v6',
+    )
+    expect(manifest).toBeDefined()
+    const fetchMock = makeFetch([
+      {
+        match: '/videos/generations',
+        respond: (init) => {
+          captured.body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>
+          return { ok: true, status: 200, body: { video_url: 'https://cdn/pixverse.mp4' } }
+        },
+      },
+      {
+        match: 'https://cdn/pixverse.mp4',
+        respond: () => ({ ok: true, status: 200, body: null, binary: videoBuf }),
+      },
+    ])
+
+    await router.invoke(
+      {
+        operation: 'image_to_video',
+        capability: 'video.reference_to_video',
+        outputDir: tmpDir,
+        prompt: 'preserve the supplied subjects',
+        inputFiles: [
+          { type: 'image', role: 'reference', url: 'https://cdn/reference-1.png' },
+          { type: 'image', role: 'reference', url: 'https://cdn/reference-2.png' },
+        ],
+      },
+      {
+        providers: [
+          makeProvider({
+            defaultModel: 'pixverse-v6',
+            mediaCapabilities: ['video.reference_to_video'],
+            mediaModelManifests: manifest ? [manifest] : [],
+          }),
+        ],
+        fetch: fetchMock,
+      },
+    )
+
+    expect(captured.body.img_references).toEqual([
+      'https://cdn/reference-1.png',
+      'https://cdn/reference-2.png',
+    ])
+    expect(captured.body.image_urls).toBeUndefined()
+  })
+
+  it('APIMart video editing sends the source video and all reference images', async () => {
+    const captured: { body: Record<string, unknown> } = { body: {} }
+    const videoBuf = Buffer.from([0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70])
+    const manifest = BUILTIN_MEDIA_MODEL_MANIFESTS.find(
+      (entry) => entry.id === 'apimart:happyhorse-1.0',
+    )
+    expect(manifest).toBeDefined()
+    const fetchMock = makeFetch([
+      {
+        match: '/videos/generations',
+        respond: (init) => {
+          captured.body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>
+          return { ok: true, status: 200, body: { video_url: 'https://cdn/edited.mp4' } }
+        },
+      },
+      {
+        match: 'https://cdn/edited.mp4',
+        respond: () => ({ ok: true, status: 200, body: null, binary: videoBuf }),
+      },
+    ])
+
+    await router.invoke(
+      {
+        operation: 'video_edit',
+        capability: 'video.edit',
+        outputDir: tmpDir,
+        prompt: 'restyle the video',
+        inputFiles: [
+          { type: 'video', role: 'input', url: 'https://cdn/source.mp4' },
+          { type: 'image', role: 'reference', url: 'https://cdn/style-a.png' },
+          { type: 'image', role: 'reference', url: 'https://cdn/style-b.png' },
+        ],
+      },
+      {
+        providers: [
+          makeProvider({
+            defaultModel: 'happyhorse-1.0',
+            mediaCapabilities: ['video.edit'],
+            mediaModelManifests: manifest ? [manifest] : [],
+          }),
+        ],
+        fetch: fetchMock,
+      },
+    )
+
+    expect(captured.body.video_url).toBe('https://cdn/source.mp4')
+    expect(captured.body.image_urls).toEqual([
+      'https://cdn/style-a.png',
+      'https://cdn/style-b.png',
+    ])
   })
 
   it('task failure raises task_failed error', async () => {
@@ -694,8 +1153,12 @@ describe('MediaRouterService', () => {
         respond: () => ({ ok: true, status: 200, body: { id: 'vid-fail' } }),
       },
       {
-        match: '/videos/generations/vid-fail',
-        respond: () => ({ ok: true, status: 200, body: { status: 'failed' } }),
+        match: '/tasks/vid-fail',
+        respond: () => ({
+          ok: true,
+          status: 200,
+          body: { code: 200, data: { id: 'vid-fail', status: 'failed' } },
+        }),
       },
     ])
     await expect(
@@ -775,7 +1238,12 @@ describe('MediaRouterService', () => {
             ? {
                 ok: true,
                 status: 200,
-                body: { status: 'completed', video_url: 'https://cdn/xai-video.mp4' },
+                body: {
+                  status: 'completed',
+                  video: {
+                    file_output: { file_id: 'file-video', public_url: 'https://cdn/xai-video.mp4' },
+                  },
+                },
               }
             : { ok: true, status: 200, body: { status: 'processing' } },
       },
@@ -833,11 +1301,12 @@ describe('MediaRouterService', () => {
       image: { url: `data:image/png;base64,${PNG_PIXEL}` },
       aspect_ratio: '9:16',
       duration: 8,
-      quality: 'hd',
       resolution: '720p',
-      seed: 42,
     })
     expect(captured.body.image_url).toBeUndefined()
+    expect(captured.body.quality).toBeUndefined()
+    expect(captured.body.seed).toBeUndefined()
+    expect(captured.body.storage_options).toEqual(expect.objectContaining({ public_url: true }))
     expect(output.provider).toBe('xai')
     expect(output.mode).toBe('async')
     expect(output.requestId).toBe('xai-video-1')
@@ -855,7 +1324,14 @@ describe('MediaRouterService', () => {
         respond: () => ({
           ok: true,
           status: 200,
-          body: { status: 'done', video: { url: 'https://cdn/xai-edited.mp4', duration: 5 } },
+          body: {
+            status: 'done',
+            video: {
+              url: 'https://temp/xai-edited.mp4',
+              file_output: { file_id: 'file-edit', public_url: 'https://cdn/xai-edited.mp4' },
+              duration: 5,
+            },
+          },
         }),
       },
       {
@@ -929,9 +1405,8 @@ describe('MediaRouterService', () => {
     expect(readFileSync(output.assets[0]!.filePath!)).toEqual(videoBuf)
   })
 
-  it('xAI grok-imagine-video video_extend posts to /videos/extensions with clamped duration', async () => {
-    // 官方明确：视频扩展走 POST /videos/extensions，duration 范围 [1,15] 默认 6，
-    // 从输入视频最后一帧续拍。超出范围的 duration 应被 clamp。
+  it('xAI grok-imagine-video video_extend uses the documented default duration', async () => {
+    // 官方明确：视频扩展走 POST /videos/extensions，duration 范围 [2,10] 默认 6。
     const captured: { body: Record<string, unknown>; url: string } = { body: {}, url: '' }
     const videoBuf = Buffer.from([0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70])
     const fetchMock = makeFetch([
@@ -940,7 +1415,13 @@ describe('MediaRouterService', () => {
         respond: () => ({
           ok: true,
           status: 200,
-          body: { status: 'done', video: { url: 'https://cdn/xai-extended.mp4', duration: 6 } },
+          body: {
+            status: 'done',
+            video: {
+              file_output: { file_id: 'file-extend', public_url: 'https://cdn/xai-extended.mp4' },
+              duration: 10,
+            },
+          },
         }),
       },
       {
@@ -964,8 +1445,6 @@ describe('MediaRouterService', () => {
         outputDir: tmpDir,
         prompt: 'continue the rocket launch upward',
         inputFiles: [{ type: 'video', role: 'input', url: 'https://cdn/source.mp4' }],
-        // duration=30 超出 [1,15]，应 clamp 到 15
-        modelParams: { durationSeconds: 30 },
       },
       {
         providers: [
@@ -996,7 +1475,7 @@ describe('MediaRouterService', () => {
       model: 'grok-imagine-video',
       prompt: 'continue the rocket launch upward',
       video: { url: 'https://cdn/source.mp4' },
-      duration: 15,
+      duration: 6,
     })
     expect(output.provider).toBe('xai')
     expect(output.mode).toBe('async')
@@ -1073,31 +1552,20 @@ describe('MediaRouterService', () => {
     expect(existsSync(output.assets[0]!.filePath!)).toBe(true)
   })
 
-  it('APIMart image.edit compresses oversized dataUrl in image_urls', async () => {
-    const dimension = 1280
-    const canvas = createCanvas(dimension, dimension)
-    const context = canvas.getContext('2d')
-    const imageData = context.createImageData(dimension, dimension)
-    let seed = 42
-    for (let index = 0; index < imageData.data.length; index += 4) {
-      seed = (seed * 1664525 + 1013904223) >>> 0
-      imageData.data[index] = seed & 0xff
-      imageData.data[index + 1] = (seed >>> 8) & 0xff
-      imageData.data[index + 2] = (seed >>> 16) & 0xff
-      imageData.data[index + 3] = 0xff
-    }
-    context.putImageData(imageData, 0, 0)
-    const oversizedDataUrl = canvas.toDataURL('image/png')
-    expect(oversizedDataUrl.length).toBeGreaterThan(3 * 1024 * 1024)
-
+  it('APIMart image.edit uploads oversized dataUrl and sends the public URL', async () => {
+    const oversizedDataUrl = `data:image/png;base64,${Buffer.alloc(3 * 1024 * 1024 + 1, 7).toString('base64')}`
+    const uploads: Array<{
+      targetProvider?: string | undefined
+      size: number
+      mimeType?: string | undefined
+    }> = []
     const fetchMock = makeFetch([
       {
         match: '/images/generations',
         respond: (init) => {
           const body = JSON.parse(String(init?.body ?? '{}')) as { image_urls?: string[] }
           expect(body.image_urls).toHaveLength(1)
-          expect(body.image_urls?.[0]).toMatch(/^data:image\/webp;base64,/)
-          expect(Buffer.byteLength(body.image_urls?.[0] ?? '', 'utf8')).toBeLessThanOrEqual(3 * 1024 * 1024)
+          expect(body.image_urls?.[0]).toBe('https://minio.yiqibyte.com/spark-desktop/apimart/reference.png')
           return { ok: true, status: 200, body: { data: [{ b64_json: PNG_PIXEL }] } }
         },
       },
@@ -1111,8 +1579,46 @@ describe('MediaRouterService', () => {
         prompt: 'compress this reference image',
         inputFiles: [{ type: 'image', dataUrl: oversizedDataUrl }],
       },
-      { providers: [makeProvider()], fetch: fetchMock },
+      {
+        providers: [makeProvider()],
+        fetch: fetchMock,
+        fallbackUploader: {
+          canHandle: (provider) => provider === 'apimart',
+          upload: async (input) => {
+            uploads.push({
+              targetProvider: input.targetProvider,
+              size: input.buffer.byteLength,
+              mimeType: input.mimeType,
+            })
+            return {
+              provider: 'apimart',
+              publicUrl: 'https://minio.yiqibyte.com/spark-desktop/apimart/reference.png',
+            }
+          },
+        },
+      },
     )
+    expect(uploads).toEqual([{ targetProvider: 'apimart', size: 3 * 1024 * 1024 + 1, mimeType: 'image/png' }])
+  })
+
+  it('APIMart image.edit reports auth_required when an oversized image cannot be uploaded', async () => {
+    const oversizedDataUrl = `data:image/png;base64,${Buffer.alloc(3 * 1024 * 1024 + 1, 7).toString('base64')}`
+
+    await expect(
+      router.invoke(
+        {
+          operation: 'image_edit',
+          capability: 'image.edit',
+          outputDir: tmpDir,
+          prompt: 'use this reference image',
+          inputFiles: [{ type: 'image', dataUrl: oversizedDataUrl }],
+        },
+        { providers: [makeProvider()] },
+      ),
+    ).rejects.toMatchObject({
+      code: 'auth_required',
+      message: expect.stringContaining('需要先登录 Spark'),
+    })
   })
 
   it('xAI does not support audio.transcription', () => {
@@ -1123,7 +1629,7 @@ describe('MediaRouterService', () => {
     expect(xai.supports('video.extend')).toBe(true)
   })
 
-  it('xAI image.edit routes through /images/edits with image {url, type} (dataUrl)', async () => {
+  it('xAI image.edit routes through /images/edits with image {url} (dataUrl)', async () => {
     // 用 holder 对象承载抓取到的 body/url，避免 CFA 把 let 变量收窄成 never。
     const captured: { body: Record<string, unknown>; url: string } = { body: {}, url: '' }
     const fetchMock = makeFetch([
@@ -1159,11 +1665,10 @@ describe('MediaRouterService', () => {
       },
     )
     expect(output.provider).toBe('xai')
-    // xAI 编辑走 /images/edits，源图按 image（{url, type:"image_url"} 对象）传入。
+    // xAI 编辑走 /images/edits，REST 源图按 image（{url}）传入。
     expect(captured.url).toBe('/images/edits')
     expect(captured.body.image).toEqual({
       url: `data:image/png;base64,${PNG_PIXEL}`,
-      type: 'image_url',
     })
     expect(captured.body.images).toBeUndefined()
     expect(captured.body.image_url).toBeUndefined()
@@ -1206,8 +1711,8 @@ describe('MediaRouterService', () => {
       },
     )
     expect(captured.body.images).toEqual([
-      { url: 'https://cdn/a.png', type: 'image_url' },
-      { url: 'https://cdn/b.png', type: 'image_url' },
+      { url: 'https://cdn/a.png' },
+      { url: 'https://cdn/b.png' },
     ])
     expect(captured.body.image).toBeUndefined()
     expect(captured.body.image_url).toBeUndefined()
@@ -1329,7 +1834,7 @@ describe('MediaRouterService', () => {
     expect((captured.body.image as { url: string }).url).toBe('https://cdn/a.png')
     expect(captured.body.aspect_ratio).toBe('16:9')
     expect(captured.body.resolution).toBe('2k')
-    expect(captured.body.image_format).toBe('png')
+    expect(captured.body).not.toHaveProperty('image_format')
   })
 
   it('xAI image.edit maps canvas camelCase params to native xAI fields', async () => {
@@ -1373,7 +1878,7 @@ describe('MediaRouterService', () => {
     expect(captured.body.aspect_ratio).toBe('16:9')
     expect(captured.body).not.toHaveProperty('aspectRatio')
     expect(captured.body.response_format).toBe('b64_json')
-    expect(captured.body.image_format).toBe('png')
+    expect(captured.body).not.toHaveProperty('image_format')
   })
 
   it('xAI video polling treats expired as a failed terminal state', async () => {
@@ -1482,9 +1987,9 @@ describe('MediaRouterService', () => {
         fetch: fetchMock,
       },
     )
-    // 带参考图的 image.generate 委托给 editImage，走 /images/edits + image {url, type} 对象
+    // 带参考图的 image.generate 委托给 editImage，走 /images/edits + image {url} 对象
     expect(captured.url).toBe('/images/edits')
-    expect(captured.body.image).toEqual({ url: 'https://cdn/ref.png', type: 'image_url' })
+    expect(captured.body.image).toEqual({ url: 'https://cdn/ref.png' })
   })
 
   it('image.generate without input image stays a pure text-to-image call (no image field)', async () => {
@@ -1563,6 +2068,50 @@ describe('MediaRouterService', () => {
     expect(summarized).not.toContain(longBase64)
   })
 
+  it('keeps the provider endpoint in requestCall while redacting signed input URL queries', async () => {
+    const signedUrl =
+      'https://uploads.spark.example/owners/user-1/reference.png?X-Amz-Signature=secret-signature'
+    const fetchMock = makeFetch([
+      {
+        match: '/images/edits',
+        respond: (init) => {
+          const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>
+          expect((body.image as { url: string }).url).toBe(signedUrl)
+          return { ok: true, status: 200, body: { data: [{ b64_json: PNG_PIXEL }] } }
+        },
+      },
+    ])
+
+    const { output } = await router.invoke(
+      {
+        operation: 'image_edit',
+        capability: 'image.edit',
+        outputDir: tmpDir,
+        prompt: 'cleanup',
+        inputFiles: [{ type: 'image', url: signedUrl }],
+      },
+      {
+        providers: [
+          makeProvider({
+            id: 'xai-1',
+            apiEndpoint: XAI_ENDPOINT,
+            mediaProvider: 'xai',
+            defaultModel: 'grok-imagine-image',
+            mediaCapabilities: ['image.generate', 'image.edit'],
+          }),
+        ],
+        fetch: fetchMock,
+      },
+    )
+
+    expect(output.requestCall?.url).toBe(`${XAI_ENDPOINT}/images/edits`)
+    const requestBody = output.requestCall?.body as { image: { url: string } }
+    expect(requestBody.image.url).toBe(
+      'https://uploads.spark.example/owners/user-1/reference.png?[REDACTED]',
+    )
+    expect(JSON.stringify(requestBody)).not.toContain('secret-signature')
+  })
+
   it('provider_http_error on non-ok response', async () => {
     const fetchMock = makeFetch([
       {
@@ -1626,6 +2175,51 @@ describe('MediaRouterService', () => {
       { providers: [first, second], providerProfileId: 'second', fetch: fetchMock },
     )
     expect(providerProfileId).toBe('second')
+  })
+
+  it('does not fall back when an explicitly selected provider is missing', async () => {
+    const fetchMock = vi.fn()
+    const fallback = makeProvider({ id: 'fallback', mediaCapabilities: ['image.generate'] })
+
+    await expect(
+      router.invoke(
+        {
+          operation: 'text_to_image',
+          capability: 'image.generate',
+          outputDir: tmpDir,
+          prompt: 'x',
+        },
+        {
+          providers: [fallback],
+          providerProfileId: 'missing-provider',
+          fetch: fetchMock as typeof fetch,
+        },
+      ),
+    ).rejects.toMatchObject({ code: 'provider_not_configured' })
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('does not fall back when an explicitly selected provider lacks the capability', async () => {
+    const fetchMock = vi.fn()
+    const selected = makeProvider({ id: 'selected', mediaCapabilities: ['audio.speech'] })
+    const fallback = makeProvider({ id: 'fallback', mediaCapabilities: ['image.generate'] })
+
+    await expect(
+      router.invoke(
+        {
+          operation: 'text_to_image',
+          capability: 'image.generate',
+          outputDir: tmpDir,
+          prompt: 'x',
+        },
+        {
+          providers: [selected, fallback],
+          providerProfileId: 'selected',
+          fetch: fetchMock as typeof fetch,
+        },
+      ),
+    ).rejects.toMatchObject({ code: 'capability_not_supported' })
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 
   it('uses manifest requestTemplate with selected modelId and parameter aliases', async () => {
@@ -1721,6 +2315,179 @@ describe('MediaRouterService', () => {
     expect((postedBody as Record<string, unknown> | null)?.size).toBeUndefined()
     expect((postedBody as Record<string, unknown> | null)?.filename).toBeUndefined()
     expect(existsSync(output.assets[0]!.filePath!)).toBe(true)
+  })
+
+  it('uses a custom manifest on a Bailian profile instead of the native Wan adapter', async () => {
+    let postedBody: Record<string, unknown> | null = null
+    const manifest: MediaModelManifest = {
+      id: 'custom:qwen-image-2.0-pro-2026-04-22',
+      providerKind: 'custom',
+      modelId: 'qwen-image-2.0-pro-2026-04-22',
+      displayName: 'Qwen Image custom contract',
+      domains: ['image'],
+      capabilities: [
+        {
+          id: 'image.generate',
+          label: '文生图',
+          input: { required: ['prompt'] },
+          output: { types: ['image'], mimeTypes: ['image/png'] },
+          paramSchema: {
+            type: 'object',
+            additionalProperties: true,
+            properties: {
+              size: { type: 'string' },
+              resolution: { type: 'string' },
+              n: { type: 'integer', minimum: 1, maximum: 4 },
+            },
+          },
+          defaults: { n: 1 },
+        },
+      ],
+      invocation: {
+        mode: 'sync',
+        endpoint: '/custom/images/generations',
+        method: 'POST',
+        contentType: 'json',
+        requestTemplate: { model: '{{modelId}}', prompt: '{{prompt}}' },
+        response: { kind: 'inline_base64', jsonPaths: ['data[].b64_json'] },
+      },
+      docs: { sourceUrls: [] },
+    }
+    const fetchMock = makeFetch([
+      {
+        match: '/custom/images/generations',
+        respond: (init) => {
+          postedBody = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>
+          return { ok: true, status: 200, body: { data: [{ b64_json: PNG_PIXEL }] } }
+        },
+      },
+    ])
+
+    const { output } = await router.invoke(
+      {
+        operation: 'text_to_image',
+        capability: 'image.generate',
+        outputDir: tmpDir,
+        prompt: 'a character sheet',
+        modelParams: {
+          size: '2048*1024',
+          resolution: '1k',
+          n: 1,
+          thinking_mode: true,
+        },
+      },
+      {
+        providers: [
+          makeProvider({
+            id: 'bailian-custom-qwen',
+            name: 'Bailian custom image',
+            defaultModel: manifest.modelId,
+            apiEndpoint: 'https://dashscope.aliyuncs.com/api/v1',
+            mediaProvider: 'bailian',
+            mediaCapabilities: ['image.generate'],
+            mediaModelManifests: [manifest],
+          }),
+        ],
+        providerProfileId: 'bailian-custom-qwen',
+        manifestId: manifest.id,
+        modelId: manifest.modelId,
+        fetch: fetchMock,
+      },
+    )
+
+    expect(output.provider).toBe('custom')
+    expect(output.model).toBe(manifest.modelId)
+    expect(postedBody).toMatchObject({
+      model: manifest.modelId,
+      prompt: 'a character sheet',
+      size: '2048*1024',
+      resolution: '1k',
+      n: 1,
+      thinking_mode: true,
+    })
+    expect(output.assets).toHaveLength(1)
+  })
+
+  it('allows custom size on a synthesized Bailian model while preserving the selected model', async () => {
+    let postedBody: Record<string, unknown> | null = null
+    const baseManifest = BUILTIN_MEDIA_MODEL_MANIFESTS.find(
+      (entry) => entry.id === 'bailian:wan2.7-image',
+    )!
+    const manifest: MediaModelManifest = {
+      ...baseManifest,
+      id: 'custom:qwen-image-2.0-pro-2026-04-22',
+      modelId: 'qwen-image-2.0-pro-2026-04-22',
+      displayName: 'Qwen Image synthesized contract',
+    }
+    const fetchMock = makeFetch([
+      {
+        match: '/multimodal-generation/generation',
+        respond: (init) => {
+          postedBody = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>
+          return {
+            ok: true,
+            status: 200,
+            body: {
+              request_id: 'qwen-image-request',
+              output: {
+                choices: [
+                  {
+                    message: {
+                      content: [{ type: 'image', image: `data:image/png;base64,${PNG_PIXEL}` }],
+                    },
+                  },
+                ],
+              },
+            },
+          }
+        },
+      },
+    ])
+
+    const { output } = await router.invoke(
+      {
+        operation: 'text_to_image',
+        capability: 'image.generate',
+        outputDir: tmpDir,
+        prompt: 'a character sheet',
+        modelParams: {
+          size: '2048*1024',
+          n: 1,
+          thinking_mode: true,
+          watermark: false,
+        },
+      },
+      {
+        providers: [
+          makeProvider({
+            id: 'bailian-synthesized-qwen',
+            name: 'Bailian synthesized image',
+            defaultModel: manifest.modelId,
+            apiEndpoint: 'https://dashscope.aliyuncs.com/api/v1',
+            mediaProvider: 'bailian',
+            mediaCapabilities: ['image.generate'],
+            mediaModelManifests: [manifest],
+          }),
+        ],
+        providerProfileId: 'bailian-synthesized-qwen',
+        manifestId: manifest.id,
+        modelId: manifest.modelId,
+        fetch: fetchMock,
+      },
+    )
+
+    expect(output.provider).toBe('bailian')
+    expect(output.model).toBe(manifest.modelId)
+    expect(postedBody).toMatchObject({
+      model: manifest.modelId,
+      parameters: {
+        size: '2048*1024',
+        n: 1,
+        thinking_mode: true,
+        watermark: false,
+      },
+    })
+    expect(output.assets).toHaveLength(1)
   })
 
   it('rejects manifest parameters outside the declared schema before provider calls', async () => {
@@ -2245,7 +3012,7 @@ describe('VolcengineArkMediaAdapter', () => {
     expect((firstFrame!.image_url as { url: string }).url).toBe('https://cdn/first.png')
   })
 
-  it('Seedance image_to_video with role-less images infers first_frame + last_frame + references', async () => {
+  it('Seedance image_to_video with two role-less images infers first_frame + last_frame', async () => {
     const videoBuf = Buffer.from([0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70])
     const seedanceManifest = BUILTIN_MEDIA_MODEL_MANIFESTS.find(
       (entry) => entry.id === 'volcengine:doubao-seedance-2-0-260128',
@@ -2286,11 +3053,10 @@ describe('VolcengineArkMediaAdapter', () => {
         capability: 'video.image_to_video',
         outputDir: tmpDir,
         prompt: '首尾帧过渡',
-        // 无 role 图：i2v 兜底应分别作 first_frame / last_frame，其余作为 reference_image。
+        // 无 role 图：i2v 兜底应分别作 first_frame / last_frame。
         inputFiles: [
           { type: 'image', url: 'https://cdn/start.png' },
           { type: 'image', url: 'https://cdn/end.png' },
-          { type: 'image', url: 'https://cdn/ref.png' },
         ],
       },
       {
@@ -2317,8 +3083,43 @@ describe('VolcengineArkMediaAdapter', () => {
     expect((firstFrame!.image_url as { url: string }).url).toBe('https://cdn/start.png')
     expect((lastFrame!.image_url as { url: string }).url).toBe('https://cdn/end.png')
     const refs = content.filter((item) => item.role === 'reference_image')
-    expect(refs).toHaveLength(1)
-    expect((refs[0]!.image_url as { url: string }).url).toBe('https://cdn/ref.png')
+    expect(refs).toHaveLength(0)
+  })
+
+  it('Seedance rejects mixing implicit first-and-last frames with a third reference image', async () => {
+    const seedanceManifest = BUILTIN_MEDIA_MODEL_MANIFESTS.find(
+      (entry) => entry.id === 'volcengine:doubao-seedance-2-0-260128',
+    )!
+
+    await expect(
+      router.invoke(
+        {
+          operation: 'image_to_video',
+          capability: 'video.image_to_video',
+          outputDir: tmpDir,
+          prompt: '首尾帧过渡',
+          inputFiles: [
+            { type: 'image', url: 'https://cdn/start.png' },
+            { type: 'image', url: 'https://cdn/end.png' },
+            { type: 'image', url: 'https://cdn/ref.png' },
+          ],
+        },
+        {
+          providers: [
+            makeProvider({
+              id: 'volc-prov',
+              name: '火山 Seedance',
+              defaultModel: 'doubao-seedance-2-0-260128',
+              apiEndpoint: 'https://ark.cn-beijing.volces.com/api/v3',
+              mediaProvider: 'volcengine-ark',
+              mediaCapabilities: ['video.image_to_video'],
+              mediaModelManifests: [seedanceManifest],
+            }),
+          ],
+          fetch: makeFetch([]),
+        },
+      ),
+    ).rejects.toThrow('首帧/首尾帧模式与多模态参考模式互斥，不能混用')
   })
 
   it('Seedream image.edit (multi-image fusion): passes image[] array and honors searchEnabled alias', async () => {
@@ -2383,13 +3184,13 @@ describe('VolcengineArkMediaAdapter', () => {
     expect(postedBody.tools).toEqual([{ type: 'web_search' }])
   })
 
-  it('Seedream 4.5: 不发 output_format / response_format（这俩是 5.0 新增字段，4.5 传了平台报 400）', async () => {
+  it('Seedream 4.5: 不发 output_format，但支持通用 response_format', async () => {
     // 回归测试：用户报告 4.5 生图报 "output_format is not supported by the current model"。
-    // 4.5 的 manifest schema 已移除 outputFormat/responseFormat 字段，adapter 的 schema 网关
-    // 也会拦截——即使 modelParams 显式传或 preset mediaDefaults 兜底，都不应透传给平台。
+    // 4.5 的 manifest schema 已移除 outputFormat，但 response_format 是通用响应参数。
     const seedreamManifest = BUILTIN_MEDIA_MODEL_MANIFESTS.find(
       (entry) => entry.id === 'volcengine:doubao-seedream-4-5-251128',
-    )!
+    )
+    if (!seedreamManifest) throw new Error('Seedream 4.5 manifest not found')
     let postedBody: Record<string, unknown> = {}
     const fetchMock = makeFetch([
       {
@@ -2440,12 +3241,67 @@ describe('VolcengineArkMediaAdapter', () => {
     expect(postedBody.prompt).toBe('一只赛博朋克风格的猫')
     expect(postedBody.size).toBe('4K')
     expect(postedBody.watermark).toBe(false)
-    // 关键断言：4.5 不支持 output_format / response_format，必须 undefined
+    // 关键断言：4.5 不支持 output_format；response_format=url 可正常使用。
     expect(postedBody.output_format).toBeUndefined()
-    expect(postedBody.response_format).toBeUndefined()
+    expect(postedBody.response_format).toBe('url')
     expect(output.mode).toBe('sync')
     expect(output.assets[0]?.type).toBe('image')
     expect(existsSync(output.assets[0]!.filePath!)).toBe(true)
+  })
+
+  it('Seedream uses canonical provider size defaults and still accepts legacy resolution defaults', async () => {
+    const seedreamManifest = BUILTIN_MEDIA_MODEL_MANIFESTS.find(
+      (entry) => entry.id === 'volcengine:doubao-seedream-4-5-251128',
+    )
+    if (!seedreamManifest) throw new Error('Seedream 4.5 manifest not found')
+
+    const invokeWithDefaults = async (imageDefaults: { size?: string; resolution?: string }) => {
+      let postedBody: Record<string, unknown> = {}
+      const fetchMock = makeFetch([
+        {
+          match: '/images/generations',
+          respond: (init) => {
+            postedBody = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>
+            return { ok: true, status: 200, body: { data: [{ url: 'https://cdn/default.png' }] } }
+          },
+        },
+        {
+          match: 'https://cdn/default.png',
+          respond: () => ({
+            ok: true,
+            status: 200,
+            body: null,
+            binary: Buffer.from(PNG_PIXEL, 'base64'),
+          }),
+        },
+      ])
+      await router.invoke(
+        {
+          operation: 'text_to_image',
+          capability: 'image.generate',
+          outputDir: tmpDir,
+          prompt: 'default size',
+        },
+        {
+          providers: [
+            makeProvider({
+              id: `volc-${imageDefaults.size ?? imageDefaults.resolution}`,
+              defaultModel: 'doubao-seedream-4-5-251128',
+              apiEndpoint: 'https://ark.cn-beijing.volces.com/api/v3',
+              mediaProvider: 'volcengine-ark',
+              mediaCapabilities: ['image.generate'],
+              mediaDefaults: { image: imageDefaults },
+              mediaModelManifests: [seedreamManifest],
+            }),
+          ],
+          fetch: fetchMock,
+        },
+      )
+      return postedBody
+    }
+
+    expect((await invokeWithDefaults({ size: '2K' })).size).toBe('2K')
+    expect((await invokeWithDefaults({ resolution: '4K' })).size).toBe('4K')
   })
 
   it('Seedream 4.5: drops unsupported fast prompt mode and stream before provider request', async () => {
@@ -2561,11 +3417,11 @@ describe('VolcengineArkMediaAdapter', () => {
     expect(postedBody.tools).toEqual([{ type: 'web_search' }])
   })
 
-  it('Seedream 5.0 (主模型): 不暴露 searchEnabled，即使传入也不发 tools', async () => {
-    // 主模型 5.0 不支持联网搜索；schema 已移除 searchEnabled，但 adapter 仍可能收到
+  it('Seedream 5.0 Pro: 不暴露 searchEnabled，即使传入也不发 tools', async () => {
+    // Pro 不支持联网搜索；schema 已移除 searchEnabled，但 adapter 仍可能收到
     // 透传的 modelParams。验证：tools 字段绝不能出现，避免平台报错。
     const seedreamManifest = BUILTIN_MEDIA_MODEL_MANIFESTS.find(
-      (entry) => entry.id === 'volcengine:doubao-seedream-5-0-260128',
+      (entry) => entry.id === 'volcengine:doubao-seedream-5-0-pro-260628',
     )!
     let postedBody: Record<string, unknown> = {}
     const fetchMock = makeFetch([
@@ -2601,7 +3457,7 @@ describe('VolcengineArkMediaAdapter', () => {
           makeProvider({
             id: 'volc-main',
             name: '火山 Seedream',
-            defaultModel: 'doubao-seedream-5-0-260128',
+            defaultModel: 'doubao-seedream-5-0-pro-260628',
             apiEndpoint: 'https://ark.cn-beijing.volces.com/api/v3',
             mediaProvider: 'volcengine-ark',
             mediaApiType: 'sync',
@@ -2613,7 +3469,7 @@ describe('VolcengineArkMediaAdapter', () => {
       },
     )
 
-    expect(postedBody.model).toBe('doubao-seedream-5-0-260128')
+    expect(postedBody.model).toBe('doubao-seedream-5-0-pro-260628')
     expect(postedBody.tools).toBeUndefined()
   })
 
@@ -2809,11 +3665,10 @@ describe('VolcengineArkMediaAdapter', () => {
     expect(postedBody.output_format).toBeUndefined()
   })
 
-  it('Seedream 5.0 主模型: forwards guidance_scale, drops searchEnabled via forbidden_by_contract', async () => {
-    // 文档 1541523：5.0 主模型独有 guidance_scale [1,10]；不支持联网搜索（searchEnabled
-    // 由 seedream5ParamPolicy.forbidden 拦截，产 forbidden_by_contract dropped）。
+  it('Seedream 5.0 Pro: rejects undocumented guidance_scale before provider request', async () => {
+    // 官方当前参数表不包含 guidance_scale，调用层必须在发请求前阻止。
     const seedream5Manifest = BUILTIN_MEDIA_MODEL_MANIFESTS.find(
-      (entry) => entry.id === 'volcengine:doubao-seedream-5-0-260128',
+      (entry) => entry.id === 'volcengine:doubao-seedream-5-0-pro-260628',
     )!
     let postedBody: Record<string, unknown> = {}
     const fetchMock = makeFetch([
@@ -2835,36 +3690,33 @@ describe('VolcengineArkMediaAdapter', () => {
       },
     ])
 
-    const { output } = await router.invoke(
-      {
-        operation: 'text_to_image',
-        capability: 'image.generate',
-        outputDir: tmpDir,
-        prompt: '一只赛博朋克龙',
-        modelParams: { guidanceScale: 7.5, searchEnabled: true },
-      },
-      {
-        providers: [
-          makeProvider({
-            id: 'volc-seed5',
-            name: '火山 Seedream 5.0',
-            defaultModel: 'doubao-seedream-5-0-260128',
-            apiEndpoint: 'https://ark.cn-beijing.volces.com/api/v3',
-            mediaProvider: 'volcengine-ark',
-            mediaApiType: 'sync',
-            mediaCapabilities: ['image.generate'],
-            mediaModelManifests: [seedream5Manifest],
-          }),
-        ],
-        fetch: fetchMock,
-      },
-    )
-
-    // guidance_scale 在 [1,10] 范围内透传
-    expect(postedBody.guidance_scale).toBe(7.5)
-    // searchEnabled 被 paramPolicy.forbidden 裁掉，不进入 tools
-    expect(postedBody.tools).toBeUndefined()
-    expect(output.mode).toBe('sync')
+    await expect(
+      router.invoke(
+        {
+          operation: 'text_to_image',
+          capability: 'image.generate',
+          outputDir: tmpDir,
+          prompt: '一只赛博朋克龙',
+          modelParams: { guidanceScale: 7.5, searchEnabled: true },
+        },
+        {
+          providers: [
+            makeProvider({
+              id: 'volc-seed5',
+              name: '火山 Seedream 5.0',
+              defaultModel: 'doubao-seedream-5-0-pro-260628',
+              apiEndpoint: 'https://ark.cn-beijing.volces.com/api/v3',
+              mediaProvider: 'volcengine-ark',
+              mediaApiType: 'sync',
+              mediaCapabilities: ['image.generate'],
+              mediaModelManifests: [seedream5Manifest],
+            }),
+          ],
+          fetch: fetchMock,
+        },
+      ),
+    ).rejects.toThrow('官方参数不包含 guidanceScale')
+    expect(postedBody).toEqual({})
   })
 
   it('Seedream 5.0 lite: forwards 自定义 size 像素值（方式2，x-allow-custom）', async () => {
@@ -2975,6 +3827,7 @@ describe('VolcengineArkMediaAdapter', () => {
 
   it('Google Veo adapter polls operation and downloads generated video', async () => {
     let downloadHeader = ''
+    const submissions: Array<{ requestId: string; response: unknown; requestCall?: unknown }> = []
     const fetchMock = makeFetch([
       {
         match: '/models/veo-3.1-generate-preview:predictLongRunning',
@@ -3030,11 +3883,27 @@ describe('VolcengineArkMediaAdapter', () => {
           }),
         ],
         fetch: fetchMock,
+        onTaskSubmitted: (submission) => {
+          submissions.push(submission)
+          throw new Error('diagnostic callback unavailable')
+        },
       },
     )
 
     expect(output.mode).toBe('async')
     expect(output.requestId).toBe('operations/op-1')
+    expect(submissions).toHaveLength(1)
+    expect(submissions[0]).toMatchObject({
+      requestId: 'operations/op-1',
+      response: { name: 'operations/op-1' },
+      requestCall: {
+        method: 'POST',
+        response: { status: 200 },
+      },
+    })
+    expect(
+      String((submissions[0]?.requestCall as { response?: { body?: unknown } })?.response?.body),
+    ).toContain('operations/op-1')
     expect(downloadHeader).toBe('sk-test')
     expect(output.assets[0]?.type).toBe('video')
     expect(existsSync(output.assets[0]!.filePath!)).toBe(true)
@@ -3134,7 +4003,7 @@ describe('VolcengineArkMediaAdapter', () => {
     expect(legacy).toBeUndefined()
   })
 
-  it('Seedance 1.x manifests are registered with duration [2,12]', () => {
+  it('Seedance 1.x manifests expose their documented duration ranges', () => {
     const ids = [
       'volcengine:doubao-seedance-1-5-pro-251215',
       'volcengine:doubao-seedance-1-0-pro-250528',
@@ -3144,10 +4013,15 @@ describe('VolcengineArkMediaAdapter', () => {
       const manifest = BUILTIN_MEDIA_MODEL_MANIFESTS.find((entry) => entry.id === id)
       expect(manifest, `${id} missing`).toBeDefined()
       const schema = manifest!.capabilities[0]?.paramSchema as {
-        properties?: Record<string, { minimum?: number; maximum?: number }>
+        properties?: Record<string, { minimum?: number; maximum?: number; enum?: number[] }>
       }
-      expect(schema.properties?.durationSeconds?.minimum).toBe(2)
-      expect(schema.properties?.durationSeconds?.maximum).toBe(12)
+      const duration = schema.properties?.durationSeconds
+      if (id.includes('1-5')) {
+        expect(duration?.enum).toEqual([-1, 4, 5, 6, 7, 8, 9, 10, 11, 12])
+      } else {
+        expect(duration?.minimum).toBe(2)
+        expect(duration?.maximum).toBe(12)
+      }
     }
   })
 })
@@ -3223,7 +4097,7 @@ describe('media adapters reject unknown params under Contract V2', () => {
     expect(postedBody!).not.toHaveProperty('size')
   })
 
-  it('APIMart gpt-image-2 only passes whitelisted params (aspect_ratio/output_format/resolution)', async () => {
+  it('APIMart gpt-image-2 resolves conflicting canvas dimensions to documented size ratio', async () => {
     let postedBody: Record<string, unknown> | null = null
     const fetchMock = makeFetch([
       {
@@ -3247,8 +4121,9 @@ describe('media adapters reject unknown params under Contract V2', () => {
         outputDir: tmpDir,
         prompt: 'apimart whitelist',
         modelParams: {
-          aspectRatio: '16:9',
-          resolution: '2K',
+          size: '2048x1024',
+          aspect_ratio: '2:1',
+          resolution: '2k',
           output_format: 'png',
           // 未在 passthrough.allow 中：必须被丢弃，避免 GPT-Image-2 平台 400
           seed: 42,
@@ -3273,19 +4148,18 @@ describe('media adapters reject unknown params under Contract V2', () => {
     )
 
     expect(postedBody).not.toBeNull()
-    // gpt-image-2 schema 的 size 字段已支持比例型 enum；adapter 层 buildImageRequestParams
-    // 会把 aspectRatio '16:9' 进一步转成像素值 '1536x1024'。resolution/output_format 透传。
     expect(postedBody).toMatchObject({
       prompt: 'apimart whitelist',
-      size: '1536x1024',
-      resolution: '2K',
+      size: '2:1',
+      resolution: '2k',
       output_format: 'png',
     })
+    expect(postedBody!).not.toHaveProperty('aspect_ratio')
     expect(postedBody!).not.toHaveProperty('style_preset')
     expect(postedBody!).not.toHaveProperty('seed')
   })
 
-  it('Volcengine Ark Seedream 5.0 (main) drops searchEnabled (forbidden by contract)', async () => {
+  it('Volcengine Ark Seedream 5.0 Pro drops unsupported searchEnabled', async () => {
     let postedBody: Record<string, unknown> | null = null
     const fetchMock = makeFetch([
       {
@@ -3310,12 +4184,12 @@ describe('media adapters reject unknown params under Contract V2', () => {
       },
     ])
     const seedreamManifest = BUILTIN_MEDIA_MODEL_MANIFESTS.find(
-      (m) => m.id === 'volcengine:doubao-seedream-5-0-260128',
+      (m) => m.id === 'volcengine:doubao-seedream-5-0-pro-260628',
     )!
     expect(seedreamManifest).toBeDefined()
-    // sanity: M5-c 保证主模型 forbidden searchEnabled
+    // Pro 使用 strict policy，schema 未声明的联网搜索会被裁掉。
     const policy = seedreamManifest.capabilities[0]?.paramPolicy
-    expect(policy?.forbidden?.find((f) => f.name === 'searchEnabled')).toBeDefined()
+    expect(policy?.strict).toBe(true)
 
     const router = new MediaRouterService()
     await router.invoke(
@@ -3335,12 +4209,12 @@ describe('media adapters reject unknown params under Contract V2', () => {
             name: 'Volcengine Ark',
             apiEndpoint: 'https://ark.cn-beijing.volces.com/api/v3',
             mediaProvider: 'volcengine-ark',
-            defaultModel: 'doubao-seedream-5-0-260128',
+            defaultModel: 'doubao-seedream-5-0-pro-260628',
             mediaCapabilities: ['image.generate'],
             mediaModelManifests: [seedreamManifest],
           }),
         ],
-        modelId: 'doubao-seedream-5-0-260128',
+        modelId: 'doubao-seedream-5-0-pro-260628',
         fetch: fetchMock,
       },
     )
@@ -3348,5 +4222,360 @@ describe('media adapters reject unknown params under Contract V2', () => {
     expect(postedBody).not.toBeNull()
     // 联网搜索是 tools:[{type:'web_search'}]，searchEnabled true 但 forbidden 时绝不发出
     expect(postedBody!).not.toHaveProperty('tools')
+  })
+})
+
+describe('BailianMediaAdapter', () => {
+  let tmpDir: string
+
+  beforeEach(() => {
+    tmpDir = path.join(
+      os.tmpdir(),
+      `spark-bailian-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    )
+    mkdirSync(tmpDir, { recursive: true })
+  })
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true })
+  })
+
+  it('uses Wan 2.7 synchronous image request format and persists the result', async () => {
+    let submitted: Record<string, unknown> | undefined
+    const fetchMock = makeFetch([
+      {
+        match: '/multimodal-generation/generation',
+        respond: (init) => {
+          submitted = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>
+          return {
+            ok: true,
+            status: 200,
+            body: {
+              request_id: 'image-request',
+              output: {
+                choices: [
+                  {
+                    message: {
+                      content: [{ type: 'image', image: `data:image/png;base64,${PNG_PIXEL}` }],
+                    },
+                  },
+                ],
+              },
+            },
+          }
+        },
+      },
+    ])
+    const manifest = BUILTIN_MEDIA_MODEL_MANIFESTS.find(
+      (entry) => entry.id === 'bailian:wan2.7-image-pro',
+    )!
+    const router = new MediaRouterService()
+
+    const result = await router.invoke(
+      {
+        operation: 'text_to_image',
+        capability: 'image.generate',
+        prompt: 'a flower shop',
+        outputDir: tmpDir,
+        modelParams: { size: '2K', n: 1, thinking_mode: true },
+      },
+      {
+        providers: [
+          makeProvider({
+            id: 'bailian-image',
+            name: 'Bailian',
+            defaultModel: manifest.modelId,
+            apiEndpoint: 'https://workspace.cn-beijing.maas.aliyuncs.com',
+            mediaProvider: 'bailian',
+            mediaCapabilities: ['image.generate', 'image.edit'],
+            mediaModelManifests: [manifest],
+          }),
+        ],
+        modelId: manifest.modelId,
+        fetch: fetchMock,
+      },
+    )
+
+    expect(result.output.requestId).toBe('image-request')
+    expect(result.output.assets).toHaveLength(1)
+    expect(submitted).toMatchObject({
+      model: 'wan2.7-image-pro',
+      parameters: { size: '2K', n: 1, thinking_mode: true },
+    })
+    expect(fetchMock.calls[0]?.url).toBe(
+      'https://workspace.cn-beijing.maas.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation',
+    )
+  })
+
+  it('downloads Wan 2.7 signed image URLs instead of decoding them as base64', async () => {
+    const signedUrl =
+      'https://dashscope-7c2c.oss-accelerate.aliyuncs.com/result.png?Expires=1784470372&Signature=abc'
+    const fetchMock = makeFetch([
+      {
+        match: '/multimodal-generation/generation',
+        respond: () => ({
+          ok: true,
+          status: 200,
+          body: {
+            request_id: 'signed-image-request',
+            output: {
+              choices: [
+                { message: { content: [{ type: 'image', image: signedUrl }] } },
+              ],
+            },
+          },
+        }),
+      },
+      {
+        match: '/result.png',
+        respond: () => ({
+          ok: true,
+          status: 200,
+          body: null,
+          binary: Buffer.from(PNG_PIXEL, 'base64'),
+        }),
+      },
+    ])
+    const manifest = BUILTIN_MEDIA_MODEL_MANIFESTS.find(
+      (entry) => entry.id === 'bailian:wan2.7-image',
+    )!
+    const router = new MediaRouterService()
+
+    const result = await router.invoke(
+      {
+        operation: 'text_to_image',
+        capability: 'image.generate',
+        prompt: 'a flower shop',
+        outputDir: tmpDir,
+      },
+      {
+        providers: [
+          makeProvider({
+            id: 'bailian-signed-image',
+            name: 'Bailian',
+            defaultModel: manifest.modelId,
+            apiEndpoint: 'https://workspace.cn-beijing.maas.aliyuncs.com',
+            mediaProvider: 'bailian',
+            mediaCapabilities: ['image.generate'],
+            mediaModelManifests: [manifest],
+          }),
+        ],
+        modelId: manifest.modelId,
+        fetch: fetchMock,
+      },
+    )
+
+    expect(result.output.assets).toHaveLength(1)
+    expect(readFileSync(result.output.assets[0]!.filePath!)).toEqual(
+      Buffer.from(PNG_PIXEL, 'base64'),
+    )
+    expect(fetchMock.calls.map((call) => call.url)).toContain(signedUrl)
+  })
+
+  it('converts a Bailian OpenAI-compatible workspace endpoint to native AIGC URL', async () => {
+    const fetchMock = makeFetch([
+      {
+        match: '/multimodal-generation/generation',
+        respond: () => ({
+          ok: true,
+          status: 200,
+          body: {
+            request_id: 'compatible-workspace-image-request',
+            output: {
+              choices: [{ message: { content: [{ type: 'image', image: `data:image/png;base64,${PNG_PIXEL}` }] } }],
+            },
+          },
+        }),
+      },
+    ])
+    const manifest = BUILTIN_MEDIA_MODEL_MANIFESTS.find(
+      (entry) => entry.id === 'bailian:wan2.7-image-pro',
+    )!
+    const router = new MediaRouterService()
+
+    await router.invoke(
+      {
+        operation: 'text_to_image',
+        capability: 'image.generate',
+        prompt: 'a flower shop',
+        outputDir: tmpDir,
+      },
+      {
+        providers: [
+          makeProvider({
+            id: 'bailian-compatible-workspace',
+            name: 'Bailian',
+            defaultModel: manifest.modelId,
+            apiEndpoint: 'https://workspace.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+            mediaProvider: 'bailian',
+            mediaCapabilities: ['image.generate'],
+            mediaModelManifests: [manifest],
+          }),
+        ],
+        modelId: manifest.modelId,
+        fetch: fetchMock,
+      },
+    )
+
+    expect(fetchMock.calls[0]?.url).toBe(
+      'https://workspace.cn-beijing.maas.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation',
+    )
+  })
+
+  it('rejects an invalid Wan 2.7 image-to-video media combination before submitting', async () => {
+    const manifest = BUILTIN_MEDIA_MODEL_MANIFESTS.find(
+      (entry) => entry.id === 'bailian:wan2.7-i2v-2026-04-25',
+    )!
+    const router = new MediaRouterService()
+
+    await expect(
+      router.invoke(
+        {
+          operation: 'image_to_video',
+          capability: 'video.image_to_video',
+          prompt: 'animate it',
+          outputDir: tmpDir,
+          inputFiles: [
+            { type: 'video', url: 'https://example.test/clip.mp4', mimeType: 'video/mp4' },
+            { type: 'audio', url: 'https://example.test/voice.mp3', mimeType: 'audio/mpeg' },
+          ],
+        },
+        {
+          providers: [
+            makeProvider({
+              id: 'bailian-video',
+              name: 'Bailian',
+              defaultModel: manifest.modelId,
+              apiEndpoint: 'https://dashscope.aliyuncs.com/api/v1/services/aigc',
+              mediaProvider: 'bailian',
+              mediaCapabilities: ['video.image_to_video'],
+              mediaModelManifests: [manifest],
+            }),
+          ],
+          modelId: manifest.modelId,
+        },
+      ),
+    ).rejects.toMatchObject({ code: 'invalid_input' })
+  })
+
+  it('routes a configured Wan reference model to its distinct capability', () => {
+    const manifest = BUILTIN_MEDIA_MODEL_MANIFESTS.find(
+      (entry) => entry.id === 'bailian:wan2.7-r2v',
+    )!
+    const router = new MediaRouterService()
+    const capability = router.resolveCapabilityForInput(
+      {
+        operation: 'text_to_video',
+        outputDir: tmpDir,
+        inputFiles: [
+          {
+            type: 'image',
+            role: 'reference',
+            url: 'https://example.test/character.png',
+            mimeType: 'image/png',
+          },
+        ],
+      },
+      {
+        providers: [
+          makeProvider({
+            id: 'bailian-r2v',
+            name: 'Bailian',
+            defaultModel: manifest.modelId,
+            mediaProvider: 'bailian',
+            mediaCapabilities: ['video.reference_to_video'],
+            mediaModelManifests: [manifest],
+          }),
+        ],
+        modelId: manifest.modelId,
+      },
+    )
+
+    expect(capability).toBe('video.reference_to_video')
+  })
+
+  it('submits prompt-optional video edit with aliased params, public local input, and channel task id', async () => {
+    const manifest = BUILTIN_MEDIA_MODEL_MANIFESTS.find(
+      (entry) => entry.id === 'bailian:wan2.7-videoedit',
+    )!
+    const inputPath = path.join(tmpDir, 'source.mp4')
+    writeFileSync(inputPath, Buffer.from([0, 0, 0, 24, 0x66, 0x74, 0x79, 0x70]))
+    let submitted: Record<string, unknown> | undefined
+    const videoBuffer = Buffer.from([0, 0, 0, 24, 0x66, 0x74, 0x79, 0x70])
+    const fetchMock = makeFetch([
+      {
+        match: '/video-generation/video-synthesis',
+        respond: (init) => {
+          submitted = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>
+          expect(new Headers(init?.headers).get('x-dashscope-async')).toBe('enable')
+          return {
+            ok: true,
+            status: 200,
+            body: { request_id: 'submit-request', output: { task_id: 'bailian-task-1' } },
+          }
+        },
+      },
+      {
+        match: '/tasks/bailian-task-1',
+        respond: () => ({
+          ok: true,
+          status: 200,
+          body: {
+            request_id: 'poll-request',
+            output: { task_id: 'bailian-task-1', task_status: 'SUCCEEDED', video_url: 'https://cdn/edit.mp4' },
+          },
+        }),
+      },
+      {
+        match: 'https://cdn/edit.mp4',
+        respond: () => ({ ok: true, status: 200, body: null, binary: videoBuffer }),
+      },
+    ])
+    const taskSubmissions: string[] = []
+    const router = new MediaRouterService()
+
+    const { output } = await router.invoke(
+      {
+        operation: 'video_edit',
+        capability: 'video.edit',
+        outputDir: tmpDir,
+        inputFiles: [{ type: 'video', path: inputPath, mimeType: 'video/mp4' }],
+        modelParams: { aspectRatio: '9:16', durationSeconds: 4, audioSetting: 'origin' },
+      },
+      {
+        providers: [
+          makeProvider({
+            id: 'bailian-video-edit',
+            name: 'Bailian',
+            defaultModel: manifest.modelId,
+            apiEndpoint: 'https://dashscope.aliyuncs.com/api/v1',
+            mediaProvider: 'bailian',
+            mediaCapabilities: ['video.edit'],
+            mediaModelManifests: [manifest],
+            mediaDefaults: { polling: { intervalMs: 1, timeoutMs: 1000 } },
+          }),
+        ],
+        modelId: manifest.modelId,
+        fetch: fetchMock,
+        fallbackUploader: {
+          canHandle: (provider) => provider === 'bailian',
+          upload: async () => ({ provider: 'bailian', publicUrl: 'https://cdn/source.mp4' }),
+        },
+        onTaskSubmitted: (submission) => taskSubmissions.push(submission.requestId),
+      },
+    )
+
+    expect(fetchMock.calls[0]?.url).toBe(
+      'https://dashscope.aliyuncs.com/api/v1/services/aigc/video-generation/video-synthesis',
+    )
+    expect(submitted).toMatchObject({
+      model: 'wan2.7-videoedit',
+      input: { media: [{ type: 'video', url: 'https://cdn/source.mp4' }] },
+      parameters: { ratio: '9:16', duration: 4, audio_setting: 'origin' },
+    })
+    expect((submitted?.input as Record<string, unknown>).prompt).toBeUndefined()
+    expect(taskSubmissions).toEqual(['bailian-task-1'])
+    expect(output.requestId).toBe('bailian-task-1')
+    expect(readFileSync(output.assets[0]!.filePath!)).toEqual(videoBuffer)
   })
 })

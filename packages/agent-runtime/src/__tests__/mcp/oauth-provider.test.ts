@@ -11,7 +11,7 @@ describe('SparkMcpOAuthProvider', () => {
     })
 
     expect(provider.clientMetadata).toMatchObject({
-      client_name: 'Spark Agent',
+      client_name: 'Spark Canvas',
       redirect_uris: ['http://127.0.0.1:1234/callback'],
       grant_types: ['authorization_code', 'refresh_token'],
       response_types: ['code'],
@@ -29,12 +29,26 @@ describe('SparkMcpOAuthProvider', () => {
     })
 
     await provider.saveClientInformation({ client_id: 'client-1', client_secret: 'secret' })
-    await provider.saveTokens({ access_token: 'access', refresh_token: 'refresh', token_type: 'Bearer', expires_in: 60 })
+    await provider.saveTokens({
+      access_token: 'access',
+      refresh_token: 'refresh',
+      token_type: 'Bearer',
+      expires_in: 60,
+    })
     await provider.saveDiscoveryState({ authorizationServerUrl: 'https://auth.example.com' })
 
-    expect(await provider.clientInformation()).toMatchObject({ client_id: 'client-1', client_secret: 'secret' })
-    expect(await provider.tokens()).toMatchObject({ access_token: 'access', refresh_token: 'refresh', expires_at: expect.any(Number) })
-    expect(await provider.discoveryState()).toMatchObject({ authorizationServerUrl: 'https://auth.example.com' })
+    expect(await provider.clientInformation()).toMatchObject({
+      client_id: 'client-1',
+      client_secret: 'secret',
+    })
+    expect(await provider.tokens()).toMatchObject({
+      access_token: 'access',
+      refresh_token: 'refresh',
+      expires_at: expect.any(Number),
+    })
+    expect(await provider.discoveryState()).toMatchObject({
+      authorizationServerUrl: 'https://auth.example.com',
+    })
 
     await provider.invalidateCredentials('tokens')
     expect(await provider.tokens()).toBeUndefined()

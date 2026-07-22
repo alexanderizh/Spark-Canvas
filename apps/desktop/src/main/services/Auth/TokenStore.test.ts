@@ -110,4 +110,30 @@ describe('TokenStore persistent fallback', () => {
     expect(secondStore.isAuthenticated()).toBe(true)
     expect(secondStore.isPersistent()).toBe(true)
   })
+
+  it('keeps encrypted backups isolated between credential services', async () => {
+    const { TokenStore } = await import('./TokenStore')
+    const canvasSession = { ...session, token: 'canvas-token', userId: 'canvas-user' }
+    const mcpSession = { ...session, token: 'mcp-token', userId: 'mcp-server' }
+
+    await new TokenStore('SparkCanvas.CloudAuth').save(canvasSession)
+    await new TokenStore('spark-canvas-mcp-oauth:server-1').save(mcpSession)
+    mocks.credentials.clear()
+
+    await expect(new TokenStore('SparkCanvas.CloudAuth').load()).resolves.toEqual(canvasSession)
+    await expect(new TokenStore('spark-canvas-mcp-oauth:server-1').load()).resolves.toEqual(
+      mcpSession,
+    )
+  })
+
+  it('does not read the old Spark Agent cloud auth service', async () => {
+    const { TokenStore } = await import('./TokenStore')
+    mocks.credentials.set('SparkAgent.CloudAuth:auth_token', 'old-access-token')
+    mocks.credentials.set('SparkAgent.CloudAuth:refresh_token', 'old-refresh-token')
+    mocks.credentials.set('SparkAgent.CloudAuth:user_id', 'old-user')
+
+    const loaded = await new TokenStore('SparkCanvas.CloudAuth').load()
+
+    expect(loaded).toEqual({})
+  })
 })

@@ -13,24 +13,20 @@
  */
 
 import { createLogger, SparkError } from '@spark/shared'
-import { readFile } from 'node:fs/promises'
-import { basename, extname } from 'node:path'
+import { readFile, stat } from 'node:fs/promises'
+import { basename, extname, isAbsolute, resolve } from 'node:path'
 import type {
   AuthCaptchaResponse,
   AuthChangePasswordResponse,
-  AuthLoginResponse,
   AuthMeResponse,
-  AuthRegisterResponse,
   AuthSession,
   AuthBindStatusResponse,
   AuthWechatQrResponse,
   AuthWechatPollResponse,
   AuthWechatBindEmailSendCodeResponse,
-  AuthWechatBindEmailResponse,
   AuthBootstrapResponse,
   AuthUploadFileResponse,
   AuthUpdateMeResponse,
-  AuthLoginSmsResponse,
   AuthClientConfigResponse,
 } from '@spark/protocol'
 import { EduServerClient } from './EduServerClient'
@@ -38,8 +34,13 @@ import { TokenStore } from './TokenStore'
 import type { AuthServiceConfig, BaseUrlSource } from './types'
 import type { IpcStreamChannel, IpcStreamPayload } from '@spark/protocol'
 import { sendToMainWindow } from '../../windows/index.js'
+import { isSafeFilePathAllowed } from '../SafeFileProtocol.js'
 
 const log = createLogger('auth:service')
+
+type AuthLoginSmsServerResponse = AuthSession & { isNew: boolean }
+type AuthWechatBindEmailServerResponse = AuthSession & { isNew: boolean }
+type AuthWechatPollServerResponse = AuthWechatPollResponse & Partial<AuthSession>
 
 export class AuthService {
   private readonly tokenStore: TokenStore
@@ -69,9 +70,7 @@ export class AuthService {
   /** 启动：从 keytar 加载会话 */
   async start(): Promise<void> {
     await this.tokenStore.load()
-    log.info(
-      `auth service started, isAuthenticated=${this.tokenStore.isAuthenticated()}`,
-    )
+    log.info(`auth service started, isAuthenticated=${this.tokenStore.isAuthenticated()}`)
   }
 
   /** 启动后尝试自动登录（验证已存 token 是否仍有效）*/
@@ -127,12 +126,10 @@ export class AuthService {
     password: string
     code: string
     inviteCode?: string
-  }): Promise<AuthRegisterResponse> => {
-    const session = await this.client.post<AuthRegisterResponse>(
-      '/auth/register',
-      params,
-      { skipAuth: true },
-    )
+  }): Promise<AuthSession> => {
+    const session = await this.client.post<AuthSession>('/auth/register', params, {
+      skipAuth: true,
+    })
     await this.afterLoginSuccess(session)
     return session
   }
@@ -144,12 +141,8 @@ export class AuthService {
     captchaId?: string
     captchaText?: string
     emailCode?: string
-  }): Promise<AuthLoginResponse> => {
-    const session = await this.client.post<AuthLoginResponse>(
-      '/auth/login',
-      params,
-      { skipAuth: true },
-    )
+  }): Promise<AuthSession> => {
+    const session = await this.client.post<AuthSession>('/auth/login', params, { skipAuth: true })
     await this.afterLoginSuccess(session)
     return session
   }
@@ -236,8 +229,8 @@ export class AuthService {
   loginBySms = async (params: {
     phone: string
     smsCode: string
-  }): Promise<AuthLoginSmsResponse> => {
-    const result = await this.client.post<AuthLoginSmsResponse>(
+  }): Promise<AuthLoginSmsServerResponse> => {
+    const result = await this.client.post<AuthLoginSmsServerResponse>(
       '/auth/login-sms',
       { phone: params.phone, smsCode: params.smsCode },
       { skipAuth: true },
@@ -272,7 +265,7 @@ export class AuthService {
     fileName?: string
     mimeType?: string
   }): Promise<{ avatarUrl: string }> => {
-    const prepared = await prepareUploadPayload(params)
+    const prepared = await prepareUploadPayload(params, 'avatar')
     return this.client.uploadAvatar(prepared)
   }
 
@@ -281,9 +274,22 @@ export class AuthService {
   }
 
   wechatPoll = async (state: string): Promise<AuthWechatPollResponse> => {
-    return this.client.get<AuthWechatPollResponse>(`/auth/wechat/poll?state=${encodeURIComponent(state)}`, {
-      skipAuth: true,
-    })
+    const result = await this.client.get<AuthWechatPollServerResponse>(
+      `/auth/wechat/poll?state=${encodeURIComponent(state)}`,
+      { skipAuth: true },
+    )
+    if (result.status === 'success') {
+      if (!result.token || !result.refreshToken || !result.userId) {
+        throw new SparkError('UNKNOWN', '扫码登录响应缺少会话信息')
+      }
+      await this.afterLoginSuccess({
+        token: result.token,
+        refreshToken: result.refreshToken,
+        userId: result.userId,
+      })
+    }
+    const { token: _token, refreshToken: _refreshToken, ...safeResult } = result
+    return safeResult
   }
 
   wechatBindEmailSendCode = async (params: {
@@ -298,8 +304,8 @@ export class AuthService {
   wechatBindEmail = async (params: {
     bindSession: string
     code: string
-  }): Promise<AuthWechatBindEmailResponse> => {
-    const result = await this.client.post<AuthWechatBindEmailResponse>(
+  }): Promise<AuthWechatBindEmailServerResponse> => {
+    const result = await this.client.post<AuthWechatBindEmailServerResponse>(
       '/auth/wechat/bind-email',
       params,
       { skipAuth: true },
@@ -335,7 +341,7 @@ export class AuthService {
     fileName?: string
     mimeType?: string
   }): Promise<AuthUploadFileResponse> => {
-    const prepared = await prepareUploadPayload(params)
+    const prepared = await prepareUploadPayload(params, 'canvas')
     return this.client.uploadFile(prepared)
   }
 
@@ -370,19 +376,19 @@ export class AuthService {
   }
 
   private async notifyLoginHooks(userId: string): Promise<void> {
-    await Promise.all([...this.loginHooks].map(async hook => {
-      try {
-        await hook(userId)
-      } catch (error) {
-        log.warn(`login hook failed: ${(error as Error).message}`)
-      }
-    }))
+    await Promise.all(
+      [...this.loginHooks].map(async (hook) => {
+        try {
+          await hook(userId)
+        } catch (error) {
+          log.warn(`login hook failed: ${(error as Error).message}`)
+        }
+      }),
+    )
   }
 
   private handleTokenRefreshed(session: AuthSession): void {
     this.emitStream('stream:auth:token-refreshed', {
-      token: session.token,
-      refreshToken: session.refreshToken,
       userId: session.userId,
     })
   }
@@ -391,13 +397,15 @@ export class AuthService {
     if (this.sessionExpiryCleanup) return
     const userId = this.getCurrentUserId()
     const cleanup = (async () => {
-      await Promise.all([...this.logoutHooks].map(async hook => {
-        try {
-          await hook(userId)
-        } catch (error) {
-          log.warn(`session-expired hook failed: ${(error as Error).message}`)
-        }
-      }))
+      await Promise.all(
+        [...this.logoutHooks].map(async (hook) => {
+          try {
+            await hook(userId)
+          } catch (error) {
+            log.warn(`session-expired hook failed: ${(error as Error).message}`)
+          }
+        }),
+      )
       await this.tokenStore.clear()
       this.emitStateChanged(false)
       this.emitStream('stream:auth:session-expired', {})
@@ -414,10 +422,7 @@ export class AuthService {
     })
   }
 
-  private emitStream<C extends IpcStreamChannel>(
-    channel: C,
-    payload: IpcStreamPayload<C>,
-  ): void {
+  private emitStream<C extends IpcStreamChannel>(channel: C, payload: IpcStreamPayload<C>): void {
     try {
       sendToMainWindow(channel, payload)
     } catch (e) {
@@ -426,31 +431,68 @@ export class AuthService {
   }
 }
 
-async function prepareUploadPayload(params: {
-  dataUrl?: string
-  filePath?: string
-  fileName?: string
-  mimeType?: string
-}): Promise<{ buffer: Buffer; fileName: string; mimeType?: string }> {
+async function prepareUploadPayload(
+  params: {
+    dataUrl?: string
+    filePath?: string
+    fileName?: string
+    mimeType?: string
+  },
+  uploadKind: 'avatar' | 'canvas',
+): Promise<{ buffer: Buffer; fileName: string; mimeType: string }> {
   if (params.dataUrl) {
     const parsed = parseDataUrl(params.dataUrl)
-    const mimeType = params.mimeType ?? parsed.mimeType
+    const mimeType = requireAllowedMime(parsed.mimeType, uploadKind)
+    if (params.mimeType && normalizeMime(params.mimeType) !== mimeType) {
+      throw new SparkError('VALIDATION_FAILED', '上传文件类型与内容声明不一致')
+    }
+    assertUploadSize(parsed.buffer.length)
     return {
       buffer: parsed.buffer,
       fileName: ensureFileName(params.fileName, mimeType),
-      ...(mimeType ? { mimeType } : {}),
+      mimeType,
     }
   }
   if (params.filePath) {
-    const buffer = await readFile(params.filePath)
-    const mimeType = params.mimeType ?? mimeFromExt(params.filePath)
+    if (!isAbsolute(params.filePath)) {
+      throw new SparkError('VALIDATION_FAILED', '上传文件路径无效')
+    }
+    const filePath = resolve(params.filePath)
+    if (!isSafeFilePathAllowed(filePath)) {
+      throw new SparkError('VALIDATION_FAILED', '上传文件不在允许范围内')
+    }
+    const mimeTypes = MIME_TYPES_BY_EXTENSION[extname(filePath).toLowerCase()]
+    if (!mimeTypes) {
+      throw new SparkError('VALIDATION_FAILED', '不支持该上传文件类型')
+    }
+    const requestedMime = params.mimeType ? normalizeMime(params.mimeType) : undefined
+    if (requestedMime && !mimeTypes.includes(requestedMime)) {
+      throw new SparkError('VALIDATION_FAILED', '上传文件类型与扩展名不一致')
+    }
+    const mimeType = requireAllowedMime(requestedMime ?? mimeTypes[0], uploadKind)
+    let fileStat
+    try {
+      fileStat = await stat(filePath)
+    } catch {
+      throw new SparkError('VALIDATION_FAILED', '上传文件不存在或无法读取')
+    }
+    if (!fileStat.isFile()) {
+      throw new SparkError('VALIDATION_FAILED', '上传内容必须是普通文件')
+    }
+    assertUploadSize(fileStat.size)
+    let buffer: Buffer
+    try {
+      buffer = await readFile(filePath)
+    } catch {
+      throw new SparkError('VALIDATION_FAILED', '上传文件无法读取')
+    }
     return {
       buffer,
-      fileName: ensureFileName(params.fileName ?? basename(params.filePath), mimeType),
-      ...(mimeType ? { mimeType } : {}),
+      fileName: ensureFileName(params.fileName ?? basename(filePath), mimeType),
+      mimeType,
     }
   }
-  throw new SparkError('UNKNOWN', '缺少上传文件内容')
+  throw new SparkError('VALIDATION_FAILED', '缺少上传文件内容')
 }
 
 function parseDataUrl(dataUrl: string): { buffer: Buffer; mimeType?: string } {
@@ -462,30 +504,110 @@ function parseDataUrl(dataUrl: string): { buffer: Buffer; mimeType?: string } {
   }
 }
 
-function ensureFileName(fileName: string | undefined, mimeType: string | undefined): string {
+const MAX_UPLOAD_BYTES = 100_000_000
+
+function assertUploadSize(size: number): void {
+  if (size <= 0) {
+    throw new SparkError('VALIDATION_FAILED', '上传文件不能为空')
+  }
+  if (size > MAX_UPLOAD_BYTES) {
+    throw new SparkError('VALIDATION_FAILED', '上传文件不能超过 100 MB')
+  }
+}
+
+const RASTER_IMAGE_MIME_TYPES = new Set([
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+  'image/gif',
+  'image/avif',
+  'image/heic',
+  'image/heif',
+  'image/bmp',
+  'image/tiff',
+])
+
+const CANVAS_MEDIA_MIME_TYPES = new Set([
+  ...RASTER_IMAGE_MIME_TYPES,
+  'video/mp4',
+  'video/quicktime',
+  'video/webm',
+  'video/x-m4v',
+  'audio/mpeg',
+  'audio/wav',
+  'audio/mp4',
+  'audio/aac',
+  'audio/flac',
+  'audio/ogg',
+  'audio/opus',
+  'audio/webm',
+])
+
+const MIME_TYPES_BY_EXTENSION: Record<string, readonly string[]> = {
+  '.jpg': ['image/jpeg'],
+  '.jpeg': ['image/jpeg'],
+  '.png': ['image/png'],
+  '.webp': ['image/webp'],
+  '.gif': ['image/gif'],
+  '.avif': ['image/avif'],
+  '.heic': ['image/heic'],
+  '.heif': ['image/heif'],
+  '.bmp': ['image/bmp'],
+  '.tiff': ['image/tiff'],
+  '.tif': ['image/tiff'],
+  '.mp4': ['video/mp4', 'audio/mp4'],
+  '.mov': ['video/quicktime'],
+  '.webm': ['video/webm', 'audio/webm'],
+  '.m4v': ['video/x-m4v'],
+  '.mp3': ['audio/mpeg'],
+  '.wav': ['audio/wav'],
+  '.m4a': ['audio/mp4'],
+  '.aac': ['audio/aac'],
+  '.flac': ['audio/flac'],
+  '.ogg': ['audio/ogg'],
+  '.oga': ['audio/ogg'],
+  '.opus': ['audio/opus'],
+  '.weba': ['audio/webm'],
+}
+
+function normalizeMime(mimeType: string): string {
+  return mimeType.split(';')[0]?.trim().toLowerCase() ?? ''
+}
+
+function requireAllowedMime(mimeType: string | undefined, uploadKind: 'avatar' | 'canvas'): string {
+  const normalized = normalizeMime(mimeType ?? '')
+  const allowed = uploadKind === 'avatar' ? RASTER_IMAGE_MIME_TYPES : CANVAS_MEDIA_MIME_TYPES
+  if (!allowed.has(normalized)) {
+    throw new SparkError('VALIDATION_FAILED', '不支持该上传文件类型')
+  }
+  return normalized
+}
+
+function ensureFileName(fileName: string | undefined, mimeType: string): string {
   const trimmed = fileName?.trim()
   const fallback = `canvas-input${extFromMime(mimeType)}`
-  const name = trimmed && trimmed.length > 0 ? trimmed : fallback
-  return extname(name) ? name : `${name}${extFromMime(mimeType)}`
+  const leafName = trimmed ? basename(trimmed.replace(/\\/g, '/')) : ''
+  const name =
+    leafName && leafName !== '.' && leafName !== '..' && !leafName.includes('\0')
+      ? leafName
+      : fallback
+  const extension = extname(name)
+  if (!extension) return `${name}${extFromMime(mimeType)}`
+  const compatibleMimes = MIME_TYPES_BY_EXTENSION[extension.toLowerCase()]
+  if (!compatibleMimes?.includes(mimeType)) {
+    return `${name.slice(0, -extension.length)}${extFromMime(mimeType)}`
+  }
+  return name
 }
 
-function extFromMime(mimeType: string | undefined): string {
-  const normalized = (mimeType ?? '').split(';')[0]?.toLowerCase()
-  if (normalized === 'image/jpeg' || normalized === 'image/jpg') return '.jpg'
-  if (normalized === 'image/webp') return '.webp'
-  if (normalized === 'image/svg+xml') return '.svg'
-  if (normalized === 'application/pdf') return '.pdf'
-  return '.png'
-}
-
-function mimeFromExt(filePath: string): string | undefined {
-  const ext = extname(filePath).toLowerCase()
-  if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg'
-  if (ext === '.png') return 'image/png'
-  if (ext === '.webp') return 'image/webp'
-  if (ext === '.svg') return 'image/svg+xml'
-  if (ext === '.pdf') return 'application/pdf'
-  return undefined
+function extFromMime(mimeType: string): string {
+  const extension = Object.entries(MIME_TYPES_BY_EXTENSION).find(
+    ([, mimeTypes]) => mimeTypes[0] === mimeType,
+  )?.[0]
+  if (!extension) {
+    throw new SparkError('VALIDATION_FAILED', '无法确定上传文件扩展名')
+  }
+  return extension
 }
 
 /** 单例（主进程共用一个 AuthService 实例）*/

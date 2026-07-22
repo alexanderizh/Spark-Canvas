@@ -1,5 +1,5 @@
 import { createRequire } from 'node:module'
-import { copyFileSync, mkdirSync, readdirSync } from 'fs'
+import { copyFileSync, mkdirSync, readdirSync, rmSync } from 'fs'
 import { dirname, resolve } from 'path'
 import { defineConfig, externalizeDepsPlugin } from 'electron-vite'
 import react from '@vitejs/plugin-react'
@@ -10,6 +10,15 @@ const emojilibJsonPath = resolve(
   dirname(nodeRequire.resolve('@lobehub/emojilib/package.json')),
   'index.json',
 )
+
+const CANVAS_RUNTIME_TOOLS = [
+  'image-generation-mcp-server.mjs',
+  'media-generation-mcp-server.mjs',
+  'platform-management-mcp-server.mjs',
+  'present-files-mcp-server.mjs',
+  'spark-canvas-mcp-server.mjs',
+  'spark-memory-mcp-server.mjs',
+] as const
 
 /**
  * 将 packages/storage/migrations/*.sql 复制到 out/main/migrations/
@@ -40,11 +49,17 @@ function copyRuntimeToolsPlugin() {
     closeBundle() {
       const srcDir = resolve(__dirname, '../../packages/agent-runtime/src/tools')
       const destDir = resolve(__dirname, 'out/main/tools')
+      rmSync(destDir, { recursive: true, force: true })
       mkdirSync(destDir, { recursive: true })
-      for (const file of readdirSync(srcDir)) {
-        if (file.endsWith('.mjs')) {
-          copyFileSync(resolve(srcDir, file), resolve(destDir, file))
-        }
+      for (const file of CANVAS_RUNTIME_TOOLS) {
+        copyFileSync(resolve(srcDir, file), resolve(destDir, file))
+      }
+
+      const mediaSrcDir = resolve(__dirname, '../../packages/agent-runtime/src/services/media')
+      const mediaDestDir = resolve(__dirname, 'out/main/services/media')
+      mkdirSync(mediaDestDir, { recursive: true })
+      for (const file of ['media-extract.mjs', 'media-request-compiler.mjs']) {
+        copyFileSync(resolve(mediaSrcDir, file), resolve(mediaDestDir, file))
       }
     },
   }
@@ -89,7 +104,9 @@ function dropWoffPlugin() {
 export default defineConfig({
   main: {
     plugins: [
-      externalizeDepsPlugin({ exclude: ['@spark/protocol', '@spark/storage', '@spark/shared', '@spark/agent-runtime'] }),
+      externalizeDepsPlugin({
+        exclude: ['@spark/protocol', '@spark/storage', '@spark/shared', '@spark/agent-runtime'],
+      }),
       copyMigrationsPlugin(),
       copyRuntimeToolsPlugin(),
     ],
@@ -113,7 +130,11 @@ export default defineConfig({
     },
   },
   preload: {
-    plugins: [externalizeDepsPlugin({ exclude: ['@spark/protocol', '@spark/storage', '@spark/shared', '@spark/agent-runtime'] })],
+    plugins: [
+      externalizeDepsPlugin({
+        exclude: ['@spark/protocol', '@spark/storage', '@spark/shared', '@spark/agent-runtime'],
+      }),
+    ],
     resolve: {
       alias: {
         '@preload': resolve('src/preload'),

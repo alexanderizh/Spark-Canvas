@@ -8,6 +8,7 @@ export type { SDKPermissionConfig } from './permission-mapper.js'
 export { mapSDKMessageToEvents } from './event-mapper.js'
 export type {
   SDKExecutorConfig,
+  SDKInvocationSnapshot,
   SDKMcpServerConfig,
   SDKMessage,
   SDKAssistantMessage,

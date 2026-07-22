@@ -8,11 +8,32 @@ export {
 } from './services/provider-credential-resolver.js'
 export {
   CanvasTextProviderError,
+  CanvasTextTimeoutError,
   generateCanvasText,
+  resolveCanvasTextRequestTimeoutMs,
   type GenerateCanvasTextParams,
   type GenerateCanvasTextResult,
 } from './services/canvas-text-generator.js'
 export { MediaRouterService } from './services/media/media-router.service.js'
+export { XAI_MAX_FILE_BYTES, XaiFilesClient } from './services/media/xai-files.client.js'
+export type { XaiFileObject, XaiFilesPage } from './services/media/xai-files.client.js'
+export {
+  BAILIAN_FILES_DEFAULT_BASE_URL,
+  BailianFilesClient,
+  resolveBailianFilesBaseUrl,
+} from './services/media/bailian-files.client.js'
+export {
+  VOLCENGINE_ARK_FILES_DEFAULT_BASE_URL,
+  VOLCENGINE_ARK_PLATFORM_FILE_MAX_BYTES,
+  VOLCENGINE_ARK_TOS_VIDEO_MAX_BYTES,
+  VolcengineArkFilesClient,
+  resolveVolcengineArkFilesBaseUrl,
+} from './services/media/volcengine-ark-files.client.js'
+export type {
+  MediaUploader,
+  MediaUploadInput,
+  MediaUploadResult,
+} from './services/media/media-uploader.js'
 export { MediaModelCatalogService } from './services/media/media-model-catalog.service.js'
 export type {
   MediaModelCatalogItem,
@@ -59,6 +80,16 @@ export {
   type CompilerInputFile,
 } from './services/media/media-request-compiler.js'
 export {
+  validateMediaRequest,
+  type ValidateMediaRequestInput,
+} from './services/media/media-request-validator.js'
+export type {
+  MediaRequestValidationResult,
+  MediaValidationContext,
+  MediaProviderValidator,
+} from './services/media/validators/media-validator.types.js'
+export { compactForLog } from './services/media/media-debug-log.js'
+export {
   normalizeMediaError,
   type NormalizeMediaErrorInput,
   type NormalizedMediaError,
@@ -66,7 +97,11 @@ export {
 export { ApimartMediaAdapter } from './services/media/adapters/apimart-media.adapter.js'
 export { XaiMediaAdapter } from './services/media/adapters/xai-media.adapter.js'
 export { ModelService } from './services/model.service.js'
-export { McpService, MANAGED_MCP_SCOPE, PLAYWRIGHT_MCP_NAME } from './services/mcp-server.service.js'
+export {
+  McpService,
+  MANAGED_MCP_SCOPE,
+  PLAYWRIGHT_MCP_NAME,
+} from './services/mcp-server.service.js'
 export { SkillService } from './services/skill.service.js'
 export { RulesService } from './services/rules.service.js'
 export { RuleCompositionEngine } from './services/rule-composition.engine.js'
@@ -98,11 +133,16 @@ export type {
   UpdateRuleFields,
 } from './services/rules.service.js'
 export { SessionService } from './services/session.service.js'
+export { SessionReadService } from './services/session-read.service.js'
 export { PlatformBridgeService } from './services/platform-bridge.service.js'
 export { GitHubConnectorService } from './services/github-connector.service.js'
 export type { PlatformBridgeDeps } from './services/platform-bridge.service.js'
 export { DebugLogServer, getDebugLogServer } from './services/debug-log-server.service.js'
-export type { DebugEntry, DebugLogLevel, DebugHypothesis } from './services/debug-log-server.service.js'
+export type {
+  DebugEntry,
+  DebugLogLevel,
+  DebugHypothesis,
+} from './services/debug-log-server.service.js'
 export type {
   ApprovalHandler,
   SessionEventHandler,
@@ -114,17 +154,17 @@ export type {
   CanvasMcpProvider,
   BrowserAutomationMcpProvider,
 } from './services/session.service.js'
-export {
-  createCanvasMcpServer,
-  canvasAllowedToolNames,
-} from './services/canvas-mcp-server.js'
+export { createCanvasMcpServer, canvasAllowedToolNames } from './services/canvas-mcp-server.js'
 export type {
   CanvasToolSchema,
   CanvasToolCallBridge,
   CreateCanvasMcpServerOptions,
 } from './services/canvas-mcp-server.js'
 export { TeamDispatchService } from './services/team-dispatch.service.js'
-export type { TeamDispatchRunContext, TeamMemberExecutionResult } from './services/team-dispatch.service.js'
+export type {
+  TeamDispatchRunContext,
+  TeamMemberExecutionResult,
+} from './services/team-dispatch.service.js'
 export { WorkspaceService, detectProjectKind } from './services/workspace.service.js'
 export type { UpdateWorkspaceParams } from './services/workspace.service.js'
 export { GitWorktreeService } from './services/git-worktree.service.js'
@@ -163,19 +203,6 @@ export type {
   DailyUsageGroup,
   UsageLedgerRow,
 } from './services/usage-ledger.service.js'
-export { ScheduledTaskService } from './services/scheduled-task.service.js'
-export type {
-  ScheduledTaskItem,
-  TaskExecutionItem,
-  ExecutionStats,
-  TaskExecutorFn,
-  NotificationConfig as ScheduledTaskNotificationConfig,
-  TriggerType,
-  ConcurrencyPolicy,
-  RetryBackoff,
-  TaskStatus as ScheduledTaskStatus,
-  ExecutionStatus as TaskExecutionStatus,
-} from './services/scheduled-task.service.js'
 export { HookService } from './services/hook.service.js'
 export type { HookTriggerFn } from './services/hook.service.js'
 export type {
@@ -208,6 +235,7 @@ export { ClaudeSDKExecutor, isSDKAvailable, SDKNotAvailableError } from './sdk/i
 export { mapPermissionMode, mergeToolPermissions } from './sdk/index.js'
 export type {
   SDKExecutorConfig,
+  SDKInvocationSnapshot,
   SDKMcpServerConfig,
   SDKPermissionConfig,
   SparkPermissionMode,

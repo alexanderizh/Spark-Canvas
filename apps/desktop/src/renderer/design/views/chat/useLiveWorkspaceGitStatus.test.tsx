@@ -73,12 +73,10 @@ describe('useLiveWorkspaceGitStatus', () => {
     vi.unstubAllGlobals()
   })
 
-  it('refreshes the Git snapshot after a workspace file event', async () => {
+  it('refreshes the Git snapshot after an agent file event', async () => {
     let status = createGitStatus()
     const invoke = vi.fn(async (channel: string) => {
       if (channel === 'workspace:git-status') return status
-      if (channel === 'workspace:watch-start') return { watching: true }
-      if (channel === 'workspace:watch-stop') return { stopped: true }
       return {}
     })
     vi.stubGlobal('spark', {
@@ -97,17 +95,16 @@ describe('useLiveWorkspaceGitStatus', () => {
 
     status = createGitStatus({ changedFiles: 1, additions: 3, deletions: 3 })
     await act(async () => {
-      streamHandlers.get('stream:workspace:file-change')?.({
-        workspaceId: 'workspace-1',
+      streamHandlers.get('stream:session:agent-event')?.({
+        type: 'file_change',
+        sessionId: 'session-1',
         changeType: 'modify',
         path: 'src/prod.js',
-        timestamp: new Date().toISOString(),
       } as never)
       await new Promise((resolve) => setTimeout(resolve, 300))
     })
 
     expect(container.querySelector('[data-testid="changed-files"]')?.textContent).toBe('1')
-    expect(invoke).toHaveBeenCalledWith('workspace:watch-start', { workspaceId: 'workspace-1' })
     expect(invoke).toHaveBeenCalledWith('workspace:git-status', { workspaceId: 'workspace-1' })
   })
 
@@ -126,8 +123,6 @@ describe('useLiveWorkspaceGitStatus', () => {
         statusCall += 1
         return statusCall === 1 ? first : second
       }
-      if (channel === 'workspace:watch-start') return Promise.resolve({ watching: true })
-      if (channel === 'workspace:watch-stop') return Promise.resolve({ stopped: true })
       return Promise.resolve({})
     })
     vi.stubGlobal('spark', {

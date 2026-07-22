@@ -8,6 +8,7 @@
 
 import { createLogger } from '@spark/shared'
 import type { AuthSession } from '@spark/protocol'
+import { createHash } from 'node:crypto'
 import { mkdir, readFile, rm, writeFile } from 'fs/promises'
 import { join } from 'path'
 
@@ -151,7 +152,7 @@ export class TokenStore {
 
   private async loadEncryptedBackup(): Promise<AuthSession | null> {
     try {
-      const persistence = await getEncryptedBackupPersistence()
+      const persistence = await getEncryptedBackupPersistence(this.service)
       if (!persistence) {
         this.encryptedBackupAvailable = false
         return null
@@ -180,7 +181,7 @@ export class TokenStore {
 
   private async saveEncryptedBackup(session: AuthSession): Promise<boolean> {
     try {
-      const persistence = await getEncryptedBackupPersistence()
+      const persistence = await getEncryptedBackupPersistence(this.service)
       if (!persistence) {
         this.encryptedBackupAvailable = false
         return false
@@ -204,7 +205,7 @@ export class TokenStore {
 
   private async deleteEncryptedBackup(): Promise<void> {
     try {
-      const persistence = await getEncryptedBackupPersistence()
+      const persistence = await getEncryptedBackupPersistence(this.service)
       if (!persistence) {
         this.encryptedBackupAvailable = false
         return
@@ -226,7 +227,15 @@ interface EncryptedBackupPersistence {
   decrypt: (value: Buffer) => string
 }
 
-async function getEncryptedBackupPersistence(): Promise<EncryptedBackupPersistence | null> {
+function getEncryptedBackupFileName(service: string): string {
+  if (service === 'SparkCanvas.CloudAuth') return BACKUP_FILE_NAME
+  const digest = createHash('sha256').update(service).digest('hex').slice(0, 16)
+  return `token-store-${digest}.enc`
+}
+
+async function getEncryptedBackupPersistence(
+  service: string,
+): Promise<EncryptedBackupPersistence | null> {
   try {
     const electron = await import('electron')
     const electronApp = electron.app
@@ -238,7 +247,7 @@ async function getEncryptedBackupPersistence(): Promise<EncryptedBackupPersisten
     const dirPath = electronApp.getPath('userData')
     return {
       dirPath,
-      filePath: join(dirPath, BACKUP_FILE_NAME),
+      filePath: join(dirPath, getEncryptedBackupFileName(service)),
       encrypt: (value) => electronSafeStorage.encryptString(value),
       decrypt: (value) => electronSafeStorage.decryptString(value),
     }

@@ -9,6 +9,7 @@
  *
  * Environment:
  *   SPARK_PLATFORM_BRIDGE_PORT       PlatformBridgeService port
+ *   SPARK_CANVAS_BRIDGE_TOKEN        Session-scoped bearer token
  *   SPARK_CANVAS_SID                 Spark session id attached to a canvas window
  *   SPARK_CANVAS_TOOL_SCHEMAS_JSON   JSON array of CanvasToolSchema
  */
@@ -16,6 +17,7 @@ import readline from 'node:readline'
 
 const env = process.env
 const PORT = Number.parseInt(env.SPARK_PLATFORM_BRIDGE_PORT || '', 10) || 0
+const TOKEN = (env.SPARK_CANVAS_BRIDGE_TOKEN || '').trim()
 const SID = (env.SPARK_CANVAS_SID || '').trim()
 const BASE = PORT ? `http://127.0.0.1:${PORT}` : ''
 
@@ -56,10 +58,15 @@ const TOOLS = loadToolSchemas()
 async function rpc(method, params) {
   if (!BASE)
     throw new Error('Platform bridge port not configured (SPARK_PLATFORM_BRIDGE_PORT missing)')
+  if (!TOKEN)
+    throw new Error('Platform bridge token not configured (SPARK_CANVAS_BRIDGE_TOKEN missing)')
   if (!SID) throw new Error('Session id not configured (SPARK_CANVAS_SID missing)')
   const res = await fetch(`${BASE}/rpc`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${TOKEN}`,
+    },
     body: JSON.stringify({ method, params }),
   })
   const text = await res.text()

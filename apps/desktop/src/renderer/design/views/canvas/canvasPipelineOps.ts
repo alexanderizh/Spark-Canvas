@@ -14,6 +14,16 @@ import { buildEntityExtractionPrompt, type ExtractEntityKind } from './canvasEnt
 /** op 类别：文本生成 / 实体抽取(一对多) / 图像生成 / 视频生成 */
 export type PipelineOpKind = 'text' | 'extract' | 'image' | 'video'
 
+export const CANVAS_PIPELINE_MENU_GROUPS: ReadonlyArray<{
+  id: PipelineOpKind
+  label: string
+}> = [
+  { id: 'text', label: '文本编排' },
+  { id: 'extract', label: '资产提取' },
+  { id: 'image', label: '视觉生成' },
+  { id: 'video', label: '视频生成' },
+]
+
 export type CanvasPipelineOp = {
   /** 稳定 id（UI 绑定 + dispatch + 测试） */
   id: string
@@ -32,6 +42,16 @@ export type CanvasPipelineOp = {
   baseOperation?: CanvasOperationType
   /** 抽取类 op 的实体种类 */
   extractKind?: ExtractEntityKind
+}
+
+/** 可直接从同类型影视资产卡片继续创建的图像任务类型。 */
+export type CanvasPipelineAssetKind = 'character' | 'scene' | 'prop' | 'effect'
+
+const ASSET_KIND_BY_ACTION: Partial<Record<string, CanvasPipelineAssetKind>> = {
+  'character.three_view': 'character',
+  'scene.scene_image': 'scene',
+  'prop.prop_image': 'prop',
+  'effect.effect_image': 'effect',
 }
 
 export const CANVAS_PIPELINE_OPS: CanvasPipelineOp[] = [
@@ -78,6 +98,26 @@ export const CANVAS_PIPELINE_OPS: CanvasPipelineOp[] = [
     extractKind: 'scene',
   },
   {
+    id: 'screenplay.extract_props',
+    label: '提取道具',
+    icon: 'Box',
+    kind: 'extract',
+    produces: 'prop',
+    appliesTo: ['screenplay'],
+    appliesToText: true,
+    extractKind: 'prop',
+  },
+  {
+    id: 'screenplay.extract_effects',
+    label: '提取特效',
+    icon: 'Sparkles',
+    kind: 'extract',
+    produces: 'effect',
+    appliesTo: ['screenplay'],
+    appliesToText: true,
+    extractKind: 'effect',
+  },
+  {
     id: 'screenplay.storyboard_grid',
     label: '生成分镜关键帧图',
     icon: 'Image',
@@ -95,6 +135,7 @@ export const CANVAS_PIPELINE_OPS: CanvasPipelineOp[] = [
     kind: 'image',
     produces: 'design_card',
     appliesTo: ['character'],
+    appliesToText: true,
     baseOperation: 'text_to_image',
   },
   {
@@ -168,19 +209,31 @@ export function getOpsForRole(role: CanvasPipelineRole | undefined): CanvasPipel
  * 某节点可执行的 op。
  * 文本/Prompt/组节点（chapter / screenplay / 普通文本 / 含文本的组）共享同一份「全量文本菜单」：
  * 合并「按角色匹配」与「appliesToText」两路，按 CANVAS_PIPELINE_OPS 原始顺序返回。
- * 这样章节、剧本、普通文本节点，以及包含文本的组节点，都能使用：转剧本 / 生成分镜脚本 / 提取角色 / 提取场景 / 生成分镜关键帧图。
+ * 这样章节、剧本、普通文本节点，以及包含文本的组节点，都能使用：转剧本 / 生成分镜脚本 / 提取角色 / 提取场景 / 生成分镜关键帧图 / 生成角色身份板；
+ * 关联影视资产的其他节点还可按资产类型获得对应的角色/场景/道具/特效出图入口。
  */
-export function getOpsForNode(node: {
-  type: CanvasNodeType
-  data?: { pipelineRole?: CanvasPipelineRole }
-}): CanvasPipelineOp[] {
+export function getOpsForNode(
+  node: {
+    type: CanvasNodeType
+    data?: { pipelineRole?: CanvasPipelineRole }
+  },
+  options: { assetKinds?: readonly CanvasPipelineAssetKind[] } = {},
+): CanvasPipelineOp[] {
   const role = node.data?.pipelineRole
   const isTextNode = node.type === 'text' || node.type === 'prompt' || node.type === 'group'
+  const assetKinds = options.assetKinds ?? []
+  const matchesAssetKind = (op: CanvasPipelineOp) => {
+    const assetKind = ASSET_KIND_BY_ACTION[op.id]
+    return assetKind != null && assetKinds.includes(assetKind)
+  }
   if (!isTextNode) {
-    return role ? getOpsForRole(role) : []
+    return CANVAS_PIPELINE_OPS.filter(
+      (op) => (role != null && op.appliesTo.includes(role)) || matchesAssetKind(op),
+    )
   }
   return CANVAS_PIPELINE_OPS.filter((op) => {
     if (role && op.appliesTo.includes(role)) return true
+    if (matchesAssetKind(op)) return true
     return Boolean(op.appliesToText)
   })
 }
@@ -209,6 +262,10 @@ export function buildOpPrompt(
       return buildEntityExtractionPrompt('character', ctx.upstreamText ?? '', ctx.styleBible)
     case 'screenplay.extract_scenes':
       return buildEntityExtractionPrompt('scene', ctx.upstreamText ?? '', ctx.styleBible)
+    case 'screenplay.extract_props':
+      return buildEntityExtractionPrompt('prop', ctx.upstreamText ?? '', ctx.styleBible)
+    case 'screenplay.extract_effects':
+      return buildEntityExtractionPrompt('effect', ctx.upstreamText ?? '', ctx.styleBible)
     default:
       return ''
   }

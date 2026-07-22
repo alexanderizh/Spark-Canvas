@@ -18,11 +18,7 @@ import { join } from 'node:path'
 import { mkdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 
-import {
-  AgentRepository,
-  SparkDatabase,
-  TeamDefinitionRepository,
-} from '@spark/storage'
+import { AgentRepository, SparkDatabase, TeamDefinitionRepository } from '@spark/storage'
 import {
   PlatformBridgeService,
   type PlatformBridgeDeps,
@@ -41,11 +37,16 @@ describe('PlatformBridgeService.agentDelete 联动清理 agent_teams 残留', ()
   let teamRepo: TeamDefinitionRepository
   let service: PlatformBridgeService
   let port = 0
+  let platformToken = ''
+  let canvasToken = ''
   const changes: ConfigChange[] = []
   const canvasCalls: Array<{ sessionId: string; toolName: string; args: unknown }> = []
 
   beforeEach(async () => {
-    testDir = join(tmpdir(), `spark-bridge-test-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`)
+    testDir = join(
+      tmpdir(),
+      `spark-bridge-test-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    )
     mkdirSync(testDir, { recursive: true })
     const dbPath = join(testDir, 'test.db')
     const migrationsDir = join(process.cwd(), '..', 'storage', 'migrations')
@@ -77,6 +78,11 @@ describe('PlatformBridgeService.agentDelete 联动清理 agent_teams 残留', ()
       ) => changes.push({ scope, action, id }),
     } as unknown as PlatformBridgeDeps
     port = await service.start(deps)
+    platformToken = service.createAccessToken('platform', { sessionId: 'session-platform' })
+    canvasToken = service.createAccessToken('canvas', {
+      sessionId: 'session-canvas',
+      canvasToolNames: ['get_project'],
+    })
   })
 
   afterEach(async () => {
@@ -85,17 +91,32 @@ describe('PlatformBridgeService.agentDelete 联动清理 agent_teams 残留', ()
     rmSync(testDir, { recursive: true, force: true })
   })
 
-  function callRpc(method: string, params: Record<string, unknown>): Promise<{ ok: boolean; data?: unknown; error?: string }> {
+  function callRpc(
+    method: string,
+    params: Record<string, unknown>,
+    token: string | null = platformToken,
+  ): Promise<{ status: number; ok: boolean; data?: unknown; error?: string }> {
     const body = JSON.stringify({ method, params })
     return new Promise((resolve, reject) => {
+      const headers: Record<string, string | number> = {
+        'content-type': 'application/json',
+        'content-length': Buffer.byteLength(body),
+      }
+      if (token != null) headers.authorization = `Bearer ${token}`
       const req = httpRequest(
-        { host: '127.0.0.1', port, path: '/rpc', method: 'POST', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) } },
+        { host: '127.0.0.1', port, path: '/rpc', method: 'POST', headers },
         (res) => {
           const chunks: Buffer[] = []
           res.on('data', (c) => chunks.push(c))
           res.on('end', () => {
-            try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))) }
-            catch (err) { reject(err) }
+            try {
+              resolve({
+                status: res.statusCode ?? 0,
+                ...JSON.parse(Buffer.concat(chunks).toString('utf8')),
+              })
+            } catch (err) {
+              reject(err)
+            }
           })
         },
       )
@@ -151,7 +172,9 @@ describe('PlatformBridgeService.agentDelete 联动清理 agent_teams 残留', ()
       .map((c) => c.id)
     expect(teamUpdateIds.sort()).toEqual(['team-host', 'team-member'])
     expect(changes).toContainEqual({ scope: 'agent', action: 'delete', id: 'agent-a' })
-    expect(changes).not.toContainEqual(expect.objectContaining({ scope: 'team', id: 'team-unrelated' }))
+    expect(changes).not.toContainEqual(
+      expect.objectContaining({ scope: 'team', id: 'team-unrelated' }),
+    )
   })
 
   it('host 命中且过滤后 members 为空时,hostAgentId 重置为空串', async () => {
@@ -186,9 +209,7 @@ describe('PlatformBridgeService.agentDelete 联动清理 agent_teams 残留', ()
     expect(res).toMatchObject({ ok: true })
 
     expect(teamRepo.get('team-distinct')!.hostAgentId).toBe('agent-other')
-    expect(changes).toEqual([
-      { scope: 'agent', action: 'delete', id: 'agent-orphan' },
-    ])
+    expect(changes).toEqual([{ scope: 'agent', action: 'delete', id: 'agent-orphan' }])
   })
 
   it('删除不存在的 agent 返回 success=false,不触发任何清理', async () => {
@@ -198,11 +219,15 @@ describe('PlatformBridgeService.agentDelete 联动清理 agent_teams 残留', ()
   })
 
   it('canvas.call_tool 转发到 session canvas bridge', async () => {
-    const res = await callRpc('canvas.call_tool', {
-      sessionId: 'session-canvas',
-      toolName: 'get_project',
-      args: { includeNodes: true },
-    })
+    const res = await callRpc(
+      'canvas.call_tool',
+      {
+        sessionId: 'session-canvas',
+        toolName: 'get_project',
+        args: { includeNodes: true },
+      },
+      canvasToken,
+    )
 
     expect(res).toMatchObject({
       ok: true,
@@ -215,5 +240,26 @@ describe('PlatformBridgeService.agentDelete 联动清理 agent_teams 残留', ()
         args: { includeNodes: true },
       },
     ])
+  })
+
+  it('拒绝未认证的本机 RPC 请求', async () => {
+    const res = await callRpc(
+      'canvas.call_tool',
+      {
+        sessionId: 'session-canvas',
+        toolName: 'get_project',
+        args: {},
+      },
+      null,
+    )
+
+    expect(res).toMatchObject({ status: 401, ok: false })
+    expect(canvasCalls).toEqual([])
+  })
+
+  it('Canvas token 只能调用 canvas.call_tool', async () => {
+    const res = await callRpc('agents.list', {}, canvasToken)
+
+    expect(res).toMatchObject({ status: 403, ok: false })
   })
 })

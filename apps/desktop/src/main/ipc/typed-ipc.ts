@@ -28,6 +28,7 @@ import { isSparkError } from '@spark/shared'
 import { ZodError } from 'zod'
 import { createLogger } from '@spark/shared'
 import { broadcastToAppWindows } from '../windows/index.js'
+import { isCanvasInvokeChannelAllowed } from '../../shared/canvasIpcPolicy.js'
 import { ipcPerformanceTracker } from './ipc-performance.js'
 
 const log = createLogger('ipc')
@@ -62,10 +63,28 @@ export function typedIpcHandle<C extends IpcChannel>(
   channel: C,
   handler: (request: IpcRequest<C>, event: IpcMainInvokeEvent) => Promise<IpcResponse<C>>,
 ): void {
+  registerTypedIpcHandler(channel, handler, true)
+}
+
+/** Register a schema-validated handler exposed only through a fixed preload method. */
+export function typedPrivateIpcHandle<C extends IpcChannel>(
+  channel: C,
+  handler: (request: IpcRequest<C>, event: IpcMainInvokeEvent) => Promise<IpcResponse<C>>,
+): void {
+  registerTypedIpcHandler(channel, handler, false)
+}
+
+function registerTypedIpcHandler<C extends IpcChannel>(
+  channel: C,
+  handler: (request: IpcRequest<C>, event: IpcMainInvokeEvent) => Promise<IpcResponse<C>>,
+  enforcePublicPolicy: boolean,
+): void {
   // 开发态热重载会重复注册同一 channel；先移除旧 handler，避免新 channel 无法挂上。
   if (ipcMain.removeHandler != null) {
     ipcMain.removeHandler(channel)
   }
+
+  if (enforcePublicPolicy && !isCanvasInvokeChannelAllowed(channel)) return
 
   ipcMain.handle(
     channel,

@@ -56,8 +56,8 @@ import type {
   UserQuestionPrompt,
   TeamModeConfig,
   TeamA2ATask,
-  HistoryImportSource,
   ProposedGoalContract,
+  SessionSurface,
 } from '@spark/protocol'
 import type { SessionPermissionMode } from '@spark/protocol'
 import {
@@ -71,6 +71,8 @@ import {
   type MediaProviderKind,
 } from '@spark/protocol'
 import { TeamDispatchService } from './team-dispatch.service.js'
+import { SessionReadService } from './session-read.service.js'
+import { getSessionSurface } from './session-surface.js'
 import type { TeamMemberExecutionResult } from './team-dispatch.service.js'
 import { runMemberExecutorIfActive } from './member-execution-lifecycle.js'
 import {
@@ -108,6 +110,7 @@ import { getDebugLogServer } from './debug-log-server.service.js'
 import { RuntimeCompositionService } from './runtime-composition.service.js'
 import { ProjectContextService } from './project-context.service.js'
 import { ValidationSuggestionService } from './validation-suggestion.service.js'
+import { SessionQuestionGate } from './session-question-gate.js'
 import {
   executeWorkflowAgentPlan,
   getWorkflowNodesDeep,
@@ -126,12 +129,14 @@ import { SkillLoader } from '../skills/skill-loader.js'
 import {
   ClaudeSDKExecutor,
   CodexCliExecutor,
+  CodexOpenAIExecutor,
   CodexSdkExecutor,
   isSDKAvailable,
 } from '../sdk/index.js'
 import type {
   SDKApprovalResult,
   SDKExecutorConfig,
+  SDKInvocationSnapshot,
   SDKMcpServerConfig,
   SDKPermissionRequestContext,
   SDKQuestionRequestContext,
@@ -160,6 +165,10 @@ import { EmbeddingService } from './memory/embedding.service.js'
 import { MemorySearchService } from './memory/memory-search.service.js'
 import { MemoryEvolutionService } from './memory/memory-evolution.service.js'
 import { MemoryConsolidationService } from './memory/memory-consolidation.service.js'
+import {
+  filterMemoryEntriesForScopes,
+  isMemoryEntryAllowedForScopes,
+} from './memory-scope-authorization.js'
 import { MediaModelCatalogService } from './media/media-model-catalog.service.js'
 import { resolveProfileMediaModels, type MediaProfileLike } from './media/media-model-resolver.js'
 import {
@@ -170,6 +179,8 @@ import {
 } from './session-event-sequencer.js'
 import type { ProviderMediaModelRef } from '@spark/protocol'
 import {
+  APP_NAME,
+  CANVAS_ASSISTANT_AGENT_ID,
   createLogger,
   resolveProviderContextWindow,
   resolveSoftContextLimitForWindow,
@@ -226,22 +237,23 @@ type ActiveExecution = {
 
 export function createCodexExecutorForConfig(
   config: Pick<SDKExecutorConfig, 'useLocalConfig' | 'codexApiKind' | 'codexCliProvider'>,
-): CodexCliExecutor | CodexSdkExecutor {
+): CodexCliExecutor | CodexOpenAIExecutor | CodexSdkExecutor {
   if (config.useLocalConfig === true) return new CodexCliExecutor()
-  void config.codexApiKind
-  void config.codexCliProvider
+  if (config.codexApiKind === 'chat') return new CodexOpenAIExecutor()
+  if (config.codexApiKind == null && config.codexCliProvider?.wireApi === 'chat') {
+    return new CodexOpenAIExecutor()
+  }
   return new CodexSdkExecutor()
 }
 
-/** Legacy compatibility hook: Codex API providers now run through CodexSdkExecutor. */
+/** Chat-only Codex consumers use direct HTTP and cannot consume local MCP bridges. */
 export function isOpenAiOnlyCodexConsumer(args: {
   isCodex: boolean
   isLocalCli: boolean
   providerType: string
   codexApiKind?: 'chat' | 'responses' | undefined
 }): boolean {
-  void args
-  return false
+  return args.isCodex && !args.isLocalCli && args.codexApiKind === 'chat'
 }
 
 type ImageGenerationRuntimeContext = {
@@ -313,6 +325,8 @@ type SendTurnParams = {
   teamConfig?: TeamModeConfig
   mentionAgentId?: string
   interruptActive?: boolean
+  /** In-process diagnostics only; this callback is never persisted with queued turns. */
+  invocationObserver?: (snapshot: SDKInvocationSnapshot) => void
 }
 
 const DEFAULT_SESSION_TITLES = new Set(['New Session', '新会话', 'Workspace Session', '未命名会话'])
@@ -531,6 +545,8 @@ export class SessionService {
   private userSkillsDir: string | null = null
   /** 等待用户对计划进行审批的 session 集合：处于此状态时 startNextQueuedTurn 不自动起跑队列。 */
   private pendingPlanApprovals = new Set<string>()
+  /** 结构化问答独立闸门：SDK 流提前结束时仍保持，直到用户回答或明确关闭。 */
+  private readonly pendingUserQuestionGate = new SessionQuestionGate()
   private readonly eventSequencer = new SessionEventSequencer()
   /**
    * 当前 turn 该会话实际生效的对话模型 — 含 @mention agent 切换。
@@ -764,7 +780,7 @@ export class SessionService {
     try {
       const entityRepo = new MemoryEntityRepository(this.db)
       for (const h of hits.slice(0, 3)) {
-        for (const r of entityRepo.findRelated(h.entry.id, 3)) {
+        for (const r of filterMemoryEntriesForScopes(entityRepo.findRelated(h.entry.id, 3), scopes)) {
           if (!hitIds.has(r.id) && !relatedMap.has(r.id)) {
             relatedMap.set(r.id, {
               id: r.id,
@@ -800,6 +816,11 @@ export class SessionService {
     const settingsRepo = new SettingsRepository(this.db)
     const settingsGet = (c: string, k: string) => settingsRepo.get(c, k)
     const repo = new MemoryRepository(this.db)
+    const scopes = this.resolveMemoryScopesForSession(params.sessionId)
+    const entry = repo.getById(params.id)
+    if (entry == null || !isMemoryEntryAllowedForScopes(entry, scopes)) {
+      return { content: '', error: `Memory not found: ${params.id}` }
+    }
     // 从 sessionId 解析 workspaceRootPath（recall 读 markdown 文件需要）
     let workspaceRootPath: string | undefined
     try {
@@ -943,7 +964,9 @@ export class SessionService {
     chatMode?: 'agent' | 'ask' | 'edit' | 'review'
     reasoningEffort?: SparkReasoningEffort
     title?: string
+    projectId?: string
     workspaceId?: string
+    surface?: SessionSurface
   }): Promise<SessionCreateResponse> {
     const sessionRepo = new SessionRepository(this.db)
     const id = crypto.randomUUID()
@@ -953,7 +976,7 @@ export class SessionService {
       kind: 'agent',
       title: params.title?.trim() || '新会话',
       status: 'idle',
-      projectId: params.workspaceId ?? 'default',
+      projectId: params.projectId ?? params.workspaceId ?? 'default',
       workspaceIds: params.workspaceId != null ? [params.workspaceId] : [],
       providerProfileId: params.providerProfileId ?? agent.providerProfileId ?? '',
       ...(params.modelId !== undefined
@@ -967,6 +990,9 @@ export class SessionService {
       ...(params.chatMode !== undefined ? { chatMode: params.chatMode } : {}),
       reasoningEffort: params.reasoningEffort ?? normalizeReasoningEffort(agent.reasoningEffort),
     })
+    if (params.surface != null) {
+      sessionRepo.patchMetadata(row.id, { surface: params.surface })
+    }
     const { session } = await this.updateSession({ sessionId: row.id })
     return { sessionId: row.id as SessionId, createdAt: row.created_at, session }
   }
@@ -1108,7 +1134,7 @@ export class SessionService {
         })),
       getCurrentAgentSummary: (id) => {
         const s = sessionRepo.get(id)
-        const agentId = s?.agent_id ?? 'platform-manager-agent'
+        const agentId = s?.agent_id ?? CANVAS_ASSISTANT_AGENT_ID
         const agent = new AgentRepository(this.db).get(agentId)
         if (agent == null)
           return {
@@ -1294,7 +1320,7 @@ export class SessionService {
         })),
       getCurrentAgentSummary: (id) => {
         const s = sessionRepo.get(id)
-        const agentId = s?.agent_id ?? 'platform-manager-agent'
+        const agentId = s?.agent_id ?? CANVAS_ASSISTANT_AGENT_ID
         const agent = new AgentRepository(this.db).get(agentId)
         if (agent == null)
           return {
@@ -1501,7 +1527,7 @@ export class SessionService {
     startAfter?: Promise<unknown>,
   ): Promise<{ turnId: string; started: boolean }> {
     if (this.disposing) throw new Error('Session service is shutting down')
-    const { sessionId, message, skillId, skillParams, mentionAgentId } = params
+    const { sessionId, message, skillId, skillParams, mentionAgentId, invocationObserver } = params
     const attachments = normalizeTurnAttachments(params.attachments)
     const runtimePatch = getRuntimePatch(params)
     const turnId = crypto.randomUUID()
@@ -1531,7 +1557,7 @@ export class SessionService {
       })
     }
     const currentGoal = new GoalRepository(this.db).getCurrent(sessionId)
-    if (currentGoal?.status === 'active') {
+    if (currentGoal?.status === 'active' || this.pendingUserQuestionGate.isBlocked(sessionId)) {
       this.enqueueTurn(sessionId, pendingTurn)
       return { turnId, started: false }
     }
@@ -1581,6 +1607,7 @@ export class SessionService {
         skillParams,
         attachments,
         mentionAgentId,
+        invocationObserver,
       )
     } catch (error) {
       this.handleQueuedTurnStartFailure(sessionId, pendingTurn, error)
@@ -1598,6 +1625,7 @@ export class SessionService {
     skillParams?: Record<string, unknown>,
     attachments?: SessionAttachment[],
     mentionAgentId?: string,
+    invocationObserver?: (snapshot: SDKInvocationSnapshot) => void,
   ): Promise<void> {
     if (this.activeLoops.has(sessionId)) {
       this.enqueueTurn(
@@ -1624,6 +1652,7 @@ export class SessionService {
     }
 
     const session = sessionRepo.findByIdOrFail(sessionId)
+    const isCanvasSurface = getSessionSurface(session.metadata_json) === 'canvas'
     const automation = getAutomationMetadata(session.metadata_json)
     // ── Mention 路由：解析"实际执行 turn 的 agent"。
     // mentionAgentId 必须命中当前会话团队成员（hostAgentId 等同未指定，回退主循环）。
@@ -1930,16 +1959,21 @@ export class SessionService {
     )
     const imageGenerationContext = await this.resolveImageGenerationContext(workspaceRootPath)
     const mediaGenerationContext = await this.resolveMediaGenerationContext(workspaceRootPath)
-    const platformMcpServer = await this.resolvePlatformManagementMcpServer(sessionId)
-    const webSearchMcpServer = await this.resolveWebSearchMcpServer(workspaceRootPath)
+    const platformMcpServer = isCanvasSurface
+      ? null
+      : await this.resolvePlatformManagementMcpServer(sessionId)
+    const webSearchMcpServer = isCanvasSurface
+      ? null
+      : await this.resolveWebSearchMcpServer(workspaceRootPath)
     const presentFilesMcpServer = resolvePresentFilesMcpServer(workspaceRootPath)
     // 调试模式（per-session 能力开关）：开启时挂载 spark_debug + 注入状态机 prompt。
     const debugModeEnabled = getDebugModeFromMetadata(session.metadata_json)
-    const debugMcpServer = debugModeEnabled
-      ? await this.resolveDebugMcpServer(sessionId, workspaceRootPath)
-      : null
+    const debugMcpServer =
+      !isCanvasSurface && debugModeEnabled
+        ? await this.resolveDebugMcpServer(sessionId, workspaceRootPath)
+        : null
     const browserAutomationMcpServer =
-      this.browserAutomationMcpProvider != null
+      !isCanvasSurface && this.browserAutomationMcpProvider != null
         ? await this.browserAutomationMcpProvider(sessionId, workspaceRootPath)
         : null
     const sparkWebToolEnabled =
@@ -2571,7 +2605,7 @@ export class SessionService {
         ...((): { skillPlugins?: string[]; nativeSkills?: 'all' } => {
           // Claude 原生渐进式披露：以本地插件加载托管技能目录，SDK 注入 name+desc
           // 并提供原生 Skill 工具自主加载完整指令。失败/无插件时回落 skills_load 工具。
-          const plugins = this.resolveNativeSkillPlugins()
+          const plugins = isCanvasSurface ? null : this.resolveNativeSkillPlugins()
           return plugins != null ? { skillPlugins: plugins, nativeSkills: 'all' } : {}
         })(),
         ...(imageGenerationContext != null
@@ -2599,9 +2633,7 @@ export class SessionService {
         enableCheckpoints: true,
         sdkSessionId,
         continueSession: canResumeSdkSession,
-        ...(this.onHookTrigger != null
-          ? { applicationHookCallback: this.onHookTrigger }
-          : {}),
+        ...(this.onHookTrigger != null ? { applicationHookCallback: this.onHookTrigger } : {}),
         ...(this.onApproval != null
           ? {
               approvalCallback: async (
@@ -2626,16 +2658,22 @@ export class SessionService {
                 questions: UserQuestionPrompt[],
                 context: SDKQuestionRequestContext,
               ) => {
+                const releaseQuestionGate = this.pendingUserQuestionGate.enter(sid)
                 this.emitAgentStatusEvent(sid, turnId, eventRepo, 'waiting_user')
                 try {
-                  return await this.onQuestion!(sid, questions, context)
+                  return await this.onQuestion!(sid, questions, { ...context, turnId })
                 } finally {
+                  releaseQuestionGate()
                   this.emitAgentStatusEvent(sid, turnId, eventRepo, 'thinking')
+                  if (!this.pendingUserQuestionGate.isBlocked(sid)) {
+                    setTimeout(() => this.startNextQueuedTurn(sid), 0)
+                  }
                 }
               },
             }
           : {}),
         ...(goalConfig != null ? { goal: goalConfig } : {}),
+        ...(invocationObserver != null ? { invocationObserver } : {}),
       }
       const turnOptions: TryStartSDKTurnOptions = {
         ...(allowedMcpServerIds != null ? { allowedMcpServerIds } : {}),
@@ -2672,6 +2710,7 @@ export class SessionService {
       apiKey,
       ...(automation.unattended ? { unattended: true } : {}),
       ...(isLocalCli ? { useLocalConfig: true } : {}),
+      ...(isLocalCli && agentAdapter === 'codex' ? { disableCodexNativeSkills: true } : {}),
       model,
       workspaceRootPath,
       permissionMode,
@@ -2719,6 +2758,7 @@ export class SessionService {
       sdkSessionId,
       continueSession: canResumeSdkSession,
       ...(goalConfig != null ? { goal: goalConfig } : {}),
+      ...(invocationObserver != null ? { invocationObserver } : {}),
     }
     await this.tryStartCodexCliTurn(
       sessionId,
@@ -4045,6 +4085,7 @@ export class SessionService {
 
     try {
       const port = await this.ensurePlatformBridge()
+      const bridgeToken = this.platformBridge.createAccessToken('platform', { sessionId })
       return {
         type: 'stdio',
         command: process.execPath,
@@ -4052,6 +4093,7 @@ export class SessionService {
         env: {
           ELECTRON_RUN_AS_NODE: '1',
           SPARK_PLATFORM_BRIDGE_PORT: String(port),
+          SPARK_PLATFORM_MANAGEMENT_BRIDGE_TOKEN: bridgeToken,
           SPARK_SESSION_ID: sessionId,
         },
       }
@@ -4083,6 +4125,10 @@ export class SessionService {
 
     try {
       const port = await this.ensurePlatformBridge()
+      const bridgeToken = this.platformBridge.createAccessToken('canvas', {
+        sessionId,
+        canvasToolNames: canvas.toolSchemas.map((schema) => schema.name),
+      })
       return {
         type: 'stdio',
         command: process.execPath,
@@ -4090,6 +4136,7 @@ export class SessionService {
         env: {
           ELECTRON_RUN_AS_NODE: '1',
           SPARK_PLATFORM_BRIDGE_PORT: String(port),
+          SPARK_CANVAS_BRIDGE_TOKEN: bridgeToken,
           SPARK_CANVAS_SID: sessionId,
           SPARK_CANVAS_TOOL_SCHEMAS_JSON: JSON.stringify(canvas.toolSchemas),
         },
@@ -4133,6 +4180,7 @@ export class SessionService {
 
     try {
       const port = await this.ensurePlatformBridge()
+      const bridgeToken = this.platformBridge.createAccessToken('memory', { sessionId })
       return {
         type: 'stdio',
         command: process.execPath,
@@ -4140,6 +4188,7 @@ export class SessionService {
         env: {
           ELECTRON_RUN_AS_NODE: '1',
           SPARK_PLATFORM_BRIDGE_PORT: String(port),
+          SPARK_MEMORY_BRIDGE_TOKEN: bridgeToken,
           SPARK_MEMORY_SID: sessionId,
         },
       }
@@ -4444,11 +4493,11 @@ export class SessionService {
   private resolveAgent(agentId: string | undefined): AgentItem {
     const repo = new AgentRepository(this.db)
     return (
-      repo.get(agentId ?? 'platform-manager-agent') ??
-      repo.get('platform-manager-agent') ?? {
-        id: 'platform-manager-agent',
-        name: '平台管理',
-        description: '系统内置平台管理智能体',
+      repo.get(agentId ?? CANVAS_ASSISTANT_AGENT_ID) ??
+      repo.get(CANVAS_ASSISTANT_AGENT_ID) ?? {
+        id: CANVAS_ASSISTANT_AGENT_ID,
+        name: '画布助手',
+        description: 'Spark Canvas 视频画布工作台内置助手',
         builtIn: true,
         enabled: true,
         isDefault: true,
@@ -5999,9 +6048,7 @@ export class SessionService {
       enableCheckpoints: false,
       sdkSessionId: memberSdkSessionId,
       continueSession: canContinueDiscussionSession,
-      ...(this.onHookTrigger != null
-        ? { applicationHookCallback: this.onHookTrigger }
-        : {}),
+      ...(this.onHookTrigger != null ? { applicationHookCallback: this.onHookTrigger } : {}),
       ...(this.onApproval != null
         ? {
             approvalCallback: async (
@@ -6026,11 +6073,16 @@ export class SessionService {
               questions: UserQuestionPrompt[],
               context: SDKQuestionRequestContext,
             ) => {
+              const releaseQuestionGate = this.pendingUserQuestionGate.enter(sid)
               this.emitAgentStatusEvent(sid, turnId, eventRepo, 'waiting_user')
               try {
-                return await this.onQuestion!(sid, questions, context)
+                return await this.onQuestion!(sid, questions, { ...context, turnId })
               } finally {
+                releaseQuestionGate()
                 this.emitAgentStatusEvent(sid, turnId, eventRepo, 'thinking')
+                if (!this.pendingUserQuestionGate.isBlocked(sid)) {
+                  setTimeout(() => this.startNextQueuedTurn(sid), 0)
+                }
               }
             },
           }
@@ -6270,18 +6322,18 @@ export class SessionService {
       }
       if (status === 'completed') {
         this.onHookTrigger?.(sessionId, 'session_end', {
-          title: 'Spark Agent - 任务完成',
+          title: `${APP_NAME} - 任务完成`,
           body: '当前任务已完成',
         })
       } else if (status === 'error' || status === 'cancelled') {
         this.onHookTrigger?.(sessionId, 'session_fail', {
-          title: status === 'cancelled' ? 'Spark Agent - 任务已取消' : 'Spark Agent - 任务失败',
+          title: status === 'cancelled' ? `${APP_NAME} - 任务已取消` : `${APP_NAME} - 任务失败`,
           body:
             event.message ?? (status === 'cancelled' ? '当前任务已取消' : '任务执行出错，请检查'),
         })
       } else if (status === 'waiting_user') {
         this.onHookTrigger?.(sessionId, 'ask_user_question', {
-          title: 'Spark Agent - 需要您的输入',
+          title: `${APP_NAME} - 需要您的输入`,
           body: event.message ?? 'Agent 需要您提供更多信息',
         })
       }
@@ -6342,6 +6394,7 @@ export class SessionService {
       this.startingSessions.clear()
       this.pendingTurns.clear()
       this.pendingPlanApprovals.clear()
+      this.pendingUserQuestionGate.clear()
 
       const pending = [
         ...trackedExecutions.map(([, tracked]) => tracked.promise),
@@ -6482,6 +6535,10 @@ export class SessionService {
       this.emitQueueChanged(sessionId)
       return
     }
+    if (this.pendingUserQuestionGate.isBlocked(sessionId)) {
+      this.emitQueueChanged(sessionId)
+      return
+    }
     if (this.activeLoops.has(sessionId) || this.startingSessions.has(sessionId)) {
       this.emitQueueChanged(sessionId)
       return
@@ -6513,23 +6570,19 @@ export class SessionService {
       next.attachments,
       next.mentionAgentId,
     )
-      .catch(error => this.handleQueuedTurnStartFailure(sessionId, next, error))
+      .catch((error) => this.handleQueuedTurnStartFailure(sessionId, next, error))
       .finally(() => {
         this.startingSessions.delete(sessionId)
         if (!this.activeLoops.has(sessionId)) this.startNextQueuedTurn(sessionId)
       })
   }
 
-  private handleQueuedTurnStartFailure(
-    sessionId: string,
-    turn: PendingTurn,
-    error: unknown,
-  ): void {
+  private handleQueuedTurnStartFailure(sessionId: string, turn: PendingTurn, error: unknown): void {
     const eventRepo = new EventRepository(this.db)
     const sessionRepo = new SessionRepository(this.db)
     const existing = eventRepo.queryBySession({ sessionId, turnId: turn.turnId, limit: 200 }).events
-    const eventTypes = new Set(existing.map(item => item.event_type))
-    const hasTerminalStatus = existing.some(item => {
+    const eventTypes = new Set(existing.map((item) => item.event_type))
+    const hasTerminalStatus = existing.some((item) => {
       if (item.event_type !== 'agent_status') return false
       try {
         const status = (JSON.parse(item.event_json) as { status?: string }).status
@@ -6552,30 +6605,45 @@ export class SessionService {
       seq: 0,
     })
     if (!eventTypes.has('user_message')) {
-      this.emitAndPersist(sessionId, turn.turnId, {
-        ...base(),
-        type: 'user_message',
-        content: turn.message,
-        ...(turn.attachments ? { attachments: turn.attachments } : {}),
-      }, eventRepo)
+      this.emitAndPersist(
+        sessionId,
+        turn.turnId,
+        {
+          ...base(),
+          type: 'user_message',
+          content: turn.message,
+          ...(turn.attachments ? { attachments: turn.attachments } : {}),
+        },
+        eventRepo,
+      )
     }
     if (!eventTypes.has('agent_error')) {
-      this.emitAndPersist(sessionId, turn.turnId, {
-        ...base(),
-        type: 'agent_error',
-        code: isPlatformCredentialError ? 'PLATFORM_CREDENTIAL_UNAVAILABLE' : 'TURN_START_FAILED',
-        message,
-        retryable: true,
-      }, eventRepo)
+      this.emitAndPersist(
+        sessionId,
+        turn.turnId,
+        {
+          ...base(),
+          type: 'agent_error',
+          code: isPlatformCredentialError ? 'PLATFORM_CREDENTIAL_UNAVAILABLE' : 'TURN_START_FAILED',
+          message,
+          retryable: true,
+        },
+        eventRepo,
+      )
     }
-    this.emitAndPersist(sessionId, turn.turnId, {
-      ...base(),
-      type: 'agent_status',
-      status: 'error',
-      message: isPlatformCredentialError
-        ? '平台模型凭据暂不可用，请在账号中心选择“在本机继续”后重试'
-        : 'Queued turn failed to start',
-    }, eventRepo)
+    this.emitAndPersist(
+      sessionId,
+      turn.turnId,
+      {
+        ...base(),
+        type: 'agent_status',
+        status: 'error',
+        message: isPlatformCredentialError
+          ? '平台模型凭据暂不可用，请在账号中心选择“在本机继续”后重试'
+          : 'Queued turn failed to start',
+      },
+      eventRepo,
+    )
     sessionRepo.updateStatus(sessionId, 'error')
     new TurnRequestRepository(this.db).markFailed(turn.turnId, message)
     log.error('queued turn failed to start', { sessionId, turnId: turn.turnId, error: message })
@@ -7095,6 +7163,33 @@ export class SessionService {
   }
 
   /**
+   * Cancel only the executor owned by one session and wait for it to settle.
+   * Temporary Canvas jobs use this path so a timeout cannot cancel team work
+   * belonging to unrelated sessions through TeamDispatchService.cancelAll().
+   */
+  async cancelSessionExecution(sessionId: string): Promise<{ cancelled: boolean }> {
+    const loop = this.activeLoops.get(sessionId)
+    this.pendingPlanApprovals.delete(sessionId)
+    this.onApprovalCancel?.(sessionId)
+    if (loop == null) {
+      this.emitQueueChanged(sessionId)
+      return { cancelled: false }
+    }
+
+    loop.cancel()
+    const tracked = this.activeExecutionPromises.get(loop)
+    if (tracked?.sessionId === sessionId) {
+      await tracked.promise.catch(() => undefined)
+    }
+    if (this.activeLoops.get(sessionId) === loop) {
+      this.activeLoops.delete(sessionId)
+      new SessionRepository(this.db).updateStatus(sessionId, 'idle')
+      this.emitQueueChanged(sessionId)
+    }
+    return { cancelled: true }
+  }
+
+  /**
    * 用户拒绝当前会话的待审批计划（plan_proposed）。
    *
    * 与 cancelTurn 不同：这是针对 plan 审批的精准操作，**不会**触发全局的
@@ -7164,75 +7259,18 @@ export class SessionService {
     eventLimit?: number
     beforeSeq?: number
   }): Promise<{ events: AgentEvent[]; hasMore: boolean }> {
-    const eventRepo = new EventRepository(this.db)
-    if (params.full === true) {
-      const rows = eventRepo.queryAllBySession(params.sessionId)
-      return {
-        events: rows.map((row) => trimHistoryEvent(JSON.parse(row.event_json) as AgentEvent)),
-        hasMore: false,
-      }
-    }
-    // 按「轮次」分页（UI 历史加载首选）：每页都是完整轮次，永不把一个 agentic 轮次切碎，
-    // 同时排除流式 delta、裁剪超大 prompt 快照，兼顾「完整查看」与「不卡顿」。
-    if (params.turnLimit != null) {
-      const { events: rows, hasMore } = eventRepo.queryRenderableTurns({
-        sessionId: params.sessionId,
-        turnLimit: params.turnLimit,
-        ...(params.eventLimit != null ? { eventLimit: params.eventLimit } : {}),
-        ...(params.beforeSeq != null ? { beforeSeq: params.beforeSeq } : {}),
-      })
-      return {
-        events: rows.map((row) => trimHistoryEvent(JSON.parse(row.event_json) as AgentEvent)),
-        hasMore,
-      }
-    }
-    // 事件级分页（其余调用方，如远程回复查找 / ProjectView 预览）：排除 delta 的最近 N 条。
-    const { events: rows, hasMore } = eventRepo.queryRenderablePage({
-      sessionId: params.sessionId,
-      limit: params.limit ?? 80,
-      ...(params.beforeSeq != null ? { beforeSeq: params.beforeSeq } : {}),
-    })
-    const events = rows.map((row) => trimHistoryEvent(JSON.parse(row.event_json) as AgentEvent))
-    return { events, hasMore }
+    return new SessionReadService(this.db).getHistory(params)
   }
 
   async listSessions(params?: {
     workspaceId?: string
+    surface?: SessionSurface
+    agentId?: string
     limit?: number
     offset?: number
     includeArchived?: boolean
   }): Promise<SessionListResponse> {
-    const sessionRepo = new SessionRepository(this.db)
-    const { sessions: rows, total } = sessionRepo.list(params ?? {})
-    const sessions = rows.map((row) => ({
-      id: row.id as SessionId,
-      title: row.title,
-      projectId: row.project_id,
-      workspaceIds: sessionRepo.getWorkspaceIdsFromRow(row),
-      providerProfileId: row.provider_profile_id ?? '',
-      modelId: row.model_id,
-      agentId: row.agent_id ?? 'platform-manager-agent',
-      agentAdapter: getAgentAdapterFromSession(row.agent_adapter, row.chat_mode, null),
-      permissionMode: getPermissionModeFromSession(
-        row.permission_mode,
-        getAgentAdapterFromSession(row.agent_adapter, row.chat_mode, null),
-      ),
-      chatMode: getChatModeFromSession(row.chat_mode),
-      reasoningEffort: normalizeReasoningEffort(row.reasoning_effort),
-      status: row.status as 'idle' | 'running' | 'error',
-      pinnedAt: row.pinned_at,
-      archivedAt: row.archived_at,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-      turnCount: row.turn_count,
-      logicalMessageCount: row.logical_message_count,
-      messageCount: row.logical_message_count,
-      ...(getImportedFromMetadata(row.metadata_json) != null
-        ? { importedFrom: getImportedFromMetadata(row.metadata_json)! }
-        : {}),
-      debugMode: getDebugModeFromMetadata(row.metadata_json),
-    }))
-    return { sessions, total }
+    return new SessionReadService(this.db).listSessions(params)
   }
 
   /**
@@ -7378,6 +7416,7 @@ export class SessionService {
     }
 
     const row = sessionRepo.findByIdOrFail(params.sessionId)
+    const surface = getSessionSurface(row.metadata_json)
     return {
       session: {
         id: row.id as SessionId,
@@ -7386,7 +7425,7 @@ export class SessionService {
         workspaceIds: sessionRepo.getWorkspaceIds(row.id),
         providerProfileId: row.provider_profile_id ?? '',
         modelId: row.model_id,
-        agentId: row.agent_id ?? 'platform-manager-agent',
+        agentId: row.agent_id ?? CANVAS_ASSISTANT_AGENT_ID,
         agentAdapter: getAgentAdapterFromSession(row.agent_adapter, row.chat_mode, null),
         permissionMode: getPermissionModeFromSession(
           row.permission_mode,
@@ -7403,6 +7442,7 @@ export class SessionService {
         logicalMessageCount: row.logical_message_count,
         messageCount: row.logical_message_count,
         debugMode: getDebugModeFromMetadata(row.metadata_json),
+        ...(surface != null ? { surface } : {}),
       },
     }
   }
@@ -7432,7 +7472,7 @@ export class SessionService {
       providerName,
       providerType,
       modelId: row.model_id,
-      agentId: row.agent_id ?? '',
+      agentId: row.agent_id ?? CANVAS_ASSISTANT_AGENT_ID,
       agentAdapter: getAgentAdapterFromSession(row.agent_adapter, row.chat_mode, null),
       permissionMode: getPermissionModeFromSession(
         row.permission_mode,
@@ -7912,7 +7952,7 @@ export function createInterruptedTurnEvents(
       timestamp,
       seq: nextSeq++,
       code: 'APP_RESTARTED',
-      message: 'The previous turn was stopped because Spark Agent restarted.',
+      message: `The previous turn was stopped because ${APP_NAME} restarted.`,
       retryable: true,
     },
     {
@@ -10011,21 +10051,6 @@ function getChatModeFromSession(
   return 'agent'
 }
 
-/** 从 session.metadata_json 解析导入来源（用于侧边栏来源徽标）；非导入会话返回 null */
-function getImportedFromMetadata(
-  metadataJson: string | null | undefined,
-): HistoryImportSource | null {
-  if (metadataJson == null || metadataJson === '') return null
-  try {
-    const meta = JSON.parse(metadataJson) as { importedFrom?: unknown }
-    if (meta.importedFrom === 'claude-code' || meta.importedFrom === 'codex')
-      return meta.importedFrom
-  } catch {
-    // 忽略损坏的 metadata
-  }
-  return null
-}
-
 /** 从 session.metadata_json 解析调试模式开关（per-session 能力开关，缺省 false）。 */
 function getDebugModeFromMetadata(metadataJson: string | null | undefined): boolean {
   if (metadataJson == null || metadataJson === '') return false
@@ -10442,37 +10467,6 @@ function uniqueSkillSummaries<T extends { id: string }>(skills: T[]): T[] {
     result.push(skill)
   }
   return result
-}
-
-/** 历史加载时单个 prompt 段落内容的字符上限（超出截断，原始长度仍由 charCount 记录）。 */
-const HISTORY_PROMPT_SECTION_CHAR_CAP = 800
-
-/**
- * trimHistoryEvent — 历史加载时裁剪超大事件载荷。
- *
- * 目前针对 turn_prompt_snapshot.systemPromptSections：完整系统提示词（CLAUDE.md/技能/
- * 工具/项目上下文）按「每回合」存一份，1M 上下文打满时单字段可达数 MB，每次加载、每回合
- * 都要序列化+传输+解析，是大会话卡顿的主因之一。这里把每段 content 截断到上限，charCount
- * 仍保留真实长度，Inspector 可据此提示「已截断」。其余字段（label/charCount/模型/工具数等）
- * 不动，提示词审计的概览仍可用；如需完整内容可后续按需单独拉取。
- */
-function trimHistoryEvent(event: AgentEvent): AgentEvent {
-  if (event.type !== 'turn_prompt_snapshot') return event
-  const sections = event.systemPromptSections
-  if (!Array.isArray(sections) || sections.length === 0) return event
-  let trimmedAny = false
-  const trimmedSections = sections.map((section) => {
-    if (
-      typeof section.content === 'string' &&
-      section.content.length > HISTORY_PROMPT_SECTION_CHAR_CAP
-    ) {
-      trimmedAny = true
-      return { ...section, content: section.content.slice(0, HISTORY_PROMPT_SECTION_CHAR_CAP) }
-    }
-    return section
-  })
-  if (!trimmedAny) return event
-  return { ...event, systemPromptSections: trimmedSections }
 }
 
 type WorkspaceFileChangeSnapshot = Set<string>

@@ -25,8 +25,6 @@ import type {
   AgentEvent,
   AgentStatusValue,
   TeamModeConfig,
-  TerminalSessionActivity,
-  TerminalStreamEvent,
 } from '@spark/protocol'
 import { isAutoRouterProvider } from '@spark/protocol'
 import {
@@ -48,7 +46,7 @@ export type ProjectGroup = {
 
 export type TimeFilter = 'all' | '1d' | '3d' | '7d' | '10d'
 
-// 与主进程 ipc/index.ts / TerminalService.ts 的 NO_PROJECT_WORKSPACE_NAME 保持一致：
+// 与主进程 ipc/index.ts 的 NO_PROJECT_WORKSPACE_NAME 保持一致：
 // 主进程统一写入/查找 DB 时使用中文名 '不使用项目'。这里如果写成 'No project'，
 // 会让 buildProjectGroups 过滤失败 → noProject workspace 没被剔除 → sidebar 直接用
 // workspace.name 显示成 '不使用项目'，让 i18n 中的 'sidebar.noProjectChats' = '临时会话'
@@ -272,8 +270,6 @@ type SessionSidebarCtx = {
 
   // Agent status per session (fine-grained: waiting_permission, waiting_user, etc.)
   sessionAgentStatuses: Record<string, AgentStatusValue>
-  // Built-in terminal activity per session. Used by the sidebar to show long-running PTYs.
-  sessionTerminalActivity: Record<string, TerminalSessionActivity>
   // Session IDs that just completed but the user hasn't viewed since — drives the blue unread dot
   unreviewedCompletedSessions: Set<string>
 
@@ -368,9 +364,6 @@ export function SessionSidebarProvider({ children }: { children: ReactNode }) {
   const [sessionAgentStatuses, setSessionAgentStatuses] = useState<
     Record<string, AgentStatusValue>
   >({})
-  const [sessionTerminalActivity, setSessionTerminalActivity] = useState<
-    Record<string, TerminalSessionActivity>
-  >({})
   // Sessions that just completed but the user hasn't viewed yet — used for the blue "unread" dot
   const [unreviewedCompleted, setUnreviewedCompleted] = useState<Set<string>>(() => new Set())
   const justCreatedSessionRef = useRef<SessionId | null>(null)
@@ -410,7 +403,6 @@ export function SessionSidebarProvider({ children }: { children: ReactNode }) {
   const { invoke: createSession } = useIpcInvoke('session:create')
   const { invoke: listProviders } = useIpcInvoke('provider:list')
   const { invoke: listAgents } = useIpcInvoke('agent:list')
-  const { invoke: listActiveTerminals } = useIpcInvoke('terminal:list-active')
   const { invoke: searchSessionsRpc } = useIpcInvoke('session:search')
   const { invoke: updateSession } = useIpcInvoke('session:update')
   const { invoke: deleteSession } = useIpcInvoke('session:delete')
@@ -425,18 +417,6 @@ export function SessionSidebarProvider({ children }: { children: ReactNode }) {
   const { invoke: getCurrentWorkspace } = useIpcInvoke('workspace:get-current')
   const { invoke: getTempProjectDir } = useIpcInvoke('app:get-temp-project-dir')
   const { invoke: openDirectoryDialog } = useIpcInvoke('dialog:open-directory')
-
-  const refreshTerminalActivity = useCallback(async () => {
-    try {
-      const res = await listActiveTerminals({})
-      const sessions = Array.isArray(res.sessions) ? res.sessions : []
-      setSessionTerminalActivity(
-        Object.fromEntries(sessions.map((item) => [item.sessionId, item] as const)),
-      )
-    } catch (err) {
-      console.warn('[terminal] list-active failed:', err)
-    }
-  }, [listActiveTerminals])
 
   const performRefresh = useCallback(async () => {
     try {
@@ -459,7 +439,6 @@ export function SessionSidebarProvider({ children }: { children: ReactNode }) {
           '',
       )
       setActiveWorkspaceId((prev) => currentRes.workspace?.id ?? prev ?? null)
-      void refreshTerminalActivity()
     } catch (err) {
       console.error('Failed to refresh session data', err)
     }
@@ -469,7 +448,6 @@ export function SessionSidebarProvider({ children }: { children: ReactNode }) {
     listProviders,
     listSessions,
     listWorkspaces,
-    refreshTerminalActivity,
   ])
   const refreshCoordinator = useMemo(
     () => createSingleFlightRefresh(performRefresh),
@@ -575,21 +553,6 @@ export function SessionSidebarProvider({ children }: { children: ReactNode }) {
       }) ?? (() => {})
     )
   }, [refreshCoordinator, upsertSessionInList])
-
-  useEffect(() => {
-    return (
-      window.spark?.on?.('stream:terminal:event', (event: TerminalStreamEvent) => {
-        if (
-          event.type === 'created' ||
-          event.type === 'exit' ||
-          event.type === 'removed' ||
-          event.type === 'updated'
-        ) {
-          void refreshTerminalActivity()
-        }
-      }) ?? (() => {})
-    )
-  }, [refreshTerminalActivity])
 
   useEffect(() => {
     return (
@@ -1408,7 +1371,6 @@ export function SessionSidebarProvider({ children }: { children: ReactNode }) {
       setActiveSession: setActive,
       setActiveWorkspace,
       sessionAgentStatuses,
-      sessionTerminalActivity,
       unreviewedCompletedSessions: unreviewedCompleted,
       projectGroups,
       noProjectWorkspace,
@@ -1456,7 +1418,6 @@ export function SessionSidebarProvider({ children }: { children: ReactNode }) {
       activeWorkspaceId,
       setActiveWorkspace,
       sessionAgentStatuses,
-      sessionTerminalActivity,
       unreviewedCompleted,
       projectGroups,
       noProjectWorkspace,

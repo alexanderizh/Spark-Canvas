@@ -1,5 +1,11 @@
-import type { CanvasMediaTaskInputFile } from '@spark/protocol'
-import { buildTaskInputFiles, type CanvasTaskInputRoleSelection } from './canvasTaskInputFiles'
+import type { CanvasInputBinding, CanvasMediaTaskInputFile } from '@spark/protocol'
+import {
+  buildTaskInputFiles,
+  normalizeCanvasTaskInputRoleSelection,
+  type CanvasTaskInputRole,
+  type CanvasTaskInputRoleSelection,
+} from './canvasTaskInputFiles'
+import { createCanvasInputBinding } from './canvasInputBindings'
 import type {
   CanvasAsset,
   CanvasInputTransport,
@@ -26,6 +32,45 @@ export function buildStoryboardReferenceInputRoles(
   return roles
 }
 
+/** Persist explicit media roles on a newly created operation node. */
+export function buildCanvasInputBindingsForRoles(
+  nodes: readonly CanvasNode[],
+  inputRoles: Record<string, CanvasTaskInputRoleSelection>,
+): CanvasInputBinding[] {
+  const nodeById = new Map(nodes.map((node) => [node.id, node]))
+  const bindings: CanvasInputBinding[] = []
+  for (const [nodeId, selection] of Object.entries(inputRoles)) {
+    const node = nodeById.get(nodeId)
+    if (!node) continue
+    for (const role of normalizeCanvasTaskInputRoleSelection(selection)) {
+      bindings.push(
+        createCanvasInputBinding({
+          sourceNodeId: nodeId,
+          origin: 'connection',
+          kind: canvasInputKind(node),
+          relation: canvasRelationForInputRole(role),
+          role,
+          order: bindings.length,
+        }),
+      )
+    }
+  }
+  return bindings
+}
+
+function canvasInputKind(node: CanvasNode): CanvasInputBinding['kind'] {
+  if (node.type === 'image' || node.type === 'video' || node.type === 'audio') return node.type
+  if (node.type === 'text' || node.type === 'prompt') return 'text'
+  return 'file'
+}
+
+function canvasRelationForInputRole(role: CanvasTaskInputRole): CanvasInputBinding['relation'] {
+  if (role === 'first_frame') return 'first_frame'
+  if (role === 'last_frame') return 'last_frame'
+  if (role === 'reference') return 'reference_image'
+  return 'generic'
+}
+
 export async function buildCloudTaskInputFiles(
   nodes: CanvasNode[],
   inputTransport: CanvasInputTransport | undefined,
@@ -35,80 +80,38 @@ export async function buildCloudTaskInputFiles(
   return materializeCanvasTaskInputFiles(files, inputTransport)
 }
 
+export function resolveCanvasInputTransport(
+  inputTransport: CanvasInputTransport | undefined,
+): Exclude<CanvasInputTransport, 'auto'> {
+  return inputTransport === 'cloud_url' ? 'cloud_url' : 'base64'
+}
+
 export async function materializeCanvasTaskInputFiles(
   files: CanvasMediaTaskInputFile[],
   inputTransport: CanvasInputTransport | undefined,
 ): Promise<CanvasMediaTaskInputFile[]> {
   if (files.length === 0) return files
-  if (inputTransport === 'base64') {
+  if (resolveCanvasInputTransport(inputTransport) === 'base64') {
     return Promise.all(files.map(materializeBase64Input))
-  }
-  if (inputTransport !== 'cloud_url') {
-    return Promise.all(
-      files.map(async (file) => {
-        if (file.type !== 'image' || file.dataUrl || !file.url?.startsWith('safe-file://')) {
-          return file
-        }
-        try {
-          return await materializeBase64Input(file)
-        } catch {
-          return file
-        }
-      }),
-    )
   }
   return Promise.all(
     files.map(async (file, index) => {
-      if (file.type !== 'image') return file
       if (file.url && /^https?:\/\//i.test(file.url)) return file
       const filePath = file.url ? decodeSafeFileUrl(file.url) : null
-      try {
-        const uploaded = await window.spark.invoke('auth:upload-file', {
-          ...(file.dataUrl ? { dataUrl: file.dataUrl } : {}),
-          ...(filePath ? { filePath } : {}),
-          fileName: `canvas-input-${index + 1}.${extensionFromMime(file.mimeType)}`,
-          ...(file.mimeType ? { mimeType: file.mimeType } : {}),
-        })
-        return {
-          type: file.type,
-          ...(file.role ? { role: file.role } : {}),
-          url: uploaded.aiUrl,
-          ...(file.mimeType ? { mimeType: file.mimeType } : {}),
-        }
-      } catch (uploadError) {
-        try {
-          const fallback = await materializeBase64Input(file)
-          if (fallback !== file) {
-            console.warn(
-              '[CanvasTaskInput] auth:upload-file failed; falling back to base64 input',
-              {
-                index,
-                role: file.role,
-                mimeType: file.mimeType,
-                uploadError,
-              },
-            )
-            return fallback
-          }
-        } catch (fallbackError) {
-          console.error(
-            '[CanvasTaskInput] Failed to materialize local input after upload failure',
-            {
-              index,
-              role: file.role,
-              mimeType: file.mimeType,
-              uploadError,
-              fallbackError,
-            },
-          )
-        }
-        console.error('[CanvasTaskInput] Failed to upload input file for cloud_url transport', {
-          index,
-          role: file.role,
-          mimeType: file.mimeType,
-          uploadError,
-        })
-        throw uploadError
+      if (!file.dataUrl && !filePath) {
+        throw new Error('cloud_url transport requires a data URL, safe-file URL, or public URL')
+      }
+      const uploaded = await window.spark.invoke('auth:upload-file', {
+        ...(file.dataUrl ? { dataUrl: file.dataUrl } : {}),
+        ...(filePath ? { filePath } : {}),
+        fileName: `canvas-input-${index + 1}.${extensionFromMime(file.mimeType, file.type)}`,
+        ...(file.mimeType ? { mimeType: file.mimeType } : {}),
+      })
+      return {
+        type: file.type,
+        ...(file.role ? { role: file.role } : {}),
+        url: uploaded.aiUrl,
+        ...(file.mimeType ? { mimeType: file.mimeType } : {}),
       }
     }),
   )
@@ -151,6 +154,29 @@ export function buildPipelineSourceText(nodes: CanvasNode[], assets: CanvasAsset
     })
     .filter((text): text is string => Boolean(text))
     .join('\n\n')
+}
+
+/**
+ * 流水线菜单展示能力时会把操作节点视为其主产物；执行动作时也必须解析到同一份文本。
+ * 有持久化产物节点时让下游直接连接产物，否则保留操作节点作为可展开的血缘入口。
+ */
+export function resolveCanvasPipelineTextSource(
+  sourceNode: CanvasNode,
+  snapshot: CanvasSnapshot,
+): { sourceNode: CanvasNode; sourceText: string } {
+  const inputNodes = expandCanvasInputNodes([sourceNode], snapshot)
+  const sourceText = buildPipelineSourceText(inputNodes, snapshot.assets)
+  if (!isOperationNode(sourceNode) || inputNodes.length !== 1) {
+    return { sourceNode, sourceText }
+  }
+
+  const resolvedNode = inputNodes[0]
+  if (!resolvedNode) return { sourceNode, sourceText }
+  const persistedNode = snapshot.nodes.find((node) => node.id === resolvedNode.id)
+  return {
+    sourceNode: persistedNode ?? sourceNode,
+    sourceText,
+  }
 }
 
 export function expandCanvasInputNodes(
@@ -221,7 +247,7 @@ export function fallbackPromptForOperation(operation: CanvasOperationType): stri
 async function materializeBase64Input(
   file: CanvasMediaTaskInputFile,
 ): Promise<CanvasMediaTaskInputFile> {
-  if (file.type !== 'image' || file.dataUrl || !file.url?.startsWith('safe-file://')) return file
+  if (file.dataUrl || !file.url?.startsWith('safe-file://')) return file
   const dataUrl = await readUrlAsDataUrl(file.url)
   return {
     type: file.type,
@@ -233,23 +259,60 @@ async function materializeBase64Input(
 
 function readUrlAsDataUrl(url: string): Promise<string> {
   return fetch(url)
-    .then((response) => response.blob())
+    .then((response) => {
+      if (!response.ok) throw new Error(`Failed to read local canvas input (${response.status})`)
+      return response.blob()
+    })
     .then(
       (blob) =>
         new Promise<string>((resolve, reject) => {
           const reader = new FileReader()
-          reader.onerror = () => reject(reader.error ?? new Error('Failed to read image'))
+          reader.onerror = () =>
+            reject(reader.error ?? new Error('Failed to read local canvas input'))
           reader.onload = () => resolve(String(reader.result ?? ''))
           reader.readAsDataURL(blob)
         }),
     )
 }
 
-function extensionFromMime(mimeType: string | undefined): string {
-  const mime = (mimeType ?? '').toLowerCase()
-  if (mime.includes('jpeg') || mime.includes('jpg')) return 'jpg'
-  if (mime.includes('webp')) return 'webp'
-  return 'png'
+function extensionFromMime(
+  mimeType: string | undefined,
+  fileType: CanvasMediaTaskInputFile['type'],
+): string {
+  const mime = (mimeType ?? '').split(';')[0]?.trim().toLowerCase()
+  const known: Record<string, string> = {
+    'image/avif': 'avif',
+    'image/bmp': 'bmp',
+    'image/gif': 'gif',
+    'image/heic': 'heic',
+    'image/heif': 'heif',
+    'image/jpeg': 'jpg',
+    'image/jpg': 'jpg',
+    'image/png': 'png',
+    'image/tiff': 'tiff',
+    'image/webp': 'webp',
+    'video/mp4': 'mp4',
+    'video/quicktime': 'mov',
+    'video/webm': 'webm',
+    'video/x-m4v': 'm4v',
+    'audio/aac': 'aac',
+    'audio/flac': 'flac',
+    'audio/mp4': 'm4a',
+    'audio/mpeg': 'mp3',
+    'audio/ogg': 'ogg',
+    'audio/opus': 'opus',
+    'audio/wav': 'wav',
+    'audio/webm': 'webm',
+    'audio/x-wav': 'wav',
+  }
+  return (mime ? known[mime] : undefined) ?? defaultExtension(fileType)
+}
+
+function defaultExtension(fileType: CanvasMediaTaskInputFile['type']): string {
+  if (fileType === 'image') return 'png'
+  if (fileType === 'video') return 'mp4'
+  if (fileType === 'audio') return 'mp3'
+  return 'bin'
 }
 
 function decodeSafeFileUrl(safeFileUrl: string): string | null {

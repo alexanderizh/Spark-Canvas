@@ -1,19 +1,17 @@
-appId: com.spark-agent.desktop
-# Keep productName stable: it controls the executable, .app bundle and artifact names.
-# User-facing branding is configured per platform below.
-productName: Spark Agent
+appId: com.spark.canvas.desktop
+productName: Spark Canvas
 protocols:
-  - name: SparkWork redemption
+  - name: Spark Canvas redemption
     schemes:
-      - spark-agent
+      - spark-canvas
 artifactName: ${productName}-${version}-${os}-${arch}.${ext}
 # pnpm hoisted 布局下 electron 装在 monorepo 根 node_modules，electron-builder 在
 # apps/desktop 目录运行时无法解析 ^31.0.0 范围版本，需显式指定与 lockfile 一致的版本。
 electronVersion: 31.7.7
 # 关闭 electron-builder 自带的 native rebuild。
-# 原因：node-pty@1.1.0 的 install 脚本会跑 tsc 编译测试文件，类型检查失败导致整个 rebuild 崩。
-# 改由 package.json 里的 postinstall (electron-rebuild) 在装依赖阶段预编译好，
-# 打包时直接用现成的 .node 二进制即可。
+# 改由 scripts/rebuild-native-for-electron.sh (electron-rebuild) 显式把 better-sqlite3、
+# keytar 重编到 Electron ABI，打包时直接用现成的 .node 二进制即可，避免 electron-builder
+# 的隐式 rebuild 与我们的显式流程重复/冲突。
 npmRebuild: false
 buildDependenciesFromSource: false
 directories:
@@ -22,9 +20,9 @@ directories:
 afterSign: scripts/notarize.js
 mac:
   icon: resources/icon.icns
-  category: public.app-category.developer-tools
+  category: public.app-category.graphics-design
   extendInfo:
-    CFBundleDisplayName: SparkWork
+    CFBundleDisplayName: Spark Canvas
   target:
     - dmg
   # 公证的前置条件：开启 hardened runtime
@@ -49,12 +47,12 @@ win:
     - sha256
   rfc3161TimeStampServer: http://timestamp.digicert.com
 nsis:
-  shortcutName: SparkWork
-  uninstallDisplayName: SparkWork ${version}
+  shortcutName: Spark Canvas
+  uninstallDisplayName: Spark Canvas ${version}
 linux:
   icon: resources/icon.png
   desktop:
-    Name: SparkWork
+    Name: Spark Canvas
 asar: true
 asarUnpack:
   - '**/*.node'
@@ -101,9 +99,14 @@ extraResources:
   - from: resources/skills
     to: skills
     filter:
-      - '**/*'
+      - 'canvas-studio/**/*'
+      - 'multimedia-use/**/*'
+      - 'video-workflow/**/*'
+      - 'platform-manager/**/*'
 publish:
   provider: github
   owner: alexanderizh
-  repo: spark-agent
-  releaseType: release
+  repo: Spark-Canvas
+  # v2 candidate 注册与跨平台证据完成前只允许 draft，禁止先公开 stable。
+  releaseType: draft
+  updaterCacheDirName: spark-canvas-updater

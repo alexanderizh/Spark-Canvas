@@ -11,18 +11,72 @@
  */
 
 import { typedIpcHandle, pushStreamEvent } from './typed-ipc.js'
+import { pushSessionStreamEvent } from './sessionStreamPublisher.js'
+import {
+  openCanvasAgentWorkspace,
+  registerCanvasAgentWorkspaceIpc,
+} from './canvasAgentWorkspace.js'
+import {
+  registerCanvasAgentSessionIpc,
+  toCanvasAgentSessionRecord,
+} from './canvasAgentSession.js'
 import {
   buildCanvasMediaProviderPrompt,
   buildCanvasRuntimeRequest,
-  buildCanvasSystemPrompt,
 } from './canvas-prompt-runtime.js'
+import { CanvasTextOutputCapabilityCache } from './canvasTextOutputCapability.js'
 import {
-  buildCanvasTextRawResponse,
-  resolveCanvasTextTokenBudget,
-} from './canvasTextTaskDiagnostics.js'
+  mapCanvasMediaTaskInputFiles,
+  validateCanvasMediaTaskParams,
+} from './canvasMediaTaskValidation.js'
+import {
+  canvasTaskLogger,
+  createCanvasTaskLifecycleLog,
+} from './canvas-task-lifecycle-log.js'
+import { registerCanvasTextTaskIpc } from './registerCanvasTextTaskIpc.js'
+import { registerCanvasAnnotationIpc } from './registerCanvasAnnotationIpc.js'
+import {
+  isActiveCanvasProjectSender,
+  requireActiveCanvasWindowSender,
+  requireCanvasProjectManagerSender,
+  requireCanvasShellOrActiveWindowSender,
+  requireMainCanvasShellSender,
+} from './CanvasIpcSenderAuthority.js'
+import { rewriteCanvasSnapshotRootPaths } from './canvasProjectAssetMigration.js'
+import { CanvasTaskOwnerRegistry } from './CanvasTaskOwnerRegistry.js'
+import { resolveCanvasTextTaskAgent } from './canvasTextAgentPolicy.js'
 import { PendingUserQuestionStore } from './user-question-store.js'
+import {
+  buildDetachedQuestionContinuationMessage,
+  recoverDetachedQuestionAttachments,
+} from './user-question-recovery.js'
 import { getCanvasHostBridge } from '../canvas-host-bridge.js'
 import { getCanvasWindowService } from '../services/CanvasWindowService.js'
+import { CanvasFileAccessController } from './CanvasFileAccessController.js'
+import {
+  CanvasFileAccessGrantService,
+  type CanvasFileAccessGrantSender,
+} from '../services/CanvasFileAccessGrantService.js'
+import { registerCanvasFileAccessIpc } from './registerCanvasFileAccessIpc.js'
+import {
+  coordinateCanvasProjectDirectory,
+  type CanvasProjectDirectoryCoordinatorDependencies,
+} from './CanvasProjectDirectoryCoordinator.js'
+import { authorizeCanvasMediaRequestPaths } from './CanvasMediaPathAuthority.js'
+import {
+  authorizeCanvasProjectsRootSetting,
+  readTrustedCanvasProjectsRoot,
+} from '../services/CanvasProjectsRootSetting.js'
+import {
+  exportCanvasProjectDirectoryPackage,
+  importCanvasProjectDirectoryPackage,
+  writeCanvasProjectPackageFiles,
+} from '../services/CanvasProjectPackageFiles.js'
+import {
+  CanvasProjectPackageAuthority,
+  canonicalizeExistingDirectory,
+  type CanvasPackageAuthoritySender,
+} from '../services/CanvasProjectPackageAuthority.js'
 import {
   isSessionServiceShutdownStarted,
   registerSessionServiceForShutdown,
@@ -35,6 +89,8 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import {
+  APP_NAME,
+  CANVAS_ASSISTANT_AGENT_ID,
   createLogger,
   deriveTeamAvatar,
   normalizeEduAssetUrl,
@@ -72,8 +128,6 @@ import {
   TeamDispatchRepository,
   TeamDefinitionRepository,
   DEFAULT_MAX_DISCUSSION_ROUNDS,
-  ScheduledTaskRepository,
-  TaskExecutionRepository,
   MemoryRepository,
   MemoryEntityRepository,
   MemorySearchRepository,
@@ -89,6 +143,7 @@ import {
   resolveProviderApiKeyForProfile,
   RulesService,
   RuleCompositionEngine,
+  SessionReadService,
   SessionService,
   WorkspaceService,
   GitWorktreeService,
@@ -105,8 +160,6 @@ import {
   MediaRouterService,
   MediaModelCatalogService,
   MediaTaskRuntimeService,
-  CanvasTextProviderError,
-  generateCanvasText,
   resolveProfileMediaModels,
   MemoryStoreService,
   MemoryWriterService,
@@ -118,14 +171,13 @@ import type {
   MediaProviderError,
 } from '@spark/agent-runtime'
 import * as keystore from '@spark/shared/keystore'
-import { ScheduledTaskService } from '@spark/agent-runtime'
-import type { TaskExecutorFn } from '@spark/agent-runtime'
 import { compileMediaRequest } from '@spark/agent-runtime'
 import type {
   CommandParseResponse,
   SessionAgentAdapter,
   SessionPermissionMode,
   SessionReasoningEffort,
+  SessionAttachment,
   WorkspaceInfo,
   HookNode,
   PlaywrightInstallProgress,
@@ -134,7 +186,6 @@ import type {
   WorkflowGraph,
   WorkflowOrientation,
   ProviderExportPayload,
-  ScheduledTaskExportPayload,
   TeamModeConfig,
   TeamMemberCard,
   ManagedTeam,
@@ -145,7 +196,6 @@ import type {
   CanvasMediaModelSummary,
   ProviderIconConfig,
   CanvasMediaTaskCreateResponse,
-  CanvasTextTaskCreateResponse,
   BoardTask,
   BoardComment,
   BoardTaskAttachment,
@@ -156,8 +206,8 @@ import type {
   MemoryType,
   SkillInstallJobSource,
   SkillInstallStatusItem,
-  FfmpegInstallProgress,
   VideoProcessRequest,
+  VideoProbeRequest,
   VideoProcessResponse,
   VideoProcessProgress,
 } from '@spark/protocol'
@@ -167,8 +217,16 @@ import type {
   SessionListResponse,
   SystemNotificationNavigateRequest,
 } from '@spark/protocol'
-import { MediaModelManifestSchema, isAutoRouterProvider } from '@spark/protocol'
+import {
+  CanvasProjectImportPackageRequestSchema,
+  MediaModelManifestSchema,
+  isAutoRouterProvider,
+} from '@spark/protocol'
 import { McpOAuthService } from '../services/mcp-oauth/McpOAuthService.js'
+import {
+  filterCanvasRuntimeSkills,
+  getCanvasSkillDirectories,
+} from '../services/CanvasSkillsBootstrapService.js'
 import type {
   SessionEventHandler,
   ApprovalHandler,
@@ -179,15 +237,14 @@ import type {
   PlatformConfigChangedHandler,
   BrowserAutomationMcpProvider,
 } from '@spark/agent-runtime'
-import { getFileWatcherService } from '../services/FileWatcherService.js'
 import { isSafeFilePathAllowed, toSafeFileUrl } from '../services/SafeFileProtocol.js'
 import { isPathStrictlyInsideRoot } from '../services/CanvasProjectPath.js'
 import { getUpdateService } from '../services/UpdateService.js'
 import { detectExternalTools, openProjectInTool } from '../services/ExternalToolService.js'
 import { checkSdkIntegrity, installSdk } from '../services/SdkIntegrityService.js'
-import { getTerminalService } from '../services/TerminalService.js'
-import { registerTerminalIpc } from './registerTerminalIpc.js'
 import { registerPlatformModelIpc } from '../services/PlatformModel/registerPlatformModelIpc.js'
+import { registerProviderFilesIpc } from './registerProviderFilesIpc.js'
+import { sparkMediaUploader } from '../services/media/SparkMediaUploader.js'
 import {
   getGitExecErrorMessage,
   getWorkspaceBranches,
@@ -208,9 +265,12 @@ import {
 } from '../services/PlaywrightIntegrityService.js'
 import {
   detectFfmpegIntegrity,
-  installFfmpeg,
   getCachedFfmpegIntegrity,
 } from '../services/FfmpegIntegrityService.js'
+import {
+  getCanvasFfmpegInstallAvailability,
+  installCanvasFfmpeg,
+} from '../services/CanvasFfmpegInstaller.js'
 import { handleVideoProcess } from '../services/videoProcessHandler.js'
 import {
   ensureRegistered,
@@ -219,8 +279,6 @@ import {
 } from '../services/PlaywrightMcpRegistration.js'
 import { getBrowserBridgeServer } from '../services/BrowserBridgeServer.js'
 import { RemoteConnectionService } from '../services/RemoteConnectionService.js'
-import type { RemoteInboundMessage } from '../services/RemoteConnectionService.js'
-import { registerGitHubConnectorIpc } from '../services/GitHubConnector/registerGitHubConnectorIpc.js'
 import { getDatabase, getDatabasePath } from '../db.js'
 import { getMainWindow } from '../windows/index.js'
 import { getWindowForIpcSender } from './window-controls.js'
@@ -268,20 +326,34 @@ function resolveBrowserAutomationMcpServerPath(): string | null {
   const candidates = [
     path.resolve(here, 'tools/browser-automation-mcp-server.mjs'),
     path.resolve(here, '../tools/browser-automation-mcp-server.mjs'),
-    path.resolve(here, '../../../../packages/agent-runtime/src/tools/browser-automation-mcp-server.mjs'),
-    path.resolve(process.cwd(), 'packages/agent-runtime/src/tools/browser-automation-mcp-server.mjs'),
-    path.resolve(process.cwd(), '../packages/agent-runtime/src/tools/browser-automation-mcp-server.mjs'),
+    path.resolve(
+      here,
+      '../../../../packages/agent-runtime/src/tools/browser-automation-mcp-server.mjs',
+    ),
+    path.resolve(
+      process.cwd(),
+      'packages/agent-runtime/src/tools/browser-automation-mcp-server.mjs',
+    ),
+    path.resolve(
+      process.cwd(),
+      '../packages/agent-runtime/src/tools/browser-automation-mcp-server.mjs',
+    ),
     path.resolve(process.resourcesPath ?? '', 'tools/browser-automation-mcp-server.mjs'),
   ]
   return candidates.find((candidate) => existsSync(candidate)) ?? null
 }
 
-const browserAutomationMcpProvider: BrowserAutomationMcpProvider = async (sessionId, workspaceRootPath) => {
+const browserAutomationMcpProvider: BrowserAutomationMcpProvider = async (
+  sessionId,
+  workspaceRootPath,
+) => {
   const remoteConnection = getRemoteConnectionService()
     .list()
     .connections.find((connection) => connection.defaultSessionId === sessionId)
   if (remoteConnection != null && remoteConnection.capabilities.useInternalBrowser !== true) {
-    log.info(`spark_browser disabled for remote session=${sessionId} connection=${remoteConnection.id}`)
+    log.info(
+      `spark_browser disabled for remote session=${sessionId} connection=${remoteConnection.id}`,
+    )
     return null
   }
   const serverPath = resolveBrowserAutomationMcpServerPath()
@@ -307,7 +379,16 @@ const browserAutomationMcpProvider: BrowserAutomationMcpProvider = async (sessio
 
 let autoWindowWidthState: { baselineWidth: number; managedWidth: number } | null = null
 
-type ConfigChangedScope = 'provider' | 'model' | 'agent' | 'team' | 'skill' | 'mcp' | 'workflow' | 'rule' | 'prompt'
+type ConfigChangedScope =
+  | 'provider'
+  | 'model'
+  | 'agent'
+  | 'team'
+  | 'skill'
+  | 'mcp'
+  | 'workflow'
+  | 'rule'
+  | 'prompt'
 type ConfigChangedAction = 'create' | 'update' | 'delete' | 'import'
 
 function pushConfigChanged(
@@ -374,17 +455,12 @@ type CanvasAssetKind = 'image' | 'audio' | 'video' | 'file'
 const CANVAS_SETTINGS_CATEGORY = 'canvas'
 const CANVAS_SETTINGS_KEY = 'data'
 
-function getCanvasSettingsValue(): { projectsRootPath?: string } {
-  const raw = getSettingsService().get(CANVAS_SETTINGS_CATEGORY, CANVAS_SETTINGS_KEY)
-  if (raw && typeof raw === 'object') return raw as { projectsRootPath?: string }
-  return {}
-}
-
 function getDefaultCanvasProjectsRoot(): string {
-  const configured = getCanvasSettingsValue().projectsRootPath?.trim()
-  return configured
-    ? path.resolve(configured)
-    : path.join(app.getPath('userData'), 'canvas-projects')
+  // 只信任经 v2 原生授权写入策略 canonical 化的自定义根；缺 marker 的旧值一律回退默认根，
+  // 避免读取端信任未经 sender grant 验证的 renderer 路径。
+  const raw = getSettingsService().get(CANVAS_SETTINGS_CATEGORY, CANVAS_SETTINGS_KEY)
+  const trusted = readTrustedCanvasProjectsRoot(raw)
+  return trusted ?? path.join(app.getPath('userData'), 'canvas-projects')
 }
 
 function sanitizeCanvasPathSegment(value: string | undefined, fallback: string): string {
@@ -489,7 +565,8 @@ async function ensureCanvasProjectDirectoryById(
   return ensureCanvasProjectDirectory({
     projectId,
     title: title ?? row?.title ?? projectId,
-    rootPath: rootPath ?? row?.root_path ?? null,
+    // 已存在项目的 DB root 永远优先；renderer 传入的 rootPath 只在新项目（DB 无记录）时生效。
+    rootPath: row?.root_path ?? rootPath ?? null,
   })
 }
 
@@ -512,14 +589,10 @@ export function isInsideCanvasProjectsRoot(rootPath: string | null | undefined):
  * 否则拒绝删除。文件系统错误不抛出 —— DB 删除仍要继续，仅日志记录失败。
  * 返回是否实际移除了目录（不存在视为未移除）。
  */
-async function removeCanvasProjectDirectory(
-  rootPath: string | null | undefined,
-): Promise<boolean> {
+async function removeCanvasProjectDirectory(rootPath: string | null | undefined): Promise<boolean> {
   if (!isInsideCanvasProjectsRoot(rootPath)) {
     if (rootPath && rootPath.trim()) {
-      log.warn(
-        `canvas:project:delete refused to remove path outside projects root: ${rootPath}`,
-      )
+      log.warn(`canvas:project:delete refused to remove path outside projects root: ${rootPath}`)
     }
     return false
   }
@@ -795,70 +868,6 @@ function collectCanvasSnapshotLocalPaths(snapshot: any): Set<string> {
   return paths
 }
 
-function rewriteCanvasSnapshotRootPaths(value: unknown, fromRoot: string, toRoot: string): unknown {
-  if (typeof value === 'string') {
-    const decoded = decodeSafeFileUrl(value)
-    if (decoded && path.resolve(decoded).startsWith(fromRoot + path.sep)) {
-      return toSafeFileUrl(path.join(toRoot, path.relative(fromRoot, path.resolve(decoded))))
-    }
-    if (path.isAbsolute(value) && path.resolve(value).startsWith(fromRoot + path.sep)) {
-      return path.join(toRoot, path.relative(fromRoot, path.resolve(value)))
-    }
-    return value
-  }
-  if (Array.isArray(value))
-    return value.map((item) => rewriteCanvasSnapshotRootPaths(item, fromRoot, toRoot))
-  if (!value || typeof value !== 'object') return value
-  return Object.fromEntries(
-    Object.entries(value as Record<string, unknown>).map(([key, child]) => [
-      key,
-      rewriteCanvasSnapshotRootPaths(child, fromRoot, toRoot),
-    ]),
-  )
-}
-
-async function writeCanvasProjectPackageFiles(input: {
-  projectId: string
-  rootPath: string
-  snapshotJson: string
-  exportedAt?: string
-}): Promise<void> {
-  const exportedAt = input.exportedAt ?? new Date().toISOString()
-  const parsed = JSON.parse(input.snapshotJson)
-  const snapshot =
-    parsed?.kind === 'spark.canvas.project' && parsed.snapshot ? parsed.snapshot : parsed
-  if (snapshot?.project) snapshot.project.rootPath = input.rootPath
-  const payload = {
-    kind: 'spark.canvas.project',
-    version: 2,
-    exportedAt,
-    app: 'Spark-Agent',
-    projectRootPath: input.rootPath,
-    snapshot,
-  }
-  const directory = await ensureCanvasProjectDirectory({
-    projectId: input.projectId,
-    title: snapshot?.project?.title,
-    rootPath: input.rootPath,
-  })
-  await fs.writeFile(
-    path.join(directory.rootPath, 'project.json'),
-    JSON.stringify(payload, null, 2),
-    'utf-8',
-  )
-  await fs.writeFile(
-    path.join(directory.snapshotsDir, 'latest.json'),
-    JSON.stringify(snapshot, null, 2),
-    'utf-8',
-  )
-  const stamp = exportedAt.replace(/[:.]/g, '-')
-  await fs.writeFile(
-    path.join(directory.snapshotsDir, `${stamp}.json`),
-    JSON.stringify(snapshot, null, 2),
-    'utf-8',
-  )
-}
-
 /** Canvas 持久化 Repository（SQLite-backed，见 migration 027） */
 function getCanvasProjectRepo(): CanvasProjectRepository {
   return new CanvasProjectRepository(getDatabase())
@@ -1024,6 +1033,7 @@ async function canvasResponseFromMediaTaskRecord(
     mode: record.mode ?? 'sync',
     assets,
     ...(record.requestId != null ? { requestId: record.requestId } : {}),
+    ...(record.submitResponse != null ? { submitResponse: record.submitResponse } : {}),
     ...(record.rawResponse != null ? { rawResponse: record.rawResponse } : {}),
     ...(record.requestCall != null ? { requestCall: record.requestCall } : {}),
     ...(record.error != null ? { error: record.error } : {}),
@@ -1152,7 +1162,10 @@ function getBoardTaskAttachmentDir(taskId: string): string {
 }
 
 function isWithinBoardTaskAttachmentDir(taskId: string, targetPath: string): boolean {
-  return isWithinDirectory(path.resolve(targetPath), path.resolve(getBoardTaskAttachmentDir(taskId)))
+  return isWithinDirectory(
+    path.resolve(targetPath),
+    path.resolve(getBoardTaskAttachmentDir(taskId)),
+  )
 }
 
 function sanitizeBoardAttachmentBaseName(value: string | undefined, fallback: string): string {
@@ -1163,10 +1176,9 @@ async function persistBoardAttachment(
   taskId: string,
   attachment: BoardTaskAttachment,
 ): Promise<BoardTaskAttachment> {
-  const candidatePaths = [
-    attachment.path?.trim(),
-    attachment.previewPath?.trim(),
-  ].filter((value, index, list): value is string => Boolean(value) && list.indexOf(value) === index)
+  const candidatePaths = [attachment.path?.trim(), attachment.previewPath?.trim()].filter(
+    (value, index, list): value is string => Boolean(value) && list.indexOf(value) === index,
+  )
 
   let sourcePath: string | null = null
   for (const candidatePath of candidatePaths) {
@@ -1282,19 +1294,6 @@ async function ensureSessionWorkspacePaths(sessionId: string): Promise<void> {
   await Promise.all(workspaceIds.map((workspaceId) => ensureNoProjectWorkspacePath(workspaceId)))
 }
 
-/**
- * Look up the no-project workspace id by name ('不使用项目').
- *
- * Used as a fallback when a scheduled task has no workspaceId set, so triggered
- * sessions land in the same default workspace as ad-hoc chats and remain visible
- * in the session sidebar. Returns null if no such workspace exists yet.
- */
-function getNoProjectWorkspaceId(): string | null {
-  const rows = new WorkspaceRepository(getDatabase()).listAll(100, 0, { includeArchived: true })
-  const found = rows.find((w) => w.name === NO_PROJECT_WORKSPACE_NAME)
-  return found?.id ?? null
-}
-
 let _mcpService: McpService | null = null
 export function getMcpService(): McpService {
   if (_mcpService == null) {
@@ -1303,26 +1302,43 @@ export function getMcpService(): McpService {
   return _mcpService
 }
 
-
 let _mcpOAuthService: McpOAuthService | null = null
 function getMcpOAuthService(): McpOAuthService {
   if (_mcpOAuthService == null) {
-    _mcpOAuthService = new McpOAuthService({ get: (id) => { const row = new McpServerRepository(getDatabase()).get(id); return row == null ? null : { id: row.id, configJson: row.config_json } } })
+    _mcpOAuthService = new McpOAuthService({
+      get: (id) => {
+        const row = new McpServerRepository(getDatabase()).get(id)
+        return row == null ? null : { id: row.id, configJson: row.config_json }
+      },
+    })
   }
   return _mcpOAuthService
 }
 
-
-function extractMcpOAuthStaticClient(configJson: string): { configJson: string; clientId?: string; clientSecret?: string; hasClientSecret: boolean } {
+function extractMcpOAuthStaticClient(configJson: string): {
+  configJson: string
+  clientId?: string
+  clientSecret?: string
+  hasClientSecret: boolean
+} {
   try {
     const config = JSON.parse(configJson) as Record<string, unknown>
-    const auth = config.auth != null && typeof config.auth === 'object' ? config.auth as Record<string, unknown> : null
+    const auth =
+      config.auth != null && typeof config.auth === 'object'
+        ? (config.auth as Record<string, unknown>)
+        : null
     if (auth?.type !== 'oauth2') return { configJson, hasClientSecret: false }
     const clientId = typeof auth.clientId === 'string' ? auth.clientId : undefined
     const clientSecret = typeof auth.clientSecret === 'string' ? auth.clientSecret : undefined
     if (clientSecret != null) delete auth.clientSecret
-    if (clientSecret != null || auth.hasClientSecret != null) auth.hasClientSecret = clientSecret != null && clientSecret.length > 0
-    return { configJson: JSON.stringify(config), ...(clientId != null ? { clientId } : {}), ...(clientSecret != null ? { clientSecret } : {}), hasClientSecret: clientSecret != null && clientSecret.length > 0 }
+    if (clientSecret != null || auth.hasClientSecret != null)
+      auth.hasClientSecret = clientSecret != null && clientSecret.length > 0
+    return {
+      configJson: JSON.stringify(config),
+      ...(clientId != null ? { clientId } : {}),
+      ...(clientSecret != null ? { clientSecret } : {}),
+      hasClientSecret: clientSecret != null && clientSecret.length > 0,
+    }
   } catch {
     return { configJson, hasClientSecret: false }
   }
@@ -1417,6 +1433,16 @@ function getSettingsService(): SettingsService {
   return _settingsService
 }
 
+let _canvasTextOutputCapabilityCache: CanvasTextOutputCapabilityCache | null = null
+function getCanvasTextOutputCapabilityCache(): CanvasTextOutputCapabilityCache {
+  if (_canvasTextOutputCapabilityCache == null) {
+    _canvasTextOutputCapabilityCache = new CanvasTextOutputCapabilityCache(
+      new SettingsRepository(getDatabase()),
+    )
+  }
+  return _canvasTextOutputCapabilityCache
+}
+
 let _remoteConnectionService: RemoteConnectionService | null = null
 let _remoteConnectionChangeHookRegistered = false
 function getRemoteConnectionService(): RemoteConnectionService {
@@ -1458,7 +1484,6 @@ function getRulesService(): RulesService {
   return new RulesService(new RulesRepository(getDatabase()))
 }
 
-let _scheduledTaskService: ScheduledTaskService | null = null
 /**
  * 供系统托盘菜单（Tray）使用：列出最近活跃会话。
  *
@@ -1470,191 +1495,6 @@ export async function getRecentSessionsForTray(
 ): Promise<SessionListResponse['sessions']> {
   const result = await getSessionService().listSessions({ includeArchived: false, limit })
   return result.sessions
-}
-
-export function getScheduledTaskService(): ScheduledTaskService {
-  if (_scheduledTaskService == null) {
-    _scheduledTaskService = new ScheduledTaskService(
-      new ScheduledTaskRepository(getDatabase()),
-      new TaskExecutionRepository(getDatabase()),
-    )
-    // Inject executor: creates a session and sends the prompt
-    _scheduledTaskService.setExecutor(scheduledTaskExecutor)
-  }
-  return _scheduledTaskService
-}
-
-/**
- * 把定时任务表单的 permissionMode ('auto' / 'bypass') 映射到会话级别的
- * SessionPermissionMode；非法值返回 undefined，让 createSession / sendTurn
- * 各自回退到 agent / 运行时默认。
- */
-function mapTaskPermissionMode(
-  mode: string | null | undefined,
-  adapter: SessionAgentAdapter,
-): SessionPermissionMode | undefined {
-  if (mode == null || mode === '') return undefined
-  // 已经是合法的 SessionPermissionMode，直接透传
-  if (
-    mode === 'claude-ask' ||
-    mode === 'claude-auto-edits' ||
-    mode === 'claude-plan' ||
-    mode === 'claude-auto' ||
-    mode === 'claude-bypass' ||
-    mode === 'codex-default' ||
-    mode === 'codex-auto-review' ||
-    mode === 'codex-full-access'
-  ) {
-    return mode
-  }
-  if (mode === 'bypass') return adapter === 'codex' ? 'codex-full-access' : 'claude-bypass'
-  if (mode === 'auto') return adapter === 'codex' ? 'codex-auto-review' : 'claude-auto'
-  return undefined
-}
-
-/**
- * 解析定时任务的执行配置。优先级：
- *   1. 用户在任务里挑了 modelId → 用挑的 model，并定位到拥有这个 model 的 provider
- *   2. 否则用户挑了 agentId → 用 agent 自带的 model / provider
- *   3. 都没挑 → 解析默认 agent，沿用它的 provider / model
- *
- * 这样可以避免之前"executor 永远使用 defaultProfile 导致 provider 和 model 错配"
- * 的问题（例如挑了 OpenAI 的模型，但 defaultProfile 是 Anthropic，结果模型被 SDK
- * 当成 Anthropic 的请求或者被本地 CLI 兜底覆盖）。
- */
-async function resolveScheduledTaskRuntime(params: {
-  agentId: string | null | undefined
-  modelId: string | null | undefined
-}): Promise<{
-  providerProfileId: string
-  modelId: string | undefined
-  agentId: string | undefined
-  agentAdapter: SessionAgentAdapter
-}> {
-  const providerService = getProviderService()
-  const agentRepo = getAgentRepository()
-  const profiles = await providerService.listProviders()
-  if (profiles.length === 0) {
-    throw new Error('No provider profile available for scheduled task execution')
-  }
-
-  let providerProfileId: string | null = null
-  let modelId: string | null = params.modelId ?? null
-  const agentId: string | null = params.agentId ?? null
-  let agentAdapterHint: SessionAgentAdapter | null = null
-
-  // 1. 任务里挑了 modelId：找拥有这个 model 的 provider
-  if (modelId) {
-    const owner = profiles.find((p) => p.defaultModel === modelId || p.modelIds.includes(modelId!))
-    if (owner) providerProfileId = owner.id
-  }
-
-  // 2. 任务里挑了 agentId：补全 provider / model
-  if (agentId) {
-    const agent = agentRepo.get(agentId)
-    if (agent != null) {
-      if (modelId == null && agent.modelId != null) modelId = agent.modelId
-      if (providerProfileId == null && agent.providerProfileId != null) {
-        providerProfileId = agent.providerProfileId
-      }
-      if (agent.agentAdapter === 'claude' || agent.agentAdapter === 'claude-sdk') {
-        agentAdapterHint = 'claude-sdk'
-      } else if (agent.agentAdapter === 'codex') {
-        agentAdapterHint = 'codex'
-      }
-    }
-  }
-
-  // 3. 兜底：沿用默认 agent + 默认 provider
-  if (providerProfileId == null) {
-    const def = profiles.find((p) => p.isDefault) ?? profiles[0]
-    if (def == null) throw new Error('No provider profile available')
-    providerProfileId = def.id
-  }
-
-  // 确认 providerProfileId 真的存在；不存在则回退到默认
-  if (!profiles.some((p) => p.id === providerProfileId)) {
-    const def = profiles.find((p) => p.isDefault) ?? profiles[0]
-    providerProfileId = def?.id ?? providerProfileId
-  }
-
-  const runtimeDefaults = getRuntimePermissionDefaults()
-  return {
-    providerProfileId: providerProfileId!,
-    modelId: modelId ?? undefined,
-    agentId: agentId ?? undefined,
-    agentAdapter: agentAdapterHint ?? runtimeDefaults.agentAdapter,
-  }
-}
-
-/** Executor function injected into ScheduledTaskService for running tasks */
-const scheduledTaskExecutor: TaskExecutorFn = async (params) => {
-  const sessionService = getSessionService()
-  const sessionRepo = new SessionRepository(getDatabase())
-
-  // 按 user-selected model > agent's model > default 的优先级解析 provider/model
-  const runtime = await resolveScheduledTaskRuntime({
-    agentId: params.agentId,
-    modelId: params.modelId,
-  })
-
-  // Fall back to the no-project workspace so triggered sessions stay visible
-  // in the session sidebar even when the task didn't specify one.
-  const workspaceId = params.workspaceId ?? getNoProjectWorkspaceId() ?? undefined
-
-  // agentAdapter / permissionMode：仅在解析到 agent 自身 adapter（非 runtime 兜底）时显式传，
-  // 其余情况交给 createSession 按 agent.agentAdapter/permissionMode 回退，避免 runtime 默认覆盖 agent 配置。
-  const isAgentAdapterFromAgent = runtime.agentId != null && params.agentId != null
-  const explicitAgentAdapter = isAgentAdapterFromAgent ? runtime.agentAdapter : undefined
-  // mapTaskPermissionMode 仅在用户/任务显式指定时返回非 undefined；其余情况不传，让 createSession 按 agent 回退。
-  const explicitPermissionMode = mapTaskPermissionMode(params.permissionMode, runtime.agentAdapter)
-
-  // Create a new session for this execution
-  await ensureNoProjectDirectoryExists()
-  const created = await sessionService.createSession({
-    providerProfileId: runtime.providerProfileId,
-    ...(runtime.modelId != null ? { modelId: runtime.modelId } : {}),
-    ...(runtime.agentId != null ? { agentId: runtime.agentId } : {}),
-    ...(workspaceId != null ? { workspaceId } : {}),
-    ...(explicitAgentAdapter != null ? { agentAdapter: explicitAgentAdapter } : {}),
-    ...(explicitPermissionMode != null ? { permissionMode: explicitPermissionMode } : {}),
-    title: `[⏰] ${params.taskName}`,
-  })
-
-  // Notify renderer to refresh session list (same as session:create IPC handler)
-  pushStreamEvent('stream:session:created', {
-    sessionId: created.sessionId,
-    session: created.session,
-  })
-  // 让 ScheduledTaskService 立即拿到 sessionId（运行 turn 之前），
-  // 这样 runNow 可以在 turn 还在跑时就把 sessionId 返回给前端用于跳转。
-  params.onSessionCreated?.(created.sessionId)
-
-  // Send the prompt as a turn（session 已持久化 provider/model/adapter/permission，
-  // sendTurn 会从 session 读回，无需重复传 agentAdapter/permissionMode）
-  sessionRepo.patchMetadata(created.sessionId, {
-    automation: {
-      source: 'scheduled-task',
-      unattended: true,
-    },
-  })
-
-  try {
-    const result = await sessionService.sendTurn({
-      sessionId: created.sessionId,
-      message: params.promptTemplate,
-      providerProfileId: runtime.providerProfileId,
-      ...(runtime.modelId != null ? { modelId: runtime.modelId } : {}),
-      ...(runtime.agentId != null ? { agentId: runtime.agentId } : {}),
-    })
-
-    return {
-      sessionId: created.sessionId,
-      output: `Turn ${result.turnId} started`,
-    }
-  } finally {
-    sessionRepo.patchMetadata(created.sessionId, { automation: null })
-  }
 }
 
 let _permissionService: PermissionService | null = null
@@ -1800,64 +1640,64 @@ const pendingUserQuestions = new PendingUserQuestionStore({
       reason,
     })
   },
+  onDetachedAnswer: async (request, answers, context) => {
+    const message = buildDetachedQuestionContinuationMessage(request, answers)
+    const attachments = await recoverExistingDetachedQuestionAttachments(
+      request.sessionId,
+      context.sourceTurnId,
+    )
+    log.warn('User answered after the SDK question stream detached; enqueueing recovery turn', {
+      sessionId: request.sessionId,
+      questionId: request.questionId,
+      sourceTurnId: context.sourceTurnId,
+      attachmentCount: attachments?.length ?? 0,
+    })
+    await getSessionService().submitTurn({
+      sessionId: request.sessionId,
+      message,
+      ...(attachments != null ? { attachments } : {}),
+    })
+  },
 })
-const remoteTurnTargets = new Map<string, { connectionId: string; externalId: string }>()
 
-function registerRemoteTurn(
-  turnId: string,
-  target: { connectionId: string; externalId: string },
-): void {
-  remoteTurnTargets.set(turnId, target)
-  if (remoteTurnTargets.size > 500) {
-    const oldest = remoteTurnTargets.keys().next().value
-    if (oldest != null) remoteTurnTargets.delete(oldest)
-  }
-}
-
-function handleRemoteTurnEvent(event: Parameters<SessionEventHandler>[0]): void {
-  const target = remoteTurnTargets.get(event.turnId)
-  if (target == null) return
-  if (event.type === 'assistant_message' && event.isFinal) {
-    remoteTurnTargets.delete(event.turnId)
-    const content = event.content.trim()
-    if (content.length === 0) return
-    void getRemoteConnectionService()
-      .sendReply(target.connectionId, target.externalId, content)
-      .catch((err) => {
-        log.warn(`Failed to send remote assistant reply: ${String(err)}`)
-      })
-  } else if (event.type === 'agent_error') {
-    remoteTurnTargets.delete(event.turnId)
-    void getRemoteConnectionService()
-      .sendReply(target.connectionId, target.externalId, `处理失败：${event.message}`)
-      .catch((err) => {
-        log.warn(`Failed to send remote error reply: ${String(err)}`)
-      })
-  }
-}
-
-async function sendRemoteTurnReplyFromHistory(
+async function recoverExistingDetachedQuestionAttachments(
   sessionId: string,
-  turnId: string,
-  target: { connectionId: string; externalId: string },
-): Promise<boolean> {
-  const history = await getSessionService().getHistory({ sessionId, limit: 200 })
-  const final = history.events.find(
-    (event) =>
-      event.turnId === turnId &&
-      event.type === 'assistant_message' &&
-      event.isFinal &&
-      event.content.trim().length > 0,
-  )
-  if (final == null || final.type !== 'assistant_message') return false
-  if (remoteTurnTargets.get(turnId) !== target) return true
-  remoteTurnTargets.delete(turnId)
-  await getRemoteConnectionService().sendReply(
-    target.connectionId,
-    target.externalId,
-    final.content.trim(),
-  )
-  return true
+  sourceTurnId: string | undefined,
+): Promise<SessionAttachment[] | undefined> {
+  try {
+    const history = await getSessionService().getHistory({
+      sessionId,
+      limit: 200,
+    })
+    return await filterExistingSessionAttachments(
+      recoverDetachedQuestionAttachments(history.events, sourceTurnId),
+    )
+  } catch (error) {
+    log.warn('Failed to recover attachments for detached question answer; continuing without them', {
+      sessionId,
+      sourceTurnId,
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return undefined
+  }
+}
+
+async function filterExistingSessionAttachments(
+  attachments: SessionAttachment[] | undefined,
+): Promise<SessionAttachment[] | undefined> {
+  if (attachments == null || attachments.length === 0) return undefined
+  const existing: SessionAttachment[] = []
+  for (const attachment of attachments) {
+    try {
+      const stat = await fs.stat(attachment.path)
+      if (attachment.type === 'directory' ? stat.isDirectory() : stat.isFile()) {
+        existing.push(attachment)
+      }
+    } catch {
+      // The original attachment may have lived in a temp directory that has since been cleaned.
+    }
+  }
+  return existing.length > 0 ? existing : undefined
 }
 
 function toSDKApprovalScope(
@@ -1883,8 +1723,7 @@ function getSessionService(): SessionService {
   }
   if (_sessionService == null) {
     const onEvent: SessionEventHandler = (event) => {
-      pushStreamEvent('stream:session:agent-event', event)
-      handleRemoteTurnEvent(event)
+      pushSessionStreamEvent('stream:session:agent-event', event.sessionId, event)
     }
     const onApproval: ApprovalHandler = async (sessionId, toolName, toolInput, sdkContext) => {
       let selectedDecision: PermissionApprovalDecision | undefined
@@ -1923,6 +1762,7 @@ function getSessionService(): SessionService {
         questionId: context.questionId ?? crypto.randomUUID(),
         sessionId,
         questions,
+        sourceTurnId: context.turnId,
         ...(context.signal != null ? { signal: context.signal } : {}),
       })
     }
@@ -1933,7 +1773,7 @@ function getSessionService(): SessionService {
       })
     }
     const onSessionRenamed: SessionRenamedHandler = (sessionId, title) => {
-      pushStreamEvent('stream:session:renamed', { sessionId, title })
+      pushSessionStreamEvent('stream:session:renamed', sessionId, { sessionId, title })
     }
     // 平台资源（agent/team/provider/mcp/skill/workflow）通过 MCP 工具发生变更时，
     // 向渲染进程广播 stream:config:changed，使会话侧边栏、Agent 选择器等订阅方刷新。
@@ -1962,6 +1802,9 @@ function getSessionService(): SessionService {
       getMcpService(),
       getMcpOAuthService(),
     )
+    const skillDirectories = getCanvasSkillDirectories()
+    _sessionService.setSkillsPluginDir(skillDirectories.managedPluginDir)
+    _sessionService.setUserSkillsDir(skillDirectories.userDir)
     registerSessionServiceForShutdown(_sessionService)
     // 接入画布 Agent 桥：仅当 session 已 attach 到画布弹窗时返回 MCP server
     _sessionService.setCanvasMcpProvider(getCanvasHostBridge().asMcpProvider())
@@ -2047,7 +1890,7 @@ export function resolveUserQuestion(
   sessionId: string,
   questionId: string,
   answers: Record<string, unknown>,
-): boolean {
+): Promise<boolean> {
   return pendingUserQuestions.resolve(sessionId, questionId, answers)
 }
 
@@ -2104,7 +1947,11 @@ async function triggerHook(
         const fallbackTitle = context?.title ?? getNodeDefaultTitle(node)
         const notificationTitle = getSessionNotificationTitle(sessionId, fallbackTitle)
         const notificationBody = context?.body ?? getNodeDefaultBody(node)
-        showSystemNotification(notificationTitle, notificationBody, { target: 'session', sessionId, reason: node })
+        showSystemNotification(notificationTitle, notificationBody, {
+          target: 'session',
+          sessionId,
+          reason: node,
+        })
         triggered = true
       } catch (err) {
         log.warn(`Failed to show notification: ${String(err)}`)
@@ -2708,55 +2555,6 @@ async function executeRemoteCommand(
   return { ok: false, title: '未知命令', text: '发送 /help 查看可用命令。' }
 }
 
-async function handleRemoteInboundMessage(
-  message: RemoteInboundMessage,
-): Promise<{ title: string; text: string } | void> {
-  const prefix = message.connection.commandPrefix.trim() || '/'
-  const isCommandMessage = message.text.trim().startsWith(prefix)
-  if (isCommandMessage) {
-    if (!message.connection.capabilities.runCommands) {
-      return { title: '功能未授权', text: '该连接没有启用远程命令能力。' }
-    }
-    const result = await executeRemoteCommand(
-      message.connection.id,
-      message.text,
-      message.connection.defaultSessionId,
-    )
-    return { title: result.title, text: result.text }
-  }
-
-  if (!message.connection.capabilities.sendMessages) {
-    return { title: '功能未授权', text: '该连接没有启用消息投递能力。' }
-  }
-  const sessionId =
-    message.connection.defaultSessionId ??
-    (await createRemoteSession(message.connection.id)).sessionId
-  await ensureSessionWorkspacePaths(sessionId)
-
-  const result = await getSessionService().sendTurn({
-    sessionId,
-    message: message.text,
-    ...(message.connection.defaultProviderProfileId != null
-      ? { providerProfileId: message.connection.defaultProviderProfileId }
-      : {}),
-    ...(message.connection.defaultModelId != null
-      ? { modelId: message.connection.defaultModelId }
-      : {}),
-    ...(message.connection.defaultAgentId != null
-      ? { agentId: message.connection.defaultAgentId }
-      : {}),
-  })
-  const target = {
-    connectionId: message.connection.id,
-    externalId: message.externalId,
-  }
-  registerRemoteTurn(result.turnId, target)
-  void sendRemoteTurnReplyFromHistory(sessionId, result.turnId, target).catch((err) => {
-    log.warn(`Failed to send remote reply from history: ${String(err)}`)
-  })
-  return undefined
-}
-
 export function registerAllIpcHandlers(): void {
   log.info('Registering IPC handlers...')
   // 初始化文件日志：app.getPath('logs') 在 app.whenReady() 后才可用，
@@ -2768,11 +2566,6 @@ export function registerAllIpcHandlers(): void {
     log.warn(`Failed to init file logger: ${String(err)}`)
   }
   applyTelemetrySettings(getSettingsService().get('telemetry', 'data'))
-  void getRemoteConnectionService()
-    .startRuntime(handleRemoteInboundMessage)
-    .catch((err) => {
-      log.warn(`Failed to start remote runtime: ${String(err)}`)
-    })
 
   // 启动时仅在宿主机存在对应 CLI 时补种内置本地 provider。
   // 失败仅记日志，不阻塞后续注册。
@@ -2792,15 +2585,201 @@ export function registerAllIpcHandlers(): void {
 
   // ─── Canvas Agent Bridge ───────────────────────────────────────────────
 
-  typedIpcHandle('canvas:window:open', async (req) => {
+  const canvasSenderAuthority = {
+    getMainSender: () => getMainWindow()?.webContents ?? null,
+    getCanvasSender: () => getCanvasWindowService().getWindow()?.webContents ?? null,
+    getActiveProjectId: () => getCanvasWindowService().getActiveProjectId(),
+  }
+
+  typedIpcHandle('canvas:window:open', async (req, event) => {
+    requireMainCanvasShellSender(event.sender, canvasSenderAuthority)
     return getCanvasWindowService().open(req)
   })
 
-  typedIpcHandle('canvas:window:close-confirmed', async () => {
+  typedIpcHandle('canvas:window:close-confirmed', async (_req, event) => {
+    requireActiveCanvasWindowSender(event.sender, canvasSenderAuthority)
     return { success: getCanvasWindowService().closeAfterRendererGuard() }
   })
 
+  // ─── Canvas 路径权限：per-sender grant + 可信 DB project root（P0 主入口接线） ───
+  // 一个共享的 grant 服务贯穿：原生文件访问、项目根设置、目录协调、媒体授权、
+  // Agent 附件与资产复制。所有原生选择结果都绑定到发起窗口的 sender。
+  const canvasFileAccessGrants = new CanvasFileAccessGrantService()
+
+  // 仅信任「当前 Canvas 窗口 sender 的 active project」的 DB root；绝不采用 renderer 上报路径。
+  const resolveTrustedCanvasProjectRoot = (sender: unknown): string | null => {
+    const service = getCanvasWindowService()
+    const projectId =
+      service.getWindow()?.webContents === sender ? service.getActiveProjectId() : null
+    if (projectId == null) return null
+    const root = getCanvasProjectRepo().get(projectId)?.root_path?.trim()
+    return root && path.isAbsolute(root) ? path.resolve(root) : null
+  }
+
+  const isActiveCanvasProject = (sender: unknown, projectId: string): boolean => {
+    return isActiveCanvasProjectSender(sender, projectId, canvasSenderAuthority)
+  }
+
+  // 目标项目必须是当前 Canvas 窗口 active project；返回权威 DB root，否则抛权限错误。
+  const requireActiveCanvasProjectRoot = (sender: unknown, projectId: string): string => {
+    if (!isActiveCanvasProject(sender, projectId)) {
+      throw new SparkError('PERMISSION_DENIED', '当前窗口无权访问该画布项目目录。', { projectId })
+    }
+    const root = getCanvasProjectRepo().get(projectId)?.root_path?.trim()
+    if (!root || !path.isAbsolute(root)) {
+      throw new SparkError('WORKSPACE_NOT_FOUND', `Canvas project has no valid directory: ${projectId}`, {
+        projectId,
+      })
+    }
+    return path.resolve(root)
+  }
+
+  const canvasFileAccess = new CanvasFileAccessController(
+    {
+      openDirectory: async (request) => {
+        const result = await dialog.showOpenDialog({
+          title: request.title ?? '选择工作区目录',
+          ...(request.defaultPath === undefined ? {} : { defaultPath: request.defaultPath }),
+          properties: ['openDirectory', 'createDirectory'],
+        })
+        return { canceled: result.canceled, filePaths: result.filePaths }
+      },
+      openFile: async (request) => {
+        // allowDirectories=true：macOS 支持同一对话框同时选择文件和目录；其它平台同时传
+        // openFile + openDirectory 会退化成目录选择器，故仅在 darwin 合并。
+        const canPickFilesAndDirectoriesTogether =
+          request.allowDirectories === true && process.platform === 'darwin'
+        const properties: Array<'openFile' | 'openDirectory' | 'multiSelections'> =
+          canPickFilesAndDirectoriesTogether
+            ? ['openFile', 'openDirectory', 'multiSelections']
+            : request.multiple === true || request.allowDirectories === true
+              ? ['openFile', 'multiSelections']
+              : ['openFile']
+        const result = await dialog.showOpenDialog({
+          title: request.title ?? '选择文件',
+          ...(request.defaultPath === undefined ? {} : { defaultPath: request.defaultPath }),
+          properties,
+          ...(request.filters ? { filters: request.filters as Electron.FileFilter[] } : {}),
+        })
+        return { canceled: result.canceled, filePaths: result.filePaths }
+      },
+      stat: (targetPath) => (existsSync(targetPath) ? statSync(targetPath) : null),
+      readText: (targetPath) => readFileSync(targetPath, 'utf-8'),
+      resolveTrustedProjectRoot: (sender) => resolveTrustedCanvasProjectRoot(sender),
+    },
+    canvasFileAccessGrants,
+  )
+
+  registerCanvasFileAccessIpc({ controller: canvasFileAccess })
+  registerCanvasAnnotationIpc({
+    resolveTrustedProjectRoot: resolveTrustedCanvasProjectRoot,
+  })
+
+  const canvasProjectPackageAuthority = new CanvasProjectPackageAuthority({
+    getMainAppSender: () => getMainWindow()?.webContents ?? null,
+    getActiveCanvasSender: () =>
+      (getCanvasWindowService().getWindow()?.webContents as
+        | CanvasPackageAuthoritySender
+        | undefined) ?? null,
+    getActiveProjectId: () => getCanvasWindowService().getActiveProjectId(),
+    getProject: (projectId) => {
+      const row = getCanvasProjectRepo().get(projectId)
+      return row == null ? null : { status: row.status, rootPath: row.root_path }
+    },
+    grants: canvasFileAccessGrants,
+    getDefaultProjectsRoot: () => getDefaultCanvasProjectsRoot(),
+    canonicalizeExistingDirectory,
+  })
+
+  // 目录准备的权威协调：DB root 优先，默认根内免授权，根外路径必须经当前 sender grant。
+  const canvasProjectDirectoryDependencies: CanvasProjectDirectoryCoordinatorDependencies<
+    Awaited<ReturnType<typeof ensureCanvasProjectDirectory>>
+  > = {
+    findProject: (projectId) => {
+      const row = getCanvasProjectRepo().get(projectId)
+      return row == null ? null : { root_path: row.root_path }
+    },
+    defaultProjectsRoot: () => getDefaultCanvasProjectsRoot(),
+    isGranted: (sender, candidatePath) =>
+      canvasFileAccessGrants.isPathAllowed(sender as CanvasFileAccessGrantSender, candidatePath),
+    ensureDirectory: (input) => ensureCanvasProjectDirectory(input),
+  }
+
+  registerCanvasAgentWorkspaceIpc({
+    getActiveProjectIdForSender: (sender) => {
+      const service = getCanvasWindowService()
+      return service.getWindow()?.webContents === sender ? service.getActiveProjectId() : null
+    },
+    findProject: (projectId) => getCanvasProjectRepo().get(projectId),
+    openWorkspace: (rootPath, name, params) =>
+      getWorkspaceService().openWorkspace(rootPath, name, params),
+  })
+
+  const canvasAgentSessionFacade = registerCanvasAgentSessionIpc({
+    resolveActiveContext: async (sender) => {
+      const windowService = getCanvasWindowService()
+      const projectId =
+        windowService.getWindow()?.webContents === sender
+          ? windowService.getActiveProjectId()
+          : null
+      if (projectId == null) return null
+      const project = getCanvasProjectRepo().get(projectId)
+      if (project == null || project.status === 'deleted') return null
+      const workspace = await openCanvasAgentWorkspace({ projectId }, sender, {
+        getActiveProjectIdForSender: () => projectId,
+        findProject: (requestedProjectId) => getCanvasProjectRepo().get(requestedProjectId),
+        openWorkspace: (rootPath, name, params) =>
+          getWorkspaceService().openWorkspace(rootPath, name, params),
+      })
+      return { projectId, projectTitle: project.title, workspaceId: workspace.workspaceId }
+    },
+    getCanvasAssistant: () => {
+      const agent = getAgentRepository().get(CANVAS_ASSISTANT_AGENT_ID)
+      return agent == null ? null : toManagedAgent(agent)
+    },
+    listSkills: () => getSkillService().listSkills(),
+    getSessionRecord: (sessionId) =>
+      toCanvasAgentSessionRecord(new SessionRepository(getDatabase()).get(sessionId)),
+    createSession: (request) => getSessionService().createSession(request),
+    listSessions: (request) => new SessionReadService(getDatabase()).listSessions(request),
+    updateSession: (request) => getSessionService().updateSession(request),
+    submitTurn: (request) => getSessionService().submitTurn(request),
+    getHistory: (request) => new SessionReadService(getDatabase()).getHistory(request),
+    cancelTurn: (sessionId) => getSessionService().cancelTurn(sessionId),
+    answerQuestion: resolveUserQuestion,
+    configureSessionSkills: (sessionId, skillIds, disabledSkillIds) => {
+      getRuntimeCompositionService().updateSkillConfig(
+        'session',
+        sessionId,
+        skillIds,
+        disabledSkillIds,
+      )
+    },
+    prepareSessionWorkspace: async (sessionId) => {
+      await ensureNoProjectDirectoryExists()
+      await ensureSessionWorkspacePaths(sessionId)
+    },
+    validateAttachments: (sender, projectId, attachments) => {
+      // 附件按当前项目 DB root 与 sender grant 做 canonical 校验；projectId 仅用于错误上下文，
+      // 可信根来自 sender 的 active project（见 resolveTrustedCanvasProjectRoot）。
+      void projectId
+      const trustedRoot = resolveTrustedCanvasProjectRoot(sender) ?? undefined
+      return canvasFileAccess.validateAttachments(
+        sender as CanvasFileAccessGrantSender,
+        trustedRoot,
+        attachments,
+      )
+    },
+  })
+
   typedIpcHandle('canvas:host-attach', async (req, event) => {
+    const context = await canvasAgentSessionFacade.authorizeSessionAccess(
+      req.sessionId,
+      event.sender,
+    )
+    if (context.projectId !== req.projectId) {
+      throw new SparkError('PERMISSION_DENIED', '当前画布无权绑定该 Agent 会话。')
+    }
     const bridge = getCanvasHostBridge()
     log.info(
       `canvas:host-attach requested, sessionId=${req.sessionId} projectId=${req.projectId} toolSchemas=${req.toolSchemas.length}`,
@@ -2810,42 +2789,34 @@ export function registerAllIpcHandlers(): void {
     return { ok: true } as const
   })
 
-  typedIpcHandle('canvas:host-detach', async (req) => {
+  typedIpcHandle('canvas:host-detach', async (req, event) => {
     log.info(`canvas:host-detach requested, sessionId=${req.sessionId}`)
-    getCanvasHostBridge().detach(req.sessionId)
+    getCanvasHostBridge().detach(req.sessionId, event.sender)
     return { ok: true } as const
   })
 
-  typedIpcHandle('canvas:tool-result', async (req) => {
+  typedIpcHandle('canvas:tool-result', async (req, event) => {
     log.info(
       `canvas:tool-result received, requestId=${req.requestId} ok=${req.ok}${req.ok ? '' : ` error=${req.error ?? '(none)'}`}`,
     )
-    getCanvasHostBridge().handleToolResult({
-      requestId: req.requestId,
-      ok: req.ok,
-      ...(req.result !== undefined ? { result: req.result } : {}),
-      ...(req.error !== undefined ? { error: req.error } : {}),
-    })
+    getCanvasHostBridge().handleToolResult(
+      {
+        requestId: req.requestId,
+        ok: req.ok,
+        ...(req.result !== undefined ? { result: req.result } : {}),
+        ...(req.error !== undefined ? { error: req.error } : {}),
+      },
+      event.sender,
+    )
     return { ok: true } as const
   })
 
-  typedIpcHandle('canvas:tool-ack', async (req) => {
-    getCanvasHostBridge().handleToolAck(req.requestId)
+  typedIpcHandle('canvas:tool-ack', async (req, event) => {
+    getCanvasHostBridge().handleToolAck(req.requestId, event.sender)
     return { ok: true } as const
   })
 
   // ─── Session Handlers ──────────────────────────────────────────────────
-
-  typedIpcHandle('session:create', async (req) => {
-    log.info(`session:create requested, providerProfileId=${req.providerProfileId}`)
-    await ensureNoProjectDirectoryExists()
-    const created = await getSessionService().createSession(applyRuntimePermissionDefaults(req))
-    pushStreamEvent('stream:session:created', {
-      sessionId: created.sessionId,
-      session: created.session,
-    })
-    return created
-  })
 
   typedIpcHandle('session:send-turn', async (req) => {
     log.info(`session:send-turn requested, sessionId=${req.sessionId}`)
@@ -2870,45 +2841,6 @@ export function registerAllIpcHandlers(): void {
     })
   })
 
-  typedIpcHandle('session:submit-turn', async (req) => {
-    log.info(`session:submit-turn requested, sessionId=${req.sessionId}`)
-    // 持久化接单不等待文件系统修复。准备工作与 DB 接单并行，SessionService
-    // 只在准备 Promise settled 后起跑该 turn，因此不会牺牲旧路径迁移的正确性。
-    const workspaceReady = Promise.all([
-      ensureNoProjectDirectoryExists(),
-      ensureSessionWorkspacePaths(req.sessionId),
-    ]).catch((error) => {
-      // 即使该 turn 因活跃 Goal/loop 先进入队列，准备 Promise 也必须就地收口，
-      // 避免没有进入 startAfter 分支时产生 unhandled rejection。
-      log.warn('session:submit-turn workspace preparation failed', {
-        sessionId: req.sessionId,
-        error: error instanceof Error ? error.message : String(error),
-      })
-    })
-    return getSessionService().submitTurn(
-      {
-        sessionId: req.sessionId,
-        message: req.message,
-        ...(req.providerProfileId !== undefined
-          ? { providerProfileId: req.providerProfileId }
-          : {}),
-        ...(req.modelId !== undefined ? { modelId: req.modelId } : {}),
-        ...(req.agentId !== undefined ? { agentId: req.agentId } : {}),
-        ...(req.agentAdapter !== undefined ? { agentAdapter: req.agentAdapter } : {}),
-        ...(req.permissionMode !== undefined ? { permissionMode: req.permissionMode } : {}),
-        ...(req.chatMode !== undefined ? { chatMode: req.chatMode } : {}),
-        ...(req.reasoningEffort !== undefined ? { reasoningEffort: req.reasoningEffort } : {}),
-        ...(req.skillId != null ? { skillId: req.skillId } : {}),
-        ...(req.skillParams != null ? { skillParams: req.skillParams } : {}),
-        ...(req.attachments != null ? { attachments: req.attachments } : {}),
-        ...(req.teamConfig != null ? { teamConfig: req.teamConfig } : {}),
-        ...(req.mentionAgentId != null ? { mentionAgentId: req.mentionAgentId } : {}),
-        ...(req.interruptActive === true ? { interruptActive: true } : {}),
-      },
-      { startAfter: workspaceReady },
-    )
-  })
-
   typedIpcHandle('session:get-queue', async (req) => {
     log.info(`session:get-queue requested, sessionId=${req.sessionId}`)
     return getSessionService().getQueueState(req)
@@ -2928,24 +2860,9 @@ export function registerAllIpcHandlers(): void {
     return getSessionService().sendQueuedTurnNow(req)
   })
 
-  typedIpcHandle('session:cancel', async (req) => {
-    log.info(`session:cancel requested, sessionId=${req.sessionId}`)
-    return getSessionService().cancelTurn(req.sessionId)
-  })
-
   typedIpcHandle('session:reject-plan', async (req) => {
     log.info(`session:reject-plan requested, sessionId=${req.sessionId}`)
     return getSessionService().rejectPlan(req.sessionId)
-  })
-
-  typedIpcHandle('session:get-history', async (req) => {
-    log.info(`session:get-history requested, sessionId=${req.sessionId}`)
-    return getSessionService().getHistory(req)
-  })
-
-  typedIpcHandle('session:list', async (req) => {
-    log.info('session:list requested')
-    return getSessionService().listSessions(req)
   })
 
   typedIpcHandle('session:search', async (req) => {
@@ -2953,15 +2870,8 @@ export function registerAllIpcHandlers(): void {
     return getSessionService().searchSessions(req)
   })
 
-  typedIpcHandle('session:update', async (req) => {
-    log.info(`session:update requested, sessionId=${req.sessionId}`)
-    return getSessionService().updateSession(req)
-  })
-
   typedIpcHandle('session:delete', async (req) => {
     log.info(`session:delete requested, sessionId=${req.sessionId}`)
-    // 关闭该 session 名下所有内置终端 PTY（killed count 已记入 service 日志）
-    getTerminalService().disposeBySession(req.sessionId, { defer: true })
     return getSessionService().deleteSession(req.sessionId)
   })
 
@@ -3004,7 +2914,10 @@ export function registerAllIpcHandlers(): void {
 
   typedIpcHandle('session:set-checkpoint-config', async (req) => {
     const ok = getSessionService().setSessionCheckpointEnabled(req.sessionId, req.enabled)
-    return { ok, enabled: ok ? req.enabled : getSessionService().getSessionCheckpointEnabled(req.sessionId) }
+    return {
+      ok,
+      enabled: ok ? req.enabled : getSessionService().getSessionCheckpointEnabled(req.sessionId),
+    }
   })
 
   typedIpcHandle('session:delete-message', async (req) => {
@@ -3012,16 +2925,6 @@ export function registerAllIpcHandlers(): void {
       `session:delete-message requested, sessionId=${req.sessionId} eventCount=${req.eventIds.length}`,
     )
     return getSessionService().deleteMessage(req.sessionId, req.eventIds)
-  })
-
-  typedIpcHandle('session:answer-question', async (req) => {
-    log.info(
-      `session:answer-question requested, sessionId=${req.sessionId} questionId=${req.questionId}`,
-    )
-    if (!resolveUserQuestion(req.sessionId, req.questionId, req.answers)) {
-      throw new SparkError('NOT_FOUND', '该提问已结束或不属于当前会话，请刷新后重试。')
-    }
-    return { ok: true }
   })
 
   typedIpcHandle('session:list-pending-questions', async (req) => {
@@ -3058,6 +2961,7 @@ export function registerAllIpcHandlers(): void {
   typedIpcHandle('provider:update', async (req) => {
     log.info(`provider:update requested, id=${req.id}`)
     const profile = await getProviderService().updateProvider(req)
+    getCanvasTextOutputCapabilityCache().clearProvider(req.id)
     pushConfigChanged('provider', 'update', profile.id)
     return { profile }
   })
@@ -3065,6 +2969,7 @@ export function registerAllIpcHandlers(): void {
   typedIpcHandle('provider:delete', async (req) => {
     log.info(`provider:delete requested, id=${req.id}`)
     await getProviderService().deleteProvider(req.id)
+    getCanvasTextOutputCapabilityCache().clearProvider(req.id)
     pushConfigChanged('provider', 'delete', req.id)
     return { deleted: true }
   })
@@ -3074,8 +2979,8 @@ export function registerAllIpcHandlers(): void {
     try {
       const result = await getProviderService().healthCheck(req.id)
       log.info(
-        `provider:health-check completed, id=${req.id}, healthy=${result.healthy}, `
-        + `latencyMs=${result.latencyMs ?? 'n/a'}`,
+        `provider:health-check completed, id=${req.id}, healthy=${result.healthy}, ` +
+          `latencyMs=${result.latencyMs ?? 'n/a'}`,
       )
       if (!result.healthy && result.errorMessage) {
         log.warn(`provider:health-check unhealthy, id=${req.id}, error="${result.errorMessage}"`)
@@ -3091,26 +2996,26 @@ export function registerAllIpcHandlers(): void {
 
   typedIpcHandle('provider:test-connection', async (req) => {
     log.info(
-      `provider:test-connection requested, provider=${req.provider}, id=${req.id ?? '(draft)'}, `
-      + `model=${req.defaultModel}`,
+      `provider:test-connection requested, provider=${req.provider}, id=${req.id ?? '(draft)'}, ` +
+        `model=${req.defaultModel}`,
     )
     try {
       const result = await getProviderService().testConnection(req)
       log.info(
-        `provider:test-connection completed, provider=${req.provider}, id=${req.id ?? '(draft)'}, `
-        + `healthy=${result.healthy}, latencyMs=${result.latencyMs ?? 'n/a'}`,
+        `provider:test-connection completed, provider=${req.provider}, id=${req.id ?? '(draft)'}, ` +
+          `healthy=${result.healthy}, latencyMs=${result.latencyMs ?? 'n/a'}`,
       )
       if (!result.healthy && result.errorMessage) {
         log.warn(
-          `provider:test-connection unhealthy, provider=${req.provider}, `
-          + `id=${req.id ?? '(draft)'}, error="${result.errorMessage}"`,
+          `provider:test-connection unhealthy, provider=${req.provider}, ` +
+            `id=${req.id ?? '(draft)'}, error="${result.errorMessage}"`,
         )
       }
       return result
     } catch (err) {
       log.error(
-        `provider:test-connection failed, provider=${req.provider}, id=${req.id ?? '(draft)'}, `
-        + `error=${err instanceof Error ? err.message : String(err)}`,
+        `provider:test-connection failed, provider=${req.provider}, id=${req.id ?? '(draft)'}, ` +
+          `error=${err instanceof Error ? err.message : String(err)}`,
       )
       throw err
     }
@@ -3121,14 +3026,14 @@ export function registerAllIpcHandlers(): void {
     try {
       const models = await getProviderService().fetchModels(req)
       log.info(
-        `provider:fetch-models completed, provider=${req.provider}, id=${req.id ?? '(draft)'}, `
-        + `count=${models.length}`,
+        `provider:fetch-models completed, provider=${req.provider}, id=${req.id ?? '(draft)'}, ` +
+          `count=${models.length}`,
       )
       return { models }
     } catch (err) {
       log.error(
-        `provider:fetch-models failed, provider=${req.provider}, id=${req.id ?? '(draft)'}, `
-        + `error=${err instanceof Error ? err.message : String(err)}`,
+        `provider:fetch-models failed, provider=${req.provider}, id=${req.id ?? '(draft)'}, ` +
+          `error=${err instanceof Error ? err.message : String(err)}`,
       )
       throw err
     }
@@ -3137,6 +3042,8 @@ export function registerAllIpcHandlers(): void {
   // ─── Canvas Media Generation Handlers ────────────────────────────────────
   // 见 docs/multimedia-model-platform-adapters-design.md §8。
   // 真实 provider 调用只在主进程内进行，API key 不进入 renderer。
+
+  const canvasMediaTaskOwners = new CanvasTaskOwnerRegistry()
 
   typedIpcHandle('canvas:media-capabilities:list', async () => {
     const profiles = await getProviderService().listProviders()
@@ -3215,8 +3122,11 @@ export function registerAllIpcHandlers(): void {
       const profile = profiles.find((item) => item.id === req.providerProfileId)
       if (profile) {
         // Provider 引用可能携带完整自定义 Manifest；统一解析可同时覆盖目录与旧合成兜底。
-        if (!manifest) manifest = resolveProfileMediaModels(profile, catalog, { enabledOnly: false })
-          .find((item) => item.manifest.id === req.manifestId)?.manifest ?? null
+        if (!manifest)
+          manifest =
+            resolveProfileMediaModels(profile, catalog, { enabledOnly: false }).find(
+              (item) => item.manifest.id === req.manifestId,
+            )?.manifest ?? null
         model =
           profileMediaModelSummaries(profile, catalog, { enabledOnly: false }).find(
             (item) => item.manifestId === req.manifestId,
@@ -3235,8 +3145,9 @@ export function registerAllIpcHandlers(): void {
       const profile = profiles.find((item) => item.id === req.providerProfileId)
       if (profile) {
         manifest =
-          resolveProfileMediaModels(profile, catalog, { enabledOnly: false })
-            .find((item) => item.manifest.id === req.manifestId)?.manifest ?? null
+          resolveProfileMediaModels(profile, catalog, { enabledOnly: false }).find(
+            (item) => item.manifest.id === req.manifestId,
+          )?.manifest ?? null
       }
     }
     if (!manifest) {
@@ -3258,10 +3169,13 @@ export function registerAllIpcHandlers(): void {
         fallbackReason: `capability ${req.capabilityId} 不存在于 manifest ${req.manifestId}`,
       }
     }
+    if (req.validateSubmission === true) {
+      return validateCanvasMediaTaskParams({ request: req, manifest, capability })
+    }
     const result = compileMediaRequest({
       manifest,
       capability,
-      modelId: manifest.modelId,
+      modelId: req.modelId ?? manifest.modelId,
       input: {
         ...(req.modelParams !== undefined ? { modelParams: req.modelParams } : {}),
         ...(req.inputFiles !== undefined ? { inputFiles: req.inputFiles } : {}),
@@ -3316,20 +3230,71 @@ export function registerAllIpcHandlers(): void {
     }
   })
 
-  typedIpcHandle('canvas:task:create-media', async (req) => {
+  typedIpcHandle('canvas:task:create-media', async (req, event) => {
+    // 进入 runtime 前先做路径权限收敛：DB root 权威，输出固定到当前项目 assets，
+    // 输入文件按 sender + 可信项目根做 canonical 校验。
+    const authorized = authorizeCanvasMediaRequestPaths(req, event.sender, {
+      findProject: (projectId) => {
+        const row = getCanvasProjectRepo().get(projectId)
+        return row == null ? null : { status: row.status, root_path: row.root_path }
+      },
+      isActiveProject: (sender, projectId) => isActiveCanvasProject(sender, projectId),
+      resolveReadableFile: (sender, filePath, trustedProjectRoot) =>
+        canvasFileAccess.resolveReadableFile(
+          sender as CanvasFileAccessGrantSender,
+          filePath,
+          trustedProjectRoot,
+        ),
+    })
+    const taskLog = createCanvasTaskLifecycleLog({
+      kind: 'media',
+      projectId: req.projectId,
+      clientTaskId: req.clientTaskId,
+      operation: req.operation,
+      providerProfileId: req.providerProfileId,
+      modelId: req.modelId,
+      background: req.waitForCompletion === false,
+      inputCount: req.inputFiles?.length ?? 0,
+    })
+    taskLog.started()
     const taskRuntime = getMediaTaskRuntimeService()
     const resolvedProviders = await resolveCanvasMediaProviders()
+    const requestedMediaModelId = req.modelId?.trim() || null
+    const requestedMediaProvider = req.providerProfileId
+      ? resolvedProviders.find((provider) => provider.id === req.providerProfileId)
+      : null
+    const mediaModelOwner = requestedMediaModelId
+      ? resolvedProviders.find(
+          (provider) =>
+            provider.modelIds?.includes(requestedMediaModelId) === true ||
+            provider.mediaModelManifests?.some(
+              (manifest) => manifest.modelId === requestedMediaModelId,
+            ) === true,
+        )
+      : null
+    const requestedMediaProviderSupportsModel =
+      requestedMediaModelId == null ||
+      (req.providerProfileId == null
+        ? true
+        : requestedMediaProvider != null &&
+          (requestedMediaProvider.modelIds?.includes(requestedMediaModelId) === true ||
+            requestedMediaProvider.mediaModelManifests?.some(
+              (manifest) => manifest.modelId === requestedMediaModelId,
+            ) === true))
+    const effectiveMediaProviderId =
+      mediaModelOwner != null && !requestedMediaProviderSupportsModel
+        ? mediaModelOwner.id
+        : (req.providerProfileId ?? mediaModelOwner?.id ?? null)
     const providers = req.modelId
       ? resolvedProviders.map((provider) => {
           const shouldOverride =
-            req.providerProfileId != null
-              ? provider.id === req.providerProfileId
+            effectiveMediaProviderId != null
+              ? provider.id === effectiveMediaProviderId
               : provider.modelIds?.includes(req.modelId ?? '') === true
           return shouldOverride ? { ...provider, defaultModel: req.modelId as string } : provider
         })
       : resolvedProviders
-    const outputDir =
-      req.outputDir && req.outputDir.trim().length > 0 ? req.outputDir : getDefaultCanvasMediaDir()
+    const outputDir = authorized.outputDir
     log.info(
       `canvas:task:create-media requested, projectId=${req.projectId ?? '(n/a)'} clientTaskId=${req.clientTaskId ?? '(n/a)'} op=${req.operation} provider=${req.providerProfileId ?? '(auto)'} model=${req.modelId ?? '(auto)'} background=${req.waitForCompletion === false} inputFiles=${req.inputFiles?.length ?? 0}`,
     )
@@ -3347,16 +3312,9 @@ export function registerAllIpcHandlers(): void {
             }
           : {}),
         ...(req.negativePrompt != null ? { negativePrompt: req.negativePrompt } : {}),
-        ...(req.inputFiles != null
+        ...(authorized.inputFiles != null
           ? {
-              inputFiles: req.inputFiles.map((file) => ({
-                type: file.type,
-                ...(file.path != null ? { path: file.path } : {}),
-                ...(file.url != null ? { url: file.url } : {}),
-                ...(file.dataUrl != null ? { dataUrl: file.dataUrl } : {}),
-                ...(file.mimeType != null ? { mimeType: file.mimeType } : {}),
-                ...(file.role != null ? { role: file.role } : {}),
-              })),
+              inputFiles: mapCanvasMediaTaskInputFiles(authorized.inputFiles),
             }
           : {}),
         ...(req.modelParams != null ? { modelParams: req.modelParams } : {}),
@@ -3364,34 +3322,67 @@ export function registerAllIpcHandlers(): void {
       }
       const options = {
         providers,
-        ...(req.providerProfileId != null ? { providerProfileId: req.providerProfileId } : {}),
+        fallbackUploader: sparkMediaUploader,
+        ...(effectiveMediaProviderId != null
+          ? { providerProfileId: effectiveMediaProviderId }
+          : {}),
         ...(req.manifestId != null ? { manifestId: req.manifestId } : {}),
         ...(req.modelId != null ? { modelId: req.modelId } : {}),
       }
       if (req.waitForCompletion === false) {
+        const taskOwner = event.sender
         const task = taskRuntime.submitBackground(input, options, (record) => {
-          if (record.status === 'running') return
+          if (record.status === 'running' && record.submitResponse == null) return
           void canvasResponseFromMediaTaskRecord(record).then((response) => {
-            pushStreamEvent('stream:canvas:media-task', {
-              ...(req.projectId !== undefined ? { projectId: req.projectId } : {}),
-              ...(req.clientTaskId !== undefined ? { clientTaskId: req.clientTaskId } : {}),
-              runtimeTaskId: record.id,
-              status: record.status === 'succeeded' ? 'succeeded' : record.status,
-              response,
-            })
+            if (record.status === 'running' && record.requestId) {
+              taskLog.submitted({
+                runtimeTaskId: record.id,
+                providerRequestId: record.requestId,
+                response: record.submitResponse,
+              })
+            } else {
+              taskLog.settled({
+                status: record.status,
+                runtimeTaskId: record.id,
+                providerRequestId: record.requestId,
+                provider: record.providerKind,
+                model: record.modelId,
+                assetCount: record.assets.length,
+                error: response.error,
+              })
+            }
+            if (!taskOwner.isDestroyed()) {
+              taskOwner.send('stream:canvas:media-task', {
+                projectId: authorized.projectId,
+                ...(req.clientTaskId !== undefined ? { clientTaskId: req.clientTaskId } : {}),
+                runtimeTaskId: record.id,
+                status: record.status === 'succeeded' ? 'succeeded' : record.status,
+                response,
+              })
+            }
+            if (record.status !== 'running' && record.status !== 'pending') {
+              canvasMediaTaskOwners.release(record.id)
+            }
           })
         })
+        canvasMediaTaskOwners.claim(task.id, taskOwner, authorized.projectId)
         return canvasResponseFromMediaTaskRecord(task)
       }
       const task = await taskRuntime.submit(input, options)
-      log.info(
-        `canvas:task:create-media finished (sync), runtimeTaskId=${task.id} status=${task.status} assets=${task.assets.length}`,
-      )
+      taskLog.settled({
+        status: task.status,
+        runtimeTaskId: task.id,
+        providerRequestId: task.requestId,
+        provider: task.providerKind,
+        model: task.modelId,
+        assetCount: task.assets.length,
+        error: task.error,
+      })
       return canvasResponseFromMediaTaskRecord(task)
     } catch (err) {
       const code = (err as MediaProviderError)?.code ?? 'provider_http_error'
       const message = err instanceof Error ? err.message : String(err)
-      log.warn(`canvas:task:create-media failed: ${code} ${message}`)
+      taskLog.failed({ code, message })
       const response: CanvasMediaTaskCreateResponse = {
         status: 'failed',
         providerProfileId: '',
@@ -3405,261 +3396,62 @@ export function registerAllIpcHandlers(): void {
     }
   })
 
-  typedIpcHandle('canvas:task:generate-text', async (req) => {
-    const fail = (
-      code: string,
-      message: string,
-      extra: Partial<Omit<CanvasTextTaskCreateResponse, 'status' | 'text' | 'error'>> = {},
-    ): CanvasTextTaskCreateResponse => ({
-      status: 'failed',
-      providerProfileId: extra.providerProfileId ?? '',
-      provider: extra.provider ?? '',
-      model: extra.model ?? '',
-      text: '',
-      ...(extra.rawResponse !== undefined ? { rawResponse: extra.rawResponse } : {}),
-      ...(extra.requestCall !== undefined ? { requestCall: extra.requestCall } : {}),
-      error: { code, message },
-    })
-    log.info(
-      `canvas:task:generate-text requested, projectId=${req.projectId ?? '(n/a)'} clientTaskId=${req.clientTaskId ?? '(n/a)'} agentId=${req.agentId ?? '(n/a)'} provider=${req.providerProfileId ?? '(auto)'} model=${req.modelId ?? '(auto)'} background=${req.waitForCompletion === false} images=${(req.inputFiles ?? []).filter((f) => f.type === 'image').length}`,
-    )
-    const runTextGeneration = async (): Promise<CanvasTextTaskCreateResponse> => {
-      const profiles = await getProviderService().listProviders()
-      // 候选文本 provider：有密钥(keystoreRef + secret)，且非纯媒体(image/voice/video)
-      const isTextProvider = (p: (typeof profiles)[number]) =>
-        p.modelType === undefined || p.modelType === 'text' || p.modelType === 'multimodal'
-      // 专属 agent：命中时用其人设 prompt 作 system，并在未显式指定 provider/model 时沿用 agent 绑定值
-      const agent = req.agentId ? getAgentRepository().get(req.agentId) : null
-      const agentPersona =
-        agent && typeof agent.prompt === 'string' && agent.prompt.trim().length > 0
-          ? agent.prompt.trim()
-          : ''
-      const preferredProviderId =
-        req.providerProfileId ?? (agent?.providerProfileId ? agent.providerProfileId : null)
-      const ordered = preferredProviderId
-        ? profiles.filter((p) => p.id === preferredProviderId)
-        : [...profiles].sort((a, b) => Number(b.isDefault) - Number(a.isDefault))
-      let chosen: { profile: (typeof profiles)[number]; apiKey: string } | null = null
-      for (const profile of ordered) {
-        if (preferredProviderId == null && !isTextProvider(profile)) continue
-        if (!profile.keystoreRef) continue
-        try {
-          const apiKey = await resolveProviderApiKeyForProfile(profile)
-          if (apiKey && apiKey.trim().length > 0) {
-            chosen = { profile, apiKey }
-            break
-          }
-        } catch {
-          // 跳过解析失败的 provider
-        }
+
+  // Canvas-only text runtime stays split out because this registration file is already oversized.
+  registerCanvasTextTaskIpc({
+    listProviders: () => getProviderService().listProviders(),
+    resolveAgent: (agentId) => resolveCanvasTextTaskAgent(getAgentRepository(), agentId),
+    buildSkillSystemPrompt: (skillId) => getSkillService().buildSkillSystemPrompt(skillId),
+    getSessionService,
+    ensureNoProjectDirectoryExists,
+    authorizeProject: async (sender, requestedProjectId) => {
+      const windowService = getCanvasWindowService()
+      const activeProjectId =
+        windowService.getWindow()?.webContents === sender
+          ? windowService.getActiveProjectId()
+          : null
+      if (activeProjectId == null) {
+        throw new SparkError('PERMISSION_DENIED', '当前窗口没有活动的画布项目')
       }
-      if (!chosen) {
-        return fail(
-          'provider_not_configured',
-          '未找到可用的文本模型 Provider（需要已配置 API Key 的文本/通用模型）',
-        )
+      if (requestedProjectId != null && requestedProjectId !== activeProjectId) {
+        throw new SparkError('PERMISSION_DENIED', '当前窗口无权提交该画布项目的文本任务')
       }
-      const model =
-        req.modelId?.trim() ||
-        (agent?.modelId && agent.modelId.trim().length > 0 ? agent.modelId.trim() : '') ||
-        chosen.profile.defaultModel
-      // system 提示词：选了专属 agent 用其人设，否则用通用影视创作助手；反向提示词作为硬约束追加。
-      const baseSystem =
-        agentPersona || '你是影视创作助手。严格遵循用户指令，直接输出结果，不要解释过程。'
-      const selectedSkillIds = Array.isArray(req.skillIds)
-        ? req.skillIds.filter((id): id is string => typeof id === 'string' && id.trim().length > 0)
-        : []
-      const skillPrompts = selectedSkillIds
-        .map((skillId) => getSkillService().buildSkillSystemPrompt(skillId))
-        .filter(
-          (prompt): prompt is string => typeof prompt === 'string' && prompt.trim().length > 0,
-        )
-      const responseFormat =
-        typeof req.modelParams?.responseFormat === 'string'
-          ? req.modelParams.responseFormat
-          : typeof req.modelParams?.response_format === 'string'
-            ? req.modelParams.response_format
-            : ''
-      const jsonConstraint =
-        responseFormat.toLowerCase() === 'json'
-          ? '\n\n输出格式硬约束：只返回合法 JSON，不要 Markdown，不要代码块，不要额外解释。'
-          : ''
-      const runtimeRequest = buildCanvasRuntimeRequest(req)
-      const system = buildCanvasSystemPrompt({
-        capabilityPrompt: [req.systemPrompt, jsonConstraint].filter(Boolean).join('\n\n'),
-        agentPrompt: baseSystem,
-        skillPrompts,
-        ...(req.negativePrompt ? { negativePrompt: req.negativePrompt } : {}),
+      const project = getCanvasProjectRepo().get(activeProjectId)
+      if (project == null || project.status !== 'active') {
+        throw new SparkError('PERMISSION_DENIED', '当前画布项目不可用')
+      }
+      const workspace = await openCanvasAgentWorkspace({ projectId: activeProjectId }, sender, {
+        getActiveProjectIdForSender: () => activeProjectId,
+        findProject: (projectId) => getCanvasProjectRepo().get(projectId),
+        openWorkspace: (rootPath, name, params) =>
+          getWorkspaceService().openWorkspace(rootPath, name, params),
       })
-      const temperature =
-        typeof req.modelParams?.temperature === 'number' ? req.modelParams.temperature : undefined
-      const requestedMaxTokens =
-        typeof req.modelParams?.maxTokens === 'number'
-          ? req.modelParams.maxTokens
-          : typeof req.modelParams?.max_tokens === 'number'
-            ? req.modelParams.max_tokens
-            : undefined
-      const tokenBudget = resolveCanvasTextTokenBudget({
-        requestedMaxTokens,
-        providerMaxTokens: chosen.profile.maxTokens,
-        providerContextWindow: chosen.profile.contextWindow,
-        providerSupportsMillionContext: chosen.profile.supportsMillionContext,
-        model,
-        taskPipelineRole: req.taskPipelineRole,
-        prompt: runtimeRequest.prompt,
-      })
-      const maxTokens = tokenBudget.maxTokens
-      log.info(
-        `canvas:task:generate-text budget, projectId=${req.projectId ?? '(n/a)'} clientTaskId=${req.clientTaskId ?? '(n/a)'} model=${model} maxTokens=${maxTokens ?? '(provider-default)'} source=${tokenBudget.source ?? 'unset'} providerContext=${tokenBudget.providerContextWindow ?? '(n/a)'} modelContext=${tokenBudget.modelContextWindow ?? '(n/a)'} modelMaxOutput=${tokenBudget.modelMaxOutputTokens ?? '(n/a)'} promptEstimate=${tokenBudget.promptTokensEstimate ?? '(n/a)'}`,
-      )
-      const rawReasoningEffort =
-        typeof req.reasoningEffort === 'string'
-          ? req.reasoningEffort
-          : typeof req.modelParams?.reasoningEffort === 'string'
-            ? req.modelParams.reasoningEffort
-            : typeof req.modelParams?.reasoning_effort === 'string'
-              ? req.modelParams.reasoning_effort
-              : undefined
-      const reasoningEffort = rawReasoningEffort != null && isProtocolReasoning(rawReasoningEffort)
-        ? rawReasoningEffort
-        : agent?.reasoningEffort != null && isProtocolReasoning(agent.reasoningEffort)
-          ? agent.reasoningEffort
-          : undefined
-      const disableThinking = req.taskPipelineRole === 'shot' || responseFormat.toLowerCase() === 'json'
-      const apiKind = chosen.profile.codexApiKind === 'responses' ? 'responses' : 'chat'
-      let result: Awaited<ReturnType<typeof generateCanvasText>>
-      try {
-        result = await generateCanvasText({
-          providerType: chosen.profile.provider,
-          apiKind,
-          apiKey: chosen.apiKey,
-          ...(chosen.profile.apiEndpoint ? { apiEndpoint: chosen.profile.apiEndpoint } : {}),
-          model,
-          system,
-          prompt: runtimeRequest.prompt,
-          ...(runtimeRequest.images.length > 0 ? { images: runtimeRequest.images } : {}),
-          ...(temperature != null ? { temperature } : {}),
-          ...(maxTokens != null ? { maxTokens } : {}),
-          ...(reasoningEffort != null ? { reasoningEffort } : {}),
-          ...(disableThinking ? { disableThinking: true } : {}),
-          ...(responseFormat.toLowerCase() === 'json' ? { responseFormat: 'json' as const } : {}),
-        })
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err)
-        const requestCall = err instanceof CanvasTextProviderError ? err.requestCall : undefined
-        const rawResponse = buildCanvasTextRawResponse({
-          providerProfileId: chosen.profile.id,
-          provider: chosen.profile.provider,
-          providerName: chosen.profile.name,
-          model,
-          apiKind,
-          agentId: agent?.id ?? null,
-          agentName: agent?.name ?? null,
-          skillIds: selectedSkillIds,
-          relationManifest: runtimeRequest.relationManifest,
-          taskPipelineRole: req.taskPipelineRole,
-          effectiveMaxTokens: tokenBudget.maxTokens,
-          maxTokensSource: tokenBudget.source,
-          promptTokensEstimate: tokenBudget.promptTokensEstimate,
-          providerMaxTokens: tokenBudget.providerMaxTokens,
-          providerContextWindow: tokenBudget.providerContextWindow,
-          modelContextWindow: tokenBudget.modelContextWindow,
-          modelMaxOutputTokens: tokenBudget.modelMaxOutputTokens,
-          ...(err instanceof CanvasTextProviderError
-            ? {
-                statusCode: err.statusCode,
-                errorBody: err.responseBody,
-              }
-            : {}),
-        })
-        return fail(
-          err instanceof CanvasTextProviderError ? err.code : 'text_generation_failed',
-          message,
-          {
-            providerProfileId: chosen.profile.id,
-            provider: chosen.profile.provider,
-            model,
-            ...(requestCall !== undefined ? { requestCall } : {}),
-            rawResponse,
-          },
-        )
-      }
-      return {
-        status: 'succeeded' as const,
-        providerProfileId: chosen.profile.id,
-        provider: chosen.profile.provider,
-        model,
-        text: result.text,
-        ...(result.requestCall !== undefined ? { requestCall: result.requestCall } : {}),
-        rawResponse: buildCanvasTextRawResponse({
-          providerProfileId: chosen.profile.id,
-          provider: chosen.profile.provider,
-          providerName: chosen.profile.name,
-          model,
-          apiKind,
-          agentId: agent?.id ?? null,
-          agentName: agent?.name ?? null,
-          skillIds: selectedSkillIds,
-          relationManifest: runtimeRequest.relationManifest,
-          taskPipelineRole: req.taskPipelineRole,
-          outputText: result.text,
-          effectiveMaxTokens: tokenBudget.maxTokens,
-          maxTokensSource: tokenBudget.source,
-          promptTokensEstimate: tokenBudget.promptTokensEstimate,
-          providerMaxTokens: tokenBudget.providerMaxTokens,
-          providerContextWindow: tokenBudget.providerContextWindow,
-          modelContextWindow: tokenBudget.modelContextWindow,
-          modelMaxOutputTokens: tokenBudget.modelMaxOutputTokens,
-          providerFinishReason: result.finishReason,
-          usage: result.usage,
-          reasoningContentChars: result.reasoningContentChars,
-        }),
-      }
-    }
-    if (req.waitForCompletion === false) {
-      void runTextGeneration()
-        .catch((err) => {
-          const message = err instanceof Error ? err.message : String(err)
-          log.warn(`canvas:task:generate-text failed (background path): ${message}`)
-          return fail('text_generation_failed', message)
-        })
-        .then((response) => {
-          log.info(
-            `canvas:task:generate-text finished (background), status=${response.status} chars=${response.text.length}`,
-          )
-          pushStreamEvent('stream:canvas:text-task', {
-            ...(req.projectId !== undefined ? { projectId: req.projectId } : {}),
-            ...(req.clientTaskId !== undefined ? { clientTaskId: req.clientTaskId } : {}),
-            status: response.status === 'succeeded' ? 'succeeded' : 'failed',
-            response,
-          })
-        })
-      return {
-        status: 'running',
-        providerProfileId: '',
-        provider: '',
-        model: '',
-        text: '',
-      }
-    }
-    try {
-      const response = await runTextGeneration()
-      log.info(
-        `canvas:task:generate-text finished (sync), status=${response.status} provider=${response.provider} model=${response.model} chars=${response.text.length}`,
-      )
-      return response
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
-      log.warn(`canvas:task:generate-text failed (sync path): ${message}`)
-      return fail('text_generation_failed', message)
-    }
+      return { projectId: activeProjectId, workspaceId: workspace.workspaceId }
+    },
+    decodeSafeFileUrl,
+    resolveReadableFile: (sender, filePath) =>
+      canvasFileAccess.resolveReadableFile(
+        sender as CanvasFileAccessGrantSender,
+        filePath,
+        resolveTrustedCanvasProjectRoot(sender) ?? undefined,
+      ),
+    outputCapabilityCache: getCanvasTextOutputCapabilityCache(),
   })
 
-  typedIpcHandle('canvas:task:cancel-media', async (req) => {
-    log.info(`canvas:task:cancel-media requested, runtimeTaskId=${req.runtimeTaskId}`)
+  typedIpcHandle('canvas:task:cancel-media', async (req, event) => {
+    canvasMediaTaskOwners.requireOwner(
+      req.runtimeTaskId,
+      event.sender,
+      getCanvasWindowService().getWindow()?.webContents === event.sender
+        ? getCanvasWindowService().getActiveProjectId()
+        : null,
+    )
+    canvasTaskLogger.info(`event=cancel-requested runtimeTaskId=${req.runtimeTaskId}`)
     const record = getMediaTaskRuntimeService().cancel(req.runtimeTaskId)
     if (!record) {
-      log.warn(`canvas:task:cancel-media: task not found, runtimeTaskId=${req.runtimeTaskId}`)
+      canvasTaskLogger.warn(
+        `event=cancel-failed runtimeTaskId=${req.runtimeTaskId} code=task_not_found`,
+      )
       return {
         runtimeTaskId: req.runtimeTaskId,
         cancelled: false,
@@ -3670,8 +3462,9 @@ export function registerAllIpcHandlers(): void {
         },
       }
     }
-    log.info(
-      `canvas:task:cancel-media resolved, runtimeTaskId=${record.id} status=${record.status} cancelled=${record.status === 'cancelled'}`,
+    canvasMediaTaskOwners.release(record.id)
+    canvasTaskLogger.info(
+      `event=cancel-finished runtimeTaskId=${record.id} status=${record.status} cancelled=${record.status === 'cancelled'}`,
     )
     return {
       runtimeTaskId: record.id,
@@ -3682,27 +3475,24 @@ export function registerAllIpcHandlers(): void {
 
   // ─── Canvas 持久化 Handlers（SQLite-backed 生产存储） ─────────────────────
 
-  typedIpcHandle('canvas:snapshot:save', async (req) => {
+  typedIpcHandle('canvas:snapshot:save', async (req, event) => {
+    requireCanvasProjectManagerSender(event.sender, req.projectId, canvasSenderAuthority)
     const snapshotRepo = getCanvasSnapshotRepo()
     const projectRepo = getCanvasProjectRepo()
-    const directory = await ensureCanvasProjectDirectoryById(
-      req.projectId,
-      req.meta?.rootPath ?? null,
-      req.meta?.title ?? req.projectId,
-    )
-    let snapshotJson = req.snapshotJson
-    try {
-      const snapshot = JSON.parse(req.snapshotJson)
-      if (snapshot?.project) snapshot.project.rootPath = directory.rootPath
-      snapshotJson = JSON.stringify(snapshot)
-      await writeCanvasProjectPackageFiles({
+    const directory = await coordinateCanvasProjectDirectory(
+      {
+        sender: event.sender,
         projectId: req.projectId,
-        rootPath: directory.rootPath,
-        snapshotJson,
-      })
-    } catch (err) {
-      log.warn(`canvas:snapshot:save project files failed: ${String(err)}`)
-    }
+        title: req.meta?.title ?? req.projectId,
+        requestedRootPath: req.meta?.rootPath ?? null,
+      },
+      canvasProjectDirectoryDependencies,
+    )
+    const { snapshotJson } = await writeCanvasProjectPackageFiles({
+      rootPath: directory.rootPath,
+      snapshotsDir: directory.snapshotsDir,
+      snapshotJson: req.snapshotJson,
+    })
     projectRepo.upsert({
       id: req.projectId,
       title: req.meta?.title ?? req.projectId,
@@ -3722,7 +3512,8 @@ export function registerAllIpcHandlers(): void {
     return { saved: true, updatedAt: new Date().toISOString() }
   })
 
-  typedIpcHandle('canvas:snapshot:load', async (req) => {
+  typedIpcHandle('canvas:snapshot:load', async (req, event) => {
+    requireCanvasProjectManagerSender(event.sender, req.projectId, canvasSenderAuthority)
     const project = getCanvasProjectRepo().get(req.projectId)
     if (project?.root_path) {
       const latestPath = path.join(project.root_path, 'snapshots', 'latest.json')
@@ -3737,8 +3528,15 @@ export function registerAllIpcHandlers(): void {
     return { snapshotJson: row ? row.snapshot_json : null }
   })
 
-  typedIpcHandle('canvas:project:list', async (req) => {
-    const rows = getCanvasProjectRepo().list(0, req.includeDeleted === true)
+  typedIpcHandle('canvas:project:list', async (req, event) => {
+    requireCanvasShellOrActiveWindowSender(event.sender, canvasSenderAuthority)
+    const allRows = getCanvasProjectRepo().list(0, req.includeDeleted === true)
+    const activeProjectId =
+      canvasSenderAuthority.getCanvasSender() === event.sender
+        ? canvasSenderAuthority.getActiveProjectId()
+        : null
+    const rows =
+      activeProjectId == null ? allRows : allRows.filter((row) => row.id === activeProjectId)
     const projects = rows.map((row) => ({
       id: row.id,
       title: row.title,
@@ -3758,13 +3556,14 @@ export function registerAllIpcHandlers(): void {
     return { projects }
   })
 
-  typedIpcHandle('canvas:project:delete', async (req) => {
-    // 读出 root_path 后再删除 DB 行：hardDelete 会移除该行，丢失路径。
-    // 用户预期「删除」即彻底清理（含项目文件夹），软删/硬删均清理磁盘。
+  typedIpcHandle('canvas:project:delete', async (req, event) => {
+    requireMainCanvasShellSender(event.sender, canvasSenderAuthority)
+    // 普通删除只隐藏项目并保留磁盘目录；只有显式 hard delete 才清理文件。
+    // 这样误删不会立即毁掉源素材，后续仍可通过项目导入重新接回。
     const project = getCanvasProjectRepo().get(req.projectId)
     const rootPath = project?.root_path ?? null
     let directoryRemoved = false
-    if (rootPath) {
+    if (req.hard && rootPath) {
       directoryRemoved = await removeCanvasProjectDirectory(rootPath)
     }
     if (req.hard) {
@@ -3775,7 +3574,8 @@ export function registerAllIpcHandlers(): void {
     return { deleted: true, directoryRemoved }
   })
 
-  typedIpcHandle('canvas:project:update-cover', async (req) => {
+  typedIpcHandle('canvas:project:update-cover', async (req, event) => {
+    requireMainCanvasShellSender(event.sender, canvasSenderAuthority)
     // 直接覆盖 cover_url；前端负责把图片写入项目目录后传入 safe-file URL。
     // 传 null 清除封面（列表卡片回退到默认图标）。
     const repo = getCanvasProjectRepo()
@@ -3799,14 +3599,25 @@ export function registerAllIpcHandlers(): void {
     return { coverUrl: req.coverUrl, updatedAt }
   })
 
-  typedIpcHandle('canvas:project:default-root', async () => {
+  typedIpcHandle('canvas:project:default-root', async (_req, event) => {
+    requireMainCanvasShellSender(event.sender, canvasSenderAuthority)
     const rootPath = getDefaultCanvasProjectsRoot()
     await fs.mkdir(rootPath, { recursive: true })
     return { rootPath }
   })
 
-  typedIpcHandle('canvas:project:ensure-directory', async (req) => {
-    const directory = await ensureCanvasProjectDirectory(req)
+  typedIpcHandle('canvas:project:ensure-directory', async (req, event) => {
+    requireCanvasProjectManagerSender(event.sender, req.projectId, canvasSenderAuthority)
+    const directory = await coordinateCanvasProjectDirectory(
+      {
+        sender: event.sender,
+        projectId: req.projectId,
+        ...(req.title !== undefined ? { title: req.title } : {}),
+        requestedRootPath: req.rootPath ?? null,
+        requestedParentDirectory: req.parentDirectory ?? null,
+      },
+      canvasProjectDirectoryDependencies,
+    )
     const row = getCanvasProjectRepo().get(req.projectId)
     if (row) {
       getCanvasProjectRepo().upsert({
@@ -3828,10 +3639,19 @@ export function registerAllIpcHandlers(): void {
     return directory
   })
 
-  typedIpcHandle('canvas:asset:write-data-url', async (req) => {
+  typedIpcHandle('canvas:asset:write-data-url', async (req, event) => {
+    requireCanvasProjectManagerSender(event.sender, req.projectId, canvasSenderAuthority)
+    const directory = await coordinateCanvasProjectDirectory(
+      {
+        sender: event.sender,
+        projectId: req.projectId,
+        requestedRootPath: req.projectRootPath ?? null,
+      },
+      canvasProjectDirectoryDependencies,
+    )
     return writeCanvasAssetDataUrl({
       projectId: req.projectId,
-      projectRootPath: req.projectRootPath ?? null,
+      projectRootPath: directory.rootPath,
       dataUrl: req.dataUrl,
       ...(req.mimeType !== undefined ? { mimeType: req.mimeType } : {}),
       ...(req.suggestedBaseName !== undefined ? { suggestedBaseName: req.suggestedBaseName } : {}),
@@ -3839,12 +3659,27 @@ export function registerAllIpcHandlers(): void {
     })
   })
 
-  typedIpcHandle('canvas:asset:copy-to-project', async (req) => {
+  typedIpcHandle('canvas:asset:copy-to-project', async (req, event) => {
+    // 目标项目必须是当前 Canvas 窗口 active project，DB root 权威。
+    const trustedRoot = requireActiveCanvasProjectRoot(event.sender, req.projectId)
+    // source 必须经当前 sender + 项目根/grant 校验：sourceUrl 只接受 safe-file 解码后的本地路径，
+    // 绝不把 renderer 上报的裸 sourcePath/sourceUrl 直接透传给复制逻辑。
+    const requestedSource = req.sourcePath ?? decodeSafeFileUrl(req.sourceUrl ?? '') ?? undefined
+    if (!requestedSource) return { copied: false, error: 'sourcePath is required' }
+    let resolvedSource: string
+    try {
+      resolvedSource = canvasFileAccess.resolveReadableFile(
+        event.sender as CanvasFileAccessGrantSender,
+        requestedSource,
+        trustedRoot,
+      )
+    } catch (err) {
+      return { copied: false, error: err instanceof Error ? err.message : String(err) }
+    }
     return copyCanvasAssetToProject({
       projectId: req.projectId,
-      projectRootPath: req.projectRootPath ?? null,
-      ...(req.sourcePath !== undefined ? { sourcePath: req.sourcePath } : {}),
-      ...(req.sourceUrl !== undefined ? { sourceUrl: req.sourceUrl } : {}),
+      projectRootPath: trustedRoot,
+      sourcePath: resolvedSource,
       ...(req.suggestedBaseName !== undefined ? { suggestedBaseName: req.suggestedBaseName } : {}),
       ...(req.type !== undefined ? { type: req.type } : {}),
     })
@@ -3942,64 +3777,87 @@ export function registerAllIpcHandlers(): void {
     }
   })
 
-  typedIpcHandle('canvas:project:export-package', async (req) => {
-    const targetParent = req.targetParentDirectory?.trim()
-      ? path.resolve(req.targetParentDirectory)
-      : (
-          await dialog.showOpenDialog({
-            title: '选择 Canvas 项目包导出位置',
-            properties: ['openDirectory', 'createDirectory'],
-          })
-        ).filePaths[0]
+  typedIpcHandle('canvas:project:export-package', async (req, event) => {
+    let targetParent = req.targetParentDirectory?.trim()
+    if (!targetParent) {
+      const selected = await canvasFileAccess.openDirectory(
+        event.sender as CanvasPackageAuthoritySender,
+        { title: '选择 Canvas 项目包导出位置' },
+      )
+      targetParent = selected.filePath
+    }
     if (!targetParent) return { exported: false }
+    const authorized = canvasProjectPackageAuthority.authorizeExport(
+      event.sender as CanvasPackageAuthoritySender,
+      { projectId: req.projectId, targetParentDirectory: targetParent },
+    )
     const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')
     const packageDir = path.join(
-      targetParent,
+      authorized.targetParentPath,
       `${sanitizeCanvasPathSegment(req.title, 'canvas-project')}-${stamp}`,
     )
-    await fs.mkdir(packageDir, { recursive: true })
-    const sourceRoot = req.projectRootPath?.trim()
-    if (sourceRoot) {
-      try {
-        await fs.cp(path.join(sourceRoot, 'assets'), path.join(packageDir, 'assets'), {
-          recursive: true,
-          force: true,
-        })
-      } catch {
-        // Some legacy projects have no project-local assets yet; snapshot export still succeeds.
-      }
-    }
-    let snapshotJson = req.snapshotJson
-    if (sourceRoot) {
-      try {
-        const normalizedSourceRoot = path.resolve(sourceRoot)
-        const rewritten = rewriteCanvasSnapshotRootPaths(
-          JSON.parse(req.snapshotJson),
-          normalizedSourceRoot,
-          packageDir,
-        )
-        snapshotJson = JSON.stringify(rewritten)
-      } catch {
-        snapshotJson = req.snapshotJson
-      }
-    }
-    await writeCanvasProjectPackageFiles({
-      projectId: req.projectId,
-      rootPath: packageDir,
-      snapshotJson,
+    await exportCanvasProjectDirectoryPackage({
+      sourceRootPath: authorized.sourceRootPath,
+      targetRootPath: packageDir,
+      snapshotJson: req.snapshotJson,
     })
     return { exported: true, directoryPath: packageDir }
   })
 
-  typedIpcHandle('canvas:project:migrate-assets', async (req) => {
-    const directory = await ensureCanvasProjectDirectoryById(
-      req.projectId,
-      req.projectRootPath ?? null,
+  typedIpcHandle('canvas:project:import-package', async (req, event) => {
+    const validated = CanvasProjectImportPackageRequestSchema.parse(req)
+    await fs.mkdir(getDefaultCanvasProjectsRoot(), { recursive: true })
+    const authorized = canvasProjectPackageAuthority.authorizeImport(
+      event.sender as CanvasPackageAuthoritySender,
+      {
+        sourceDirectory: validated.sourceDirectory,
+        ...(validated.targetParentDirectory !== undefined
+          ? { targetParentDirectory: validated.targetParentDirectory }
+          : {}),
+      },
     )
-    const snapshot = JSON.parse(req.snapshotJson)
+    return await importCanvasProjectDirectoryPackage({
+      sourceRootPath: authorized.sourceRootPath,
+      targetParentPath: authorized.targetParentPath,
+    })
+  })
+
+  typedIpcHandle('canvas:project:migrate-assets', async (req, event) => {
+    requireCanvasProjectManagerSender(event.sender, req.projectId, canvasSenderAuthority)
+    const directory = await coordinateCanvasProjectDirectory(
+      {
+        sender: event.sender,
+        projectId: req.projectId,
+        requestedRootPath: req.projectRootPath ?? null,
+      },
+      canvasProjectDirectoryDependencies,
+    )
+    const canonicalTargetRoot = await fs.realpath(directory.rootPath)
+    let snapshot = JSON.parse(req.snapshotJson)
+    const sourceFilePath = req.sourceFilePath?.trim() || null
+    let importSourceRoot: string | null = null
+    if (sourceFilePath) {
+      const resolvedSourceFile = canvasFileAccess.resolveReadableFile(
+        event.sender as CanvasFileAccessGrantSender,
+        sourceFilePath,
+      )
+      importSourceRoot = path.dirname(resolvedSourceFile)
+    }
+    const exportedPackageRoot = req.exportedPackageRoot?.trim() || null
+    if (exportedPackageRoot && importSourceRoot) {
+      const fromRoot = path.resolve(exportedPackageRoot)
+      if (fromRoot !== importSourceRoot) {
+        snapshot = rewriteCanvasSnapshotRootPaths(
+          snapshot,
+          fromRoot,
+          importSourceRoot,
+          decodeSafeFileUrl,
+          toSafeFileUrl,
+        )
+      }
+    }
     const urlMap = new Map<string, string>()
     let movedAssets = 0
-    let skippedAssets = 0
     const migrateRef = async (
       value: unknown,
       title: string | undefined,
@@ -4017,21 +3875,30 @@ export function registerAllIpcHandlers(): void {
       if (cached) return cached
       const sourcePath = decodeSafeFileUrl(value) ?? (path.isAbsolute(value) ? value : null)
       if (!sourcePath) return null
-      if (path.resolve(sourcePath).startsWith(directory.rootPath + path.sep)) return null
+      const resolvedSource = canvasFileAccess.resolveReadableFile(
+        event.sender as CanvasFileAccessGrantSender,
+        sourcePath,
+        canonicalTargetRoot,
+      )
+      if (
+        resolvedSource === canonicalTargetRoot ||
+        resolvedSource.startsWith(canonicalTargetRoot + path.sep)
+      ) {
+        return null
+      }
       const copied = await copyCanvasAssetToProject({
         projectId: req.projectId,
         projectRootPath: directory.rootPath,
-        sourcePath,
+        sourcePath: resolvedSource,
         ...(title !== undefined ? { suggestedBaseName: title } : {}),
         ...(kind !== undefined ? { type: kind } : {}),
       })
       if (!copied.filePath) {
-        skippedAssets += 1
-        return null
+        throw new Error(`Canvas asset migration failed: ${copied.error ?? 'copy failed'}`)
       }
       const nextUrl = toSafeFileUrl(copied.filePath)
       urlMap.set(value, nextUrl)
-      urlMap.set(sourcePath, nextUrl)
+      urlMap.set(resolvedSource, nextUrl)
       movedAssets += copied.copied ? 1 : 0
       return nextUrl
     }
@@ -4087,14 +3954,15 @@ export function registerAllIpcHandlers(): void {
     if (snapshot.project) snapshot.project.rootPath = directory.rootPath
     const snapshotJson = JSON.stringify(snapshot)
     await writeCanvasProjectPackageFiles({
-      projectId: req.projectId,
       rootPath: directory.rootPath,
+      snapshotsDir: directory.snapshotsDir,
       snapshotJson,
     })
-    return { migrated: movedAssets > 0, movedAssets, skippedAssets, snapshotJson }
+    return { migrated: movedAssets > 0, movedAssets, skippedAssets: 0, snapshotJson }
   })
 
-  typedIpcHandle('canvas:project:cleanup-orphans', async (req) => {
+  typedIpcHandle('canvas:project:cleanup-orphans', async (req, event) => {
+    requireMainCanvasShellSender(event.sender, canvasSenderAuthority)
     const root = getDefaultCanvasMediaDir()
     const used = new Set<string>()
     const rows = getDatabase()
@@ -4175,9 +4043,9 @@ export function registerAllIpcHandlers(): void {
 
     const payload = await getProviderService().exportProviders(req.ids)
 
-    // 默认文件名：spark-agent-providers-YYYY-MM-DD.json
+    // 默认文件名：spark-canvas-providers-YYYY-MM-DD.json
     const datePart = new Date().toISOString().slice(0, 10)
-    const defaultName = `spark-agent-providers-${datePart}.json`
+    const defaultName = `spark-canvas-providers-${datePart}.json`
 
     const result = await dialog.showSaveDialog({
       title: '导出 Provider 配置',
@@ -4294,21 +4162,6 @@ export function registerAllIpcHandlers(): void {
 
   // ─── Workspace Handlers ────────────────────────────────────────────────
 
-  typedIpcHandle('workspace:open', async (req) => {
-    const rootPath = req.rootPath ?? req.create?.rootPath
-    if (rootPath == null) {
-      throw new Error('workspace:open requires rootPath')
-    }
-
-    log.info(`workspace:open requested, rootPath=${rootPath}`)
-    const workspace = await getWorkspaceService().openWorkspace(rootPath, req.create?.name, {
-      create: req.create != null,
-    })
-    return {
-      workspace: toWorkspaceInfo(workspace),
-    }
-  })
-
   typedIpcHandle('workspace:get-current', async (_req) => {
     log.info('workspace:get-current requested')
     const workspace = getWorkspaceService().getCurrent()
@@ -4355,8 +4208,6 @@ export function registerAllIpcHandlers(): void {
     for (const sessionId of deletedSessionIds) {
       getSessionService().cleanupSessionEventsInBackground(sessionId)
     }
-    // 关闭该 workspace 名下所有内置终端 PTY
-    getTerminalService().disposeByWorkspaceId(req.workspaceId, { defer: true })
     const deleted = getWorkspaceService().deleteWorkspace(req.workspaceId)
     return { deleted, deletedSessionIds }
   })
@@ -4370,8 +4221,6 @@ export function registerAllIpcHandlers(): void {
 
   typedIpcHandle('workspace:close', async (req) => {
     log.info(`workspace:close requested, workspaceId=${req.workspaceId}`)
-    // 关闭 workspace 时同时杀掉该 workspace 名下所有内置终端 PTY
-    getTerminalService().disposeByWorkspaceId(req.workspaceId, { defer: true })
     getWorkspaceService().closeWorkspace()
     return { closed: true }
   })
@@ -4577,68 +4426,9 @@ export function registerAllIpcHandlers(): void {
     return { removed: true }
   })
 
-  // ─── File Watcher Handlers ──────────────────────────────────────────────
-
-  typedIpcHandle('workspace:watch-start', async (req) => {
-    log.info(`workspace:watch-start requested, workspaceId=${req.workspaceId}`)
-    const workspace = new WorkspaceRepository(getDatabase()).findByIdOrFail(req.workspaceId)
-    const watcherService = getFileWatcherService()
-    watcherService.start(req.workspaceId, workspace.root_path, req.ignorePatterns)
-    return { watching: true }
-  })
-
-  typedIpcHandle('workspace:watch-stop', async (req) => {
-    log.info(`workspace:watch-stop requested, workspaceId=${req.workspaceId}`)
-    const stopped = getFileWatcherService().stop(req.workspaceId)
-    return { stopped }
-  })
-
   // ─── Native Dialog Handlers ─────────────────────────────────────────────
-
-  typedIpcHandle('dialog:open-directory', async (req) => {
-    const result = await dialog.showOpenDialog({
-      title: req.title ?? '选择工作区目录',
-      ...(req.defaultPath === undefined ? {} : { defaultPath: req.defaultPath }),
-      properties: ['openDirectory', 'createDirectory'],
-    })
-
-    return {
-      canceled: result.canceled,
-      ...(result.filePaths[0] === undefined ? {} : { filePath: result.filePaths[0] }),
-    }
-  })
-
-  typedIpcHandle('dialog:open-file', async (req) => {
-    // allowDirectories=true：macOS 支持同一个对话框同时选择文件和目录；Windows/Linux
-    // 同时传 openFile + openDirectory 会退化成目录选择器，导致用户点文件后无法完成选择。
-    const canPickFilesAndDirectoriesTogether =
-      req.allowDirectories === true && process.platform === 'darwin'
-    const baseProperties: Array<'openFile' | 'openDirectory' | 'multiSelections'> =
-      canPickFilesAndDirectoriesTogether
-        ? ['openFile', 'openDirectory', 'multiSelections']
-        : req.multiple === true || req.allowDirectories === true
-          ? ['openFile', 'multiSelections']
-          : ['openFile']
-    const result = await dialog.showOpenDialog({
-      title: req.title ?? '选择文件',
-      ...(req.defaultPath === undefined ? {} : { defaultPath: req.defaultPath }),
-      properties: baseProperties,
-      ...(req.filters ? { filters: req.filters } : {}),
-    })
-
-    return {
-      canceled: result.canceled,
-      ...(result.filePaths[0] === undefined ? {} : { filePath: result.filePaths[0] }),
-      ...(result.filePaths.length > 0 ? { filePaths: result.filePaths } : {}),
-    }
-  })
-
-  // 路径类别探测：返回 'file' | 'directory' | 'absent'。供「添加相关文件或目录」前端判断选中项类别。
-  typedIpcHandle('file:stat-kind', async (req) => {
-    if (!existsSync(req.path)) return { kind: 'absent' as const }
-    const stats = statSync(req.path)
-    return { kind: stats.isDirectory() ? ('directory' as const) : ('file' as const) }
-  })
+  // dialog:open-directory / dialog:open-file / file:stat-kind / file:read-text 已迁移到
+  // registerCanvasFileAccessIpc —— 原生选择结果统一绑定 event.sender grant，见上文接线。
 
   typedIpcHandle('dialog:save-file', async (req) => {
     const result = await dialog.showSaveDialog({
@@ -4656,11 +4446,6 @@ export function registerAllIpcHandlers(): void {
   typedIpcHandle('file:write-text', async (req) => {
     await fs.writeFile(req.path, req.content, 'utf-8')
     return { success: true }
-  })
-
-  typedIpcHandle('file:read-text', async (req) => {
-    const content = await fs.readFile(req.path, 'utf-8')
-    return { content }
   })
 
   typedIpcHandle('clipboard:write-text', async (req) => {
@@ -4992,7 +4777,6 @@ export function registerAllIpcHandlers(): void {
     return { deleted }
   })
 
-
   // ─── MCP Handlers ───────────────────────────────────────────────────────────
 
   typedIpcHandle('mcp:list', async (req) => {
@@ -5058,7 +4842,9 @@ export function registerAllIpcHandlers(): void {
     try {
       await getMcpService().startServer(req.serverId)
     } catch (err) {
-      log.warn(`mcp:authorize completed but reconnect failed, serverId=${req.serverId}: ${err instanceof Error ? err.message : String(err)}`)
+      log.warn(
+        `mcp:authorize completed but reconnect failed, serverId=${req.serverId}: ${err instanceof Error ? err.message : String(err)}`,
+      )
     }
     pushConfigChanged('mcp', 'update', req.serverId)
     return { authorized: true }
@@ -5085,9 +4871,9 @@ export function registerAllIpcHandlers(): void {
 
   typedIpcHandle('skill:list', async (req) => {
     const svc = getSkillService()
-    svc.ensureBuiltInSkills()
-    rebuildManagedSkillsPlugin()
-    const skills = svc.listSkills(req.scope !== undefined ? { scope: req.scope } : undefined)
+    const skills = filterCanvasRuntimeSkills(
+      svc.listSkills(req.scope !== undefined ? { scope: req.scope } : undefined),
+    )
     return { skills }
   })
 
@@ -5231,9 +5017,8 @@ export function registerAllIpcHandlers(): void {
       const teams = teamRepo.list({ includeDisabled: true })
       for (const team of teams) {
         const memberIndex = team.memberAgentIds.indexOf(req.id)
-        const nextMembers = memberIndex >= 0
-          ? team.memberAgentIds.filter((m) => m !== req.id)
-          : team.memberAgentIds
+        const nextMembers =
+          memberIndex >= 0 ? team.memberAgentIds.filter((m) => m !== req.id) : team.memberAgentIds
         const hostWasDeleted = team.hostAgentId === req.id
         const nextHost = hostWasDeleted ? (nextMembers[0] ?? '') : team.hostAgentId
         const membersChanged = memberIndex >= 0 && nextMembers.length !== team.memberAgentIds.length
@@ -5667,7 +5452,9 @@ export function registerAllIpcHandlers(): void {
       })
       // 安装完成后查回 postInstallHint
       const item = service.listInstallableCatalog().find((it) => it.slug === req.slug)
-      return item?.postInstallHint != null ? { skill, postInstallHint: item.postInstallHint } : { skill }
+      return item?.postInstallHint != null
+        ? { skill, postInstallHint: item.postInstallHint }
+        : { skill }
     } catch (err) {
       const existing = skillInstallStatusByKey.get(skillInstallStatusKey('catalog', req.slug))
       setSkillInstallStatus({
@@ -5928,7 +5715,14 @@ export function registerAllIpcHandlers(): void {
     const settingsRepo = new SettingsRepository(db)
     const settingsGet = (c: string, k: string) => settingsRepo.get(c, k)
     // manualWrite 走去重/配额/敏感词闸门（跳过置信度/演化）
-    const writer = new MemoryWriterService(repo, getMemoryStore(resolveWorkspaceRootPath(req.scope, req.scopeRef)), settingsGet, async () => '[]', null, entityRepo)
+    const writer = new MemoryWriterService(
+      repo,
+      getMemoryStore(resolveWorkspaceRootPath(req.scope, req.scopeRef)),
+      settingsGet,
+      async () => '[]',
+      null,
+      entityRepo,
+    )
     const row = await writer.manualWrite({
       scope: req.scope,
       type: req.type,
@@ -5942,7 +5736,9 @@ export function registerAllIpcHandlers(): void {
       try {
         entityRepo.upsertEntitiesForMemory(row.id, req.scope, req.scopeRef, req.entities)
       } catch (err) {
-        log.warn(`memory:create entity persist failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`)
+        log.warn(
+          `memory:create entity persist failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`,
+        )
       }
     }
     return { entry: toMemoryDto(row) }
@@ -5952,33 +5748,32 @@ export function registerAllIpcHandlers(): void {
     log.info(`memory:update requested, id=${req.id}`)
     const repo = new MemoryRepository(getDatabase())
     const existing = repo.getById(req.id)
-    if (existing == null) throw new SparkError('NOT_FOUND', `记忆不存在：${req.id}（可能已被删除或归档）。`)
+    if (existing == null)
+      throw new SparkError('NOT_FOUND', `记忆不存在：${req.id}（可能已被删除或归档）。`)
     let bodyForUpdate: string | undefined
     if (req.body != null) {
       bodyForUpdate = req.body
       // 先写文件（事实来源），再更新 DB+FTS：writeFile 失败则整体中止（DB 维持旧状态，
       // 与 writer.updateEntry 契约一致——避免 DB 领先文件导致 recall 永久读不到正文）
-      await getMemoryStore(resolveWorkspaceRootPath(existing.scope, existing.scope_ref)).writeFile(
-        {
-          meta: {
-            id: existing.id,
-            scope: existing.scope,
-            scopeRef: existing.scope_ref,
-            type: req.type ?? existing.type,
-            name: existing.name,
-            description: req.description ?? existing.description,
-            confidence: existing.confidence,
-            createdAt: existing.created_at,
-            updatedAt: Date.now(),
-            hitCount: existing.hit_count,
-            lastHitAt: existing.last_hit_at,
-            sourceSessionId: existing.source_session_id,
-            links: [],
-            archived: existing.archived === 1,
-          },
-          body: req.body,
+      await getMemoryStore(resolveWorkspaceRootPath(existing.scope, existing.scope_ref)).writeFile({
+        meta: {
+          id: existing.id,
+          scope: existing.scope,
+          scopeRef: existing.scope_ref,
+          type: req.type ?? existing.type,
+          name: existing.name,
+          description: req.description ?? existing.description,
+          confidence: existing.confidence,
+          createdAt: existing.created_at,
+          updatedAt: Date.now(),
+          hitCount: existing.hit_count,
+          lastHitAt: existing.last_hit_at,
+          sourceSessionId: existing.source_session_id,
+          links: [],
+          archived: existing.archived === 1,
         },
-      )
+        body: req.body,
+      })
     }
     const updated = repo.update(
       req.id,
@@ -6082,11 +5877,29 @@ export function registerAllIpcHandlers(): void {
     return { value }
   })
 
-  typedIpcHandle('settings:set', async (req) => {
+  typedIpcHandle('settings:set', async (req, event) => {
     // value === null 视为"清除该 key"：调 repo.delete() 而非写入字面量 null。
     // 前端 MemoryPanel 等表单用 set(key, null) 表达"未设置"语义（触发默认/回退逻辑）。
     if (req.value === null) {
       getSettingsService().delete(req.category, req.key)
+    } else if (req.category === CANVAS_SETTINGS_CATEGORY && req.key === CANVAS_SETTINGS_KEY) {
+      // canvas/data 的 projectsRootPath 特判：只能保存同一 sender 经原生目录选择 grant 验证后的
+      // canonical 目录，并写 v2 marker；其余 canvas 设置原样保留。
+      const authorizedValue = authorizeCanvasProjectsRootSetting(
+        event.sender,
+        req.value,
+        (sender, requestedPath) => {
+          const resolved = canvasFileAccessGrants.resolveReadablePath(
+            sender as CanvasFileAccessGrantSender,
+            requestedPath,
+          )
+          if (resolved.kind !== 'directory') {
+            throw new Error('Canvas projects root must resolve to a granted directory')
+          }
+          return resolved.path
+        },
+      )
+      getSettingsService().set(req.category, req.key, authorizedValue)
     } else {
       getSettingsService().set(req.category, req.key, req.value)
     }
@@ -6527,239 +6340,6 @@ export function registerAllIpcHandlers(): void {
     return getRemoteConnectionService().getRuntimeStatus()
   })
 
-  // ─── Scheduled Task Handlers ───────────────────────────────────────────────
-
-  typedIpcHandle('scheduled-task:list', async (req) => {
-    return { tasks: getScheduledTaskService().listTasks(req) }
-  })
-
-  typedIpcHandle('scheduled-task:get', async (req) => {
-    return { task: getScheduledTaskService().getTask(req.id) }
-  })
-
-  typedIpcHandle('scheduled-task:create', async (req) => {
-    const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 8)
-    const task = getScheduledTaskService().createTask({
-      id,
-      name: req.name,
-      description: req.description ?? '',
-      enabled: req.enabled !== false,
-      trigger_type: req.triggerType,
-      interval_seconds: req.intervalSeconds ?? null,
-      cron_expression: req.cronExpression ?? null,
-      run_at: req.runAt ?? null,
-      timezone: req.timezone ?? 'system',
-      start_at: req.startAt ?? null,
-      end_at: req.endAt ?? null,
-      max_executions: req.maxExecutions ?? 0,
-      agent_id: req.agentId ?? null,
-      team_id: req.teamId ?? null,
-      model_id: req.modelId ?? null,
-      workspace_id: req.workspaceId ?? null,
-      prompt_template: req.promptTemplate,
-      permission_mode: req.permissionMode ?? 'auto',
-      permission_profile_id: req.permissionProfileId ?? null,
-      timeout_seconds: req.timeoutSeconds ?? 300,
-      max_retries: req.maxRetries ?? 0,
-      retry_delay_seconds: req.retryDelaySeconds ?? 60,
-      retry_backoff: req.retryBackoff ?? 'fixed',
-      notifications: req.notifications ?? [],
-      concurrency_policy: req.concurrencyPolicy ?? 'skip',
-      tags: req.tags ?? [],
-      history_retention_days: req.historyRetentionDays ?? 30,
-    } as any)
-    return { task }
-  })
-
-  typedIpcHandle('scheduled-task:update', async (req) => {
-    const updateFields: Record<string, unknown> = {}
-    const fieldMap: Record<string, unknown> = {
-      name: req.name,
-      description: req.description,
-      trigger_type: req.triggerType,
-      interval_seconds: req.intervalSeconds,
-      cron_expression: req.cronExpression,
-      run_at: req.runAt,
-      timezone: req.timezone,
-      start_at: req.startAt,
-      end_at: req.endAt,
-      max_executions: req.maxExecutions,
-      agent_id: req.agentId,
-      team_id: req.teamId,
-      model_id: req.modelId,
-      workspace_id: req.workspaceId,
-      prompt_template: req.promptTemplate,
-      permission_mode: req.permissionMode,
-      permission_profile_id: req.permissionProfileId,
-      timeout_seconds: req.timeoutSeconds,
-      max_retries: req.maxRetries,
-      retry_delay_seconds: req.retryDelaySeconds,
-      retry_backoff: req.retryBackoff,
-      concurrency_policy: req.concurrencyPolicy,
-      history_retention_days: req.historyRetentionDays,
-    }
-    for (const [k, v] of Object.entries(fieldMap)) {
-      if (v !== undefined) updateFields[k] = v
-    }
-    if (req.enabled !== undefined) updateFields.enabled = req.enabled
-    if (req.notifications !== undefined) updateFields.notifications = req.notifications
-    if (req.tags !== undefined) updateFields.tags = req.tags
-    const task = getScheduledTaskService().updateTask(req.id, updateFields)
-    if (!task) throw new Error(`Scheduled task not found: ${req.id}`)
-    return { task }
-  })
-
-  typedIpcHandle('scheduled-task:delete', async (req) => {
-    const success = getScheduledTaskService().deleteTask(req.id)
-    return { success }
-  })
-
-  typedIpcHandle('scheduled-task:toggle', async (req) => {
-    const task = req.enabled
-      ? getScheduledTaskService().enableTask(req.id)
-      : getScheduledTaskService().disableTask(req.id)
-    if (!task) throw new Error(`Scheduled task not found: ${req.id}`)
-    return { task }
-  })
-
-  typedIpcHandle('scheduled-task:run-now', async (req) => {
-    const execution = await getScheduledTaskService().runNow(req.id)
-    return { execution }
-  })
-
-  typedIpcHandle('task-execution:list', async (req) => {
-    const opts: { page?: number; pageSize?: number; status?: string } = {}
-    if (req.page !== undefined) opts.page = req.page
-    if (req.pageSize !== undefined) opts.pageSize = req.pageSize
-    if (req.status !== undefined) opts.status = req.status
-    return getScheduledTaskService().getExecutions(req.taskId, opts)
-  })
-
-  typedIpcHandle('task-execution:get', async (req) => {
-    return { execution: getScheduledTaskService().getExecution(req.id) }
-  })
-
-  typedIpcHandle('task-execution:cancel', async (req) => {
-    const success = getScheduledTaskService().cancelExecution(req.id)
-    return { success }
-  })
-
-  typedIpcHandle('task-execution:stats', async (req) => {
-    return { stats: getScheduledTaskService().getExecutionStats(req.taskId) }
-  })
-
-  // ─── Scheduled Task Import/Export Handlers ────────────────────────────────
-  //
-  // 流程（与 Provider 完全对齐）：
-  //   - 内存构造 ExportPayload                → `scheduled-task:export`
-  //   - 弹保存对话框写 .json                   → `scheduled-task:export-to-file`
-  //   - 弹打开对话框读 .json                   → `scheduled-task:import-from-file`
-  //   - 真正写库                                → `scheduled-task:import`
-  //
-  // 文件 IO 走 electron 的 dialog + node:fs/promises。
-  // 解析失败、IO 失败、版本不匹配都返回友好错误，UI 弹 toast。
-
-  typedIpcHandle('scheduled-task:export', async (req) => {
-    const count = req.ids.length
-    log.info(`scheduled-task:export requested, ids=${count}`)
-    const payload = getScheduledTaskService().exportTasks(req.ids)
-    return { payload }
-  })
-
-  typedIpcHandle('scheduled-task:import', async (req) => {
-    const total = req.payload.tasks.length
-    log.info(`scheduled-task:import requested, mode=${req.mode}, tasks=${total}`)
-    const result = await getScheduledTaskService().importTasks(req.payload, req.mode)
-    log.info(
-      `scheduled-task:import done, imported=${result.imported}, skipped=${result.skipped}, errors=${result.errors.length}`,
-    )
-    return result
-  })
-
-  typedIpcHandle('scheduled-task:export-to-file', async (req) => {
-    const count = req.ids.length
-    log.info(`scheduled-task:export-to-file requested, ids=${count}`)
-
-    const payload = getScheduledTaskService().exportTasks(req.ids)
-
-    // 默认文件名：spark-agent-tasks-YYYY-MM-DD.json
-    const datePart = new Date().toISOString().slice(0, 10)
-    const defaultName = `spark-agent-tasks-${datePart}.json`
-
-    const result = await dialog.showSaveDialog({
-      title: '导出定时任务',
-      defaultPath: defaultName,
-      filters: [
-        { name: 'JSON', extensions: ['json'] },
-        { name: 'All Files', extensions: ['*'] },
-      ],
-    })
-
-    if (result.canceled || result.filePath == null || result.filePath.length === 0) {
-      log.info('scheduled-task:export-to-file canceled by user')
-      return { filePath: '', count: payload.tasks.length }
-    }
-
-    try {
-      const json = JSON.stringify(payload, null, 2)
-      await fs.writeFile(result.filePath, json, 'utf-8')
-      log.info(
-        `scheduled-task:export-to-file wrote ${payload.tasks.length} tasks to ${result.filePath}`,
-      )
-      return { filePath: result.filePath, count: payload.tasks.length }
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
-      log.error(`scheduled-task:export-to-file write failed: ${message}`)
-      throw new Error(`写入文件失败：${message}`, { cause: err })
-    }
-  })
-
-  typedIpcHandle('scheduled-task:import-from-file', async () => {
-    log.info('scheduled-task:import-from-file requested')
-
-    const result = await dialog.showOpenDialog({
-      title: '选择定时任务配置文件',
-      properties: ['openFile'],
-      filters: [
-        { name: 'JSON', extensions: ['json'] },
-        { name: 'All Files', extensions: ['*'] },
-      ],
-    })
-
-    if (result.canceled || result.filePaths.length === 0) {
-      log.info('scheduled-task:import-from-file canceled by user')
-      return { payload: null, filePath: '' }
-    }
-
-    const filePath = result.filePaths[0]!
-    let raw: string
-    try {
-      raw = await fs.readFile(filePath, 'utf-8')
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
-      log.error(`scheduled-task:import-from-file read failed: ${message}`)
-      throw new Error(`读取文件失败：${message}`, { cause: err })
-    }
-
-    let json: unknown
-    try {
-      json = JSON.parse(raw)
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
-      log.error(`scheduled-task:import-from-file parse failed: ${message}`)
-      throw new Error(`JSON 解析失败：${message}`, { cause: err })
-    }
-
-    const { ScheduledTaskExportPayloadSchema } = await import('@spark/protocol')
-    const parsed = ScheduledTaskExportPayloadSchema.parse(json)
-
-    log.info(
-      `scheduled-task:import-from-file parsed ${parsed.tasks.length} tasks, version=${parsed.version}`,
-    )
-
-    return { payload: parsed as ScheduledTaskExportPayload, filePath }
-  })
-
   // ─── Usage Ledger Handlers ────────────────────────────────────────────────
 
   typedIpcHandle('usage:record', async (req) => {
@@ -6947,7 +6527,11 @@ export function registerAllIpcHandlers(): void {
         const fallbackTitle = title ?? getNodeDefaultTitle(node)
         const notificationTitle = getSessionNotificationTitle(sessionId, fallbackTitle)
         const notificationBody = body ?? getNodeDefaultBody(node)
-        showSystemNotification(notificationTitle, notificationBody, { target: 'session', sessionId, reason: node })
+        showSystemNotification(notificationTitle, notificationBody, {
+          target: 'session',
+          sessionId,
+          reason: node,
+        })
         triggered = true
         log.debug(`Hook notification triggered for node=${node}`)
       } catch (err) {
@@ -7165,7 +6749,7 @@ export function registerAllIpcHandlers(): void {
     }
   })
 
-  typedIpcHandle('file:save-pasted-image', async (req) => {
+  typedIpcHandle('file:save-pasted-image', async (req, event) => {
     const dataUrl = req.dataUrl?.trim()
     if (!dataUrl) {
       throw new Error('dataUrl is required')
@@ -7203,8 +6787,18 @@ export function registerAllIpcHandlers(): void {
                     ? 'heif'
                     : 'png'
 
-    const rootDir = req.projectRootPath?.trim()
-      ? path.join(path.resolve(req.projectRootPath), 'assets', 'images')
+    const requestedProjectRoot = req.projectRootPath?.trim()
+    const trustedProjectRoot = requestedProjectRoot
+      ? resolveTrustedCanvasProjectRoot(event.sender)
+      : null
+    if (
+      requestedProjectRoot &&
+      (trustedProjectRoot == null || path.resolve(requestedProjectRoot) !== trustedProjectRoot)
+    ) {
+      throw new SparkError('PERMISSION_DENIED', '当前窗口无权写入该画布项目。')
+    }
+    const rootDir = trustedProjectRoot
+      ? path.join(trustedProjectRoot, 'assets', 'images')
       : req.storageScope === 'canvas'
         ? getDefaultCanvasMediaDir()
         : path.join(app.getPath('temp'), 'spark-agent-pasted-images')
@@ -7218,6 +6812,7 @@ export function registerAllIpcHandlers(): void {
     await fs.writeFile(filePath, buffer)
     return { filePath, fileName }
   })
+
 
   typedIpcHandle('file:prepare-image-preview', async (req) => {
     const sourcePath = req.sourcePath?.trim()
@@ -7352,6 +6947,7 @@ export function registerAllIpcHandlers(): void {
   /** 构建 ffmpeg 状态响应（从缓存或重新检测） */
   function buildFfmpegStatus(): import('@spark/protocol').FfmpegStatusResponse {
     const state = getCachedFfmpegIntegrity()
+    const managedInstall = getCanvasFfmpegInstallAvailability()
     return {
       ffmpegReady: state?.ffmpegReady ?? false,
       ffmpegSource: state?.ffmpegSource ?? 'none',
@@ -7359,12 +6955,15 @@ export function registerAllIpcHandlers(): void {
       ffprobeReady: state?.ffprobeReady ?? false,
       binaryPath: state?.binaryPath ?? null,
       lastError: state?.lastError ?? null,
+      managedInstallAvailable: managedInstall.available,
+      managedInstallMessage: managedInstall.message,
     }
   }
 
   typedIpcHandle('ffmpeg:status', async () => {
     // 主动检测一次，保证返回最新状态
     const state = await detectFfmpegIntegrity()
+    const managedInstall = getCanvasFfmpegInstallAvailability()
     return {
       ffmpegReady: state.ffmpegReady,
       ffmpegSource: state.ffmpegSource,
@@ -7372,136 +6971,37 @@ export function registerAllIpcHandlers(): void {
       ffprobeReady: state.ffprobeReady,
       binaryPath: state.binaryPath,
       lastError: state.lastError,
+      managedInstallAvailable: managedInstall.available,
+      managedInstallMessage: managedInstall.message,
     }
   })
 
-  typedIpcHandle('ffmpeg:install', async (req) => {
-    log.info(`ffmpeg:install requested, artifactId=${req.artifactId ?? '(auto)'}`)
-
-    // 自动选 artifactId：从 manifest 找当前平台的最新 binary.ffmpeg 条目
-    let artifactId = req.artifactId
-    if (!artifactId) {
-      try {
-        const manifest = await getSkillRegistryService().fetchSparkManifestForQuery()
-        const platformArch = `${process.platform}-${process.arch}`
-        const candidates = (manifest.artifacts ?? [])
-          .filter(
-            (a) =>
-              a.type === 'binary' &&
-              a.id.startsWith('binary.ffmpeg') &&
-              a.platform === process.platform &&
-              a.arch === process.arch,
-          )
-          .sort((a, b) => {
-            // 语义版本比较：解析为数字元组，避免字符串比较 "7.10" < "7.9" 的错误
-            const parseVer = (s: string): number[] =>
-              s.split('.').map((seg) => parseInt(seg.replace(/\D/g, ''), 10) || 0)
-            const va = parseVer(a.version)
-            const vb = parseVer(b.version)
-            const len = Math.max(va.length, vb.length)
-            for (let i = 0; i < len; i++) {
-              const d = (vb[i] ?? 0) - (va[i] ?? 0)
-              if (d !== 0) return d
-            }
-            return 0
-          })
-        const candidate = candidates[0]
-        if (!candidate) {
-          return {
-            success: false,
-            message: `当前平台 (${platformArch}) 暂无可用的 FFmpeg 安装包。请在 minio 仓库的 index.json 中添加对应条目。`,
-          }
-        }
-        artifactId = candidate.id
-      } catch (err) {
-        return {
-          success: false,
-          message: `无法获取安装清单: ${err instanceof Error ? err.message : String(err)}`,
-        }
-      }
-    }
-
-    const emitProgress = (
-      state: FfmpegInstallProgress['state'],
-      percent: number | null,
-      message: string,
-      logLine: string | null = null,
-    ) => {
-      pushStreamEvent('stream:ffmpeg:install-progress', {
-        state,
-        percent,
-        message,
-        logLine,
-      })
-    }
-    emitProgress('starting', 0, `准备下载 ${artifactId}`)
-
-    const result = await installFfmpeg(
-      async (id, onProgress) => {
-        emitProgress('downloading', 0, '正在下载 FFmpeg 二进制包')
-        return getSkillRegistryService().installBinaryArtifact(id, {
-          onProgress: (downloaded, total) => {
-            const percent = total > 0 ? Math.round((downloaded / total) * 100) : null
-            emitProgress('downloading', percent, `下载中 ${percent ?? '?'}%`)
-            onProgress?.(downloaded, total)
-          },
-        })
-      },
-      {
-        artifactId,
-        onLog: (line) => {
-          const text = line.trim()
-          if (text) log.info(`[ffmpeg-install] ${text}`)
-        },
-      },
-    )
-
-    emitProgress('verifying', null, '校验安装结果')
-    const nextState = await detectFfmpegIntegrity()
+  typedIpcHandle('ffmpeg:install', async () => {
+    log.info('ffmpeg:install requested')
+    const result = await installCanvasFfmpeg((progress) => {
+      pushStreamEvent('stream:ffmpeg:install-progress', progress)
+    })
+    await detectFfmpegIntegrity()
     pushStreamEvent('stream:ffmpeg:status', buildFfmpegStatus())
-    emitProgress(
-      result.success ? 'done' : 'error',
-      result.success ? 100 : null,
-      result.success ? `FFmpeg 安装成功 (版本 ${nextState.ffmpegVersion ?? '?'})` : result.message ?? '安装失败',
-    )
     return result
   })
 
-  typedIpcHandle('binary:install', async (req) => {
-    log.info(`binary:install requested, artifactId=${req.artifactId}`)
-    const emitProgress = (downloaded: number, total: number) => {
-      pushStreamEvent('stream:binary:install-progress', {
-        artifactId: req.artifactId,
-        downloaded,
-        total,
-      })
-    }
-    try {
-      const result = await getSkillRegistryService().installBinaryArtifact(req.artifactId, {
-        onProgress: emitProgress,
-      })
-      return { success: true, destPath: result.destPath }
-    } catch (err) {
-      return {
-        success: false,
-        message: err instanceof Error ? err.message : String(err),
-      }
-    }
-  })
-
   /** 通用视频处理 handler：按 operation 分派到 FfmpegRunner 方法 */
-  typedIpcHandle('video:process', async (req: VideoProcessRequest): Promise<VideoProcessResponse> => {
-    return handleVideoProcess(req, (progress) => {
-      pushStreamEvent('stream:video:process-progress', {
-        requestId: req.requestId,
-        percent: progress.percent,
-        stage: `frame=${progress.frame} fps=${progress.fps}`,
+  typedIpcHandle(
+    'video:process',
+    async (req: VideoProcessRequest): Promise<VideoProcessResponse> => {
+      return handleVideoProcess(req, (progress) => {
+        pushStreamEvent('stream:video:process-progress', {
+          requestId: req.requestId,
+          percent: progress.percent,
+          stage: `frame=${progress.frame} fps=${progress.fps}`,
+        })
       })
-    })
-  })
+    },
+  )
 
   /** 视频探测专用通道（只读，无进度） */
-  typedIpcHandle('video:probe', async (req: VideoProcessRequest): Promise<VideoProcessResponse> => {
+  typedIpcHandle('video:probe', async (req: VideoProbeRequest): Promise<VideoProcessResponse> => {
     return handleVideoProcess(req)
   })
 
@@ -7617,18 +7117,31 @@ export function registerAllIpcHandlers(): void {
   })
 
   // ─── Cloud Auth (对接 spark-edugen/edu-server) ───────────────────────────────
-  registerAuthIpc()
+  registerAuthIpc({
+    resolveReadableFile: (sender, filePath) =>
+      canvasFileAccess.resolveReadableFile(
+        sender as CanvasFileAccessGrantSender,
+        filePath,
+        resolveTrustedCanvasProjectRoot(sender) ?? undefined,
+      ),
+  })
 
-  // ─── Built-in Terminal Panel (session-scoped PTY dock) ───────────────────────
-  registerTerminalIpc()
+  registerProviderFilesIpc({
+    getProfile: async (id) =>
+      (await getProviderService().listProviders()).find((profile) => profile.id === id),
+    getApiKey: async (id) => getProviderService().getProviderApiKey(id),
+    resolveReadableFile: (sender, filePath) =>
+      canvasFileAccess.resolveReadableFile(
+        sender,
+        filePath,
+        resolveTrustedCanvasProjectRoot(sender) ?? undefined,
+      ),
+  })
 
   // ─── Provider 编辑辅助通道（如 reveal-key）注册入口 ─────────────────────
 
   // ─── Spark 平台官方模型（NewAPI 受管 Provider）──────────────────────────
   registerPlatformModelIpc()
-
-  // ─── GitHub Connector 持久化与验证通道 ─────────────────────────────────
-  registerGitHubConnectorIpc()
 
   log.info('All IPC handlers registered')
 }
@@ -7901,15 +7414,15 @@ function parseHookConfig(
 function getNodeDefaultTitle(node: HookNode): string {
   switch (node) {
     case 'permission_request':
-      return 'SparkWork - 权限请求'
+      return `${APP_NAME} - 权限请求`
     case 'ask_user_question':
-      return 'SparkWork - 需要您的输入'
+      return `${APP_NAME} - 需要您的输入`
     case 'session_end':
-      return 'SparkWork - 任务完成'
+      return `${APP_NAME} - 任务完成`
     case 'session_fail':
-      return 'SparkWork - 任务失败'
+      return `${APP_NAME} - 任务失败`
     default:
-      return 'SparkWork'
+      return APP_NAME
   }
 }
 

@@ -16,6 +16,7 @@ import { request as httpRequest } from 'node:http'
 import readline from 'node:readline'
 
 const BRIDGE_PORT = Number(process.env.SPARK_PLATFORM_BRIDGE_PORT || 0)
+const BRIDGE_TOKEN = (process.env.SPARK_PLATFORM_MANAGEMENT_BRIDGE_TOKEN || '').trim()
 const BRIDGE_HOST = '127.0.0.1'
 const SESSION_ID = process.env.SPARK_SESSION_ID || ''
 
@@ -37,6 +38,10 @@ function error(id, code, message) {
 
 function rpc(method, params) {
   return new Promise((resolve, reject) => {
+    if (!BRIDGE_TOKEN) {
+      reject(new Error('Platform bridge token not configured'))
+      return
+    }
     const body = JSON.stringify({ method, params })
     const options = {
       hostname: BRIDGE_HOST,
@@ -46,6 +51,7 @@ function rpc(method, params) {
       headers: {
         'Content-Type': 'application/json',
         'Content-Length': Buffer.byteLength(body),
+        Authorization: `Bearer ${BRIDGE_TOKEN}`,
       },
     }
 
@@ -79,7 +85,8 @@ function toolDefinitions() {
     // ── Skills ──
     {
       name: 'skills_list',
-      description: '列出所有已安装的 Skill（技能）。返回每个技能的 ID、名称、描述、分类、版本、作者和启用状态。',
+      description:
+        '列出所有已安装的 Skill（技能）。返回每个技能的 ID、名称、描述、分类、版本、作者和启用状态。',
       inputSchema: {
         type: 'object',
         properties: {},
@@ -87,7 +94,8 @@ function toolDefinitions() {
     },
     {
       name: 'skills_load',
-      description: '加载某个技能的完整指令（SKILL.md 正文）。系统提示里只给出技能目录（id+名称+描述）；当你判断某个技能对当前任务有用时，调用本工具拿到它的完整操作指令后再执行。这是技能"渐进式披露"的加载入口。',
+      description:
+        '加载某个技能的完整指令（SKILL.md 正文）。系统提示里只给出技能目录（id+名称+描述）；当你判断某个技能对当前任务有用时，调用本工具拿到它的完整操作指令后再执行。这是技能"渐进式披露"的加载入口。',
       inputSchema: {
         type: 'object',
         required: ['id'],
@@ -98,7 +106,8 @@ function toolDefinitions() {
     },
     {
       name: 'skills_search',
-      description: '搜索可安装的技能（聚合远程技能商店 + 内置精选目录）。返回的每个技能都带 registryId 和 id 字段，安装时原样回传即可。内置精选目录（如 ppt-master、playwright）的 registryId 为 "catalog"。',
+      description:
+        '搜索可安装的技能（聚合远程技能商店 + 内置精选目录）。返回的每个技能都带 registryId 和 id 字段，安装时原样回传即可。内置精选目录（如 ppt-master、playwright）的 registryId 为 "catalog"。',
       inputSchema: {
         type: 'object',
         required: ['query'],
@@ -110,25 +119,29 @@ function toolDefinitions() {
     },
     {
       name: 'skills_install',
-      description: '安装一个技能。传入 skills_search 返回的 registryId 和 remoteSkillId（或 id），安装后落盘并出现在已安装列表，应用内即刻可用。registryId 和 remoteSkillId 都直接取自搜索结果，无需手工拼接。',
+      description:
+        '安装一个技能。传入 skills_search 返回的 registryId 和 remoteSkillId（或 id），安装后落盘并出现在已安装列表，应用内即刻可用。registryId 和 remoteSkillId 都直接取自搜索结果，无需手工拼接。',
       inputSchema: {
         type: 'object',
         required: ['remoteSkillId', 'registryId'],
         properties: {
           remoteSkillId: {
             type: 'string',
-            description: '远程技能 ID。直接传 skills_search 返回的 id 字段即可（如 "skillhub:tapd-api" 或 "catalog:ppt-master"），代码会自动剥掉 "registryId:" 前缀；也可只传 slug 部分（如 "tapd-api"）。',
+            description:
+              '远程技能 ID。直接传 skills_search 返回的 id 字段即可（如 "skillhub:tapd-api" 或 "catalog:ppt-master"），代码会自动剥掉 "registryId:" 前缀；也可只传 slug 部分（如 "tapd-api"）。',
           },
           registryId: {
             type: 'string',
-            description: '注册表 ID。必须用 skills_search 返回的 registryId 字段（小写），不要用显示名 registryName。常见值：skillhub / skillsmp / catalog（内置精选目录）。代码层对大小写和常见显示名已做容错。',
+            description:
+              '注册表 ID。必须用 skills_search 返回的 registryId 字段（小写），不要用显示名 registryName。常见值：skillhub / skillsmp / catalog（内置精选目录）。代码层对大小写和常见显示名已做容错。',
           },
         },
       },
     },
     {
       name: 'skills_search_github',
-      description: '在 GitHub 上搜索包含 SKILL.md 的技能仓库。返回 repo（owner/name）、名称、描述、作者、star 数、默认分支。用于在内置市场之外帮用户从 GitHub 找技能。',
+      description:
+        '在 GitHub 上搜索包含 SKILL.md 的技能仓库。返回 repo（owner/name）、名称、描述、作者、star 数、默认分支。用于在内置市场之外帮用户从 GitHub 找技能。',
       inputSchema: {
         type: 'object',
         required: ['query'],
@@ -140,7 +153,8 @@ function toolDefinitions() {
     },
     {
       name: 'skills_install_github',
-      description: '从 GitHub 仓库安装技能：定位含 SKILL.md 的目录并把该目录子树落盘到应用，安装后应用内即刻可用。可选 ref（分支/标签/commit）与 path（多技能仓库内的技能目录，如 "skills/pdf"）。',
+      description:
+        '从 GitHub 仓库安装技能：定位含 SKILL.md 的目录并把该目录子树落盘到应用，安装后应用内即刻可用。可选 ref（分支/标签/commit）与 path（多技能仓库内的技能目录，如 "skills/pdf"）。',
       inputSchema: {
         type: 'object',
         required: ['repo'],
@@ -177,7 +191,8 @@ function toolDefinitions() {
     // ── MCP Servers ──
     {
       name: 'mcp_list',
-      description: '列出所有 MCP 服务器配置。返回每个服务器的 ID、名称、作用域、启用状态和配置信息。',
+      description:
+        '列出所有 MCP 服务器配置。返回每个服务器的 ID、名称、作用域、启用状态和配置信息。',
       inputSchema: {
         type: 'object',
         properties: {},
@@ -185,14 +200,24 @@ function toolDefinitions() {
     },
     {
       name: 'mcp_create',
-      description: '创建一个新的 MCP 服务器配置。支持 stdio、http、sse 三种传输类型。创建后需启动才能使用。',
+      description:
+        '创建一个新的 MCP 服务器配置。支持 stdio、http、sse 三种传输类型。创建后需启动才能使用。',
       inputSchema: {
         type: 'object',
         required: ['name'],
         properties: {
           name: { type: 'string', description: 'MCP 服务器名称' },
-          scope: { type: 'string', description: '作用域：system/user/project/team/session，默认 user', enum: ['system', 'user', 'project', 'team', 'session'] },
-          configJson: { type: 'object', description: '服务器配置。用 type 声明传输：\n- type:"http"（远程 Streamable HTTP，当前标准）或 "sse"（旧标准）→ 必须提供 url（http/https），可选 headers。\n- type:"stdio"（本地进程）→ 必须提供 command，可选 args(数组)/env(对象)。\n务必让 type 与字段匹配：填了 url 就用 http（不要写成 stdio），否则会被判为配置无效而拒绝。', additionalProperties: true },
+          scope: {
+            type: 'string',
+            description: '作用域：system/user/project/team/session，默认 user',
+            enum: ['system', 'user', 'project', 'team', 'session'],
+          },
+          configJson: {
+            type: 'object',
+            description:
+              '服务器配置。用 type 声明传输：\n- type:"http"（远程 Streamable HTTP，当前标准）或 "sse"（旧标准）→ 必须提供 url（http/https），可选 headers。\n- type:"stdio"（本地进程）→ 必须提供 command，可选 args(数组)/env(对象)。\n务必让 type 与字段匹配：填了 url 就用 http（不要写成 stdio），否则会被判为配置无效而拒绝。',
+            additionalProperties: true,
+          },
           enabled: { type: 'boolean', description: '是否启用，默认 true' },
         },
       },
@@ -206,7 +231,12 @@ function toolDefinitions() {
         properties: {
           id: { type: 'string', description: '要更新的 MCP 服务器 ID' },
           name: { type: 'string', description: '新名称' },
-          configJson: { type: 'object', description: '新的配置内容。传输字段规则同 mcp_create：http/sse 需 url，stdio 需 command，type 必须与字段匹配，否则会被拒绝。', additionalProperties: true },
+          configJson: {
+            type: 'object',
+            description:
+              '新的配置内容。传输字段规则同 mcp_create：http/sse 需 url，stdio 需 command，type 必须与字段匹配，否则会被拒绝。',
+            additionalProperties: true,
+          },
           enabled: { type: 'boolean', description: '是否启用' },
         },
       },
@@ -236,7 +266,8 @@ function toolDefinitions() {
     // ── Providers ──
     {
       name: 'providers_list',
-      description: '列出所有 Provider（AI 模型供应商）配置。返回名称、类型、默认模型、是否有 API Key 等信息。注意：不会返回 API Key 明文。',
+      description:
+        '列出所有 Provider（AI 模型供应商）配置。返回名称、类型、默认模型、是否有 API Key 等信息。注意：不会返回 API Key 明文。',
       inputSchema: {
         type: 'object',
         properties: {},
@@ -251,8 +282,16 @@ function toolDefinitions() {
         properties: {
           id: { type: 'string', description: '可选的自定义 ID' },
           name: { type: 'string', description: 'Provider 名称，如 "OpenAI"' },
-          providerType: { type: 'string', description: 'API 协议类型：anthropic 或 openai', enum: ['anthropic', 'openai'] },
-          config: { type: 'object', description: '模型配置，包含 defaultModel、apiEndpoint 等', additionalProperties: true },
+          providerType: {
+            type: 'string',
+            description: 'API 协议类型：anthropic 或 openai',
+            enum: ['anthropic', 'openai'],
+          },
+          config: {
+            type: 'object',
+            description: '模型配置，包含 defaultModel、apiEndpoint 等',
+            additionalProperties: true,
+          },
           keystoreRef: { type: 'string', description: 'Keychain 中存储 API Key 的引用' },
           isDefault: { type: 'boolean', description: '是否设为默认 Provider' },
         },
@@ -296,7 +335,8 @@ function toolDefinitions() {
     },
     {
       name: 'providers_get',
-      description: '获取单个 Provider 的完整详情，包含默认模型、可用模型列表、API 端点、是否为默认供应商等。',
+      description:
+        '获取单个 Provider 的完整详情，包含默认模型、可用模型列表、API 端点、是否为默认供应商等。',
       inputSchema: {
         type: 'object',
         required: ['id'],
@@ -358,9 +398,17 @@ function toolDefinitions() {
         properties: {
           name: { type: 'string', description: 'Workflow 名称' },
           description: { type: 'string', description: '描述' },
-          scope: { type: 'string', description: '作用域：system/user/project，默认 system', enum: ['system', 'user', 'project'] },
+          scope: {
+            type: 'string',
+            description: '作用域：system/user/project，默认 system',
+            enum: ['system', 'user', 'project'],
+          },
           version: { type: 'string', description: '版本号，默认 1.0.0' },
-          status: { type: 'string', description: '状态：draft/active/archived', enum: ['draft', 'active', 'archived'] },
+          status: {
+            type: 'string',
+            description: '状态：draft/active/archived',
+            enum: ['draft', 'active', 'archived'],
+          },
           tags: { type: 'array', items: { type: 'string' }, description: '标签列表' },
           graph: { type: 'object', description: '流程图数据（DAG）', additionalProperties: true },
         },
@@ -408,7 +456,8 @@ function toolDefinitions() {
     },
     {
       name: 'agents_get',
-      description: '获取单个 Agent 的完整配置详情，包含 provider、model、prompt、skills、MCP 服务器等。',
+      description:
+        '获取单个 Agent 的完整配置详情，包含 provider、model、prompt、skills、MCP 服务器等。',
       inputSchema: {
         type: 'object',
         required: ['id'],
@@ -419,34 +468,69 @@ function toolDefinitions() {
     },
     {
       name: 'agents_create',
-      description: '创建一个新的 Agent。可指定名称、描述、适配器类型、权限模式、系统提示词、关联的 Workflow、Provider 等。',
+      description:
+        '创建一个新的 Agent。可指定名称、描述、适配器类型、权限模式、系统提示词、关联的 Workflow、Provider 等。',
       inputSchema: {
         type: 'object',
         required: ['name'],
         properties: {
           name: { type: 'string', description: 'Agent 名称' },
           description: { type: 'string', description: '描述' },
-          agentAdapter: { type: 'string', description: '适配器类型：claude-sdk/claude/codex', enum: ['claude-sdk', 'claude', 'codex'] },
+          agentAdapter: {
+            type: 'string',
+            description: '适配器类型：claude-sdk/claude/codex',
+            enum: ['claude-sdk', 'claude', 'codex'],
+          },
           permissionMode: { type: 'string', description: '权限模式' },
-          reasoningEffort: { type: 'string', description: '推理强度：medium/high/xhigh/max', enum: ['medium', 'high', 'xhigh', 'max'] },
+          reasoningEffort: {
+            type: 'string',
+            description: '推理强度：medium/high/xhigh/max',
+            enum: ['medium', 'high', 'xhigh', 'max'],
+          },
           prompt: { type: 'string', description: '系统提示词' },
-          skillIds: { type: 'array', items: { type: 'string' }, description: '关联的 Skill ID 列表' },
-          mcpServerIds: { type: 'array', items: { type: 'string' }, description: '关联的 MCP 服务器 ID 列表' },
-          workflowId: { type: 'string', description: '关联的 Workflow ID，绑定后 Agent 会按该工作流执行' },
-          providerProfileId: { type: 'string', description: '关联的 Provider Profile ID，指定使用哪个 AI 供应商' },
+          skillIds: {
+            type: 'array',
+            items: { type: 'string' },
+            description: '关联的 Skill ID 列表',
+          },
+          mcpServerIds: {
+            type: 'array',
+            items: { type: 'string' },
+            description: '关联的 MCP 服务器 ID 列表',
+          },
+          workflowId: {
+            type: 'string',
+            description: '关联的 Workflow ID，绑定后 Agent 会按该工作流执行',
+          },
+          providerProfileId: {
+            type: 'string',
+            description: '关联的 Provider Profile ID，指定使用哪个 AI 供应商',
+          },
           modelId: { type: 'string', description: '模型 ID，指定使用的具体模型' },
           ruleIds: { type: 'array', items: { type: 'string' }, description: '关联的规则 ID 列表' },
-          hookConfig: { type: 'object', description: 'Hook 配置，定义事件回调', additionalProperties: true },
-          metadata: { type: 'object', description: '元数据（如 avatar 等）', additionalProperties: true },
+          hookConfig: {
+            type: 'object',
+            description: 'Hook 配置，定义事件回调',
+            additionalProperties: true,
+          },
+          metadata: {
+            type: 'object',
+            description: '元数据（如 avatar 等）',
+            additionalProperties: true,
+          },
           isDefault: { type: 'boolean', description: '是否设为默认 Agent' },
-          builtIn: { type: 'boolean', description: '是否标记为内置 Agent（内置 Agent 不可删除，可跨项目复用）' },
+          builtIn: {
+            type: 'boolean',
+            description: '是否标记为内置 Agent（内置 Agent 不可删除，可跨项目复用）',
+          },
           enabled: { type: 'boolean', description: '是否启用，默认 true' },
         },
       },
     },
     {
       name: 'agents_update',
-      description: '更新 Agent 的配置。可修改名称、提示词、关联的 skills、MCP 服务器、Workflow、Provider 等。',
+      description:
+        '更新 Agent 的配置。可修改名称、提示词、关联的 skills、MCP 服务器、Workflow、Provider 等。',
       inputSchema: {
         type: 'object',
         required: ['id'],
@@ -456,10 +540,18 @@ function toolDefinitions() {
           description: { type: 'string', description: '新描述' },
           agentAdapter: { type: 'string', description: '新适配器类型' },
           permissionMode: { type: 'string', description: '新权限模式' },
-          reasoningEffort: { type: 'string', description: '新推理强度：medium/high/xhigh/max', enum: ['medium', 'high', 'xhigh', 'max'] },
+          reasoningEffort: {
+            type: 'string',
+            description: '新推理强度：medium/high/xhigh/max',
+            enum: ['medium', 'high', 'xhigh', 'max'],
+          },
           prompt: { type: 'string', description: '新系统提示词' },
           skillIds: { type: 'array', items: { type: 'string' }, description: '新的 Skill ID 列表' },
-          mcpServerIds: { type: 'array', items: { type: 'string' }, description: '新的 MCP 服务器 ID 列表' },
+          mcpServerIds: {
+            type: 'array',
+            items: { type: 'string' },
+            description: '新的 MCP 服务器 ID 列表',
+          },
           workflowId: { type: 'string', description: '关联的 Workflow ID，设为 null 可解绑' },
           providerProfileId: { type: 'string', description: '关联的 Provider Profile ID' },
           modelId: { type: 'string', description: '模型 ID' },
@@ -467,7 +559,11 @@ function toolDefinitions() {
           hookConfig: { type: 'object', description: 'Hook 配置', additionalProperties: true },
           metadata: { type: 'object', description: '元数据', additionalProperties: true },
           isDefault: { type: 'boolean', description: '是否设为默认 Agent' },
-          builtIn: { type: 'boolean', description: '是否标记为内置 Agent（内置 Agent 不可删除，可跨项目复用）。设为 true 后该 Agent 会出现在系统内置 Agent 列表中' },
+          builtIn: {
+            type: 'boolean',
+            description:
+              '是否标记为内置 Agent（内置 Agent 不可删除，可跨项目复用）。设为 true 后该 Agent 会出现在系统内置 Agent 列表中',
+          },
           enabled: { type: 'boolean', description: '是否启用' },
         },
       },
@@ -487,7 +583,8 @@ function toolDefinitions() {
     // ── Teams ──
     {
       name: 'teams_list',
-      description: '列出长期团队定义（Teams）。返回团队 ID、名称、主持人 Agent、成员 Agent、嵌套设置、启用状态等。',
+      description:
+        '列出长期团队定义（Teams）。返回团队 ID、名称、主持人 Agent、成员 Agent、嵌套设置、启用状态等。',
       inputSchema: {
         type: 'object',
         properties: {
@@ -508,30 +605,50 @@ function toolDefinitions() {
     },
     {
       name: 'teams_create',
-      description: '创建长期团队定义。团队由一个主持人 Agent 和若干成员 Agent 组成，可在会话中作为已保存团队启用。',
+      description:
+        '创建长期团队定义。团队由一个主持人 Agent 和若干成员 Agent 组成，可在会话中作为已保存团队启用。',
       inputSchema: {
         type: 'object',
         required: ['name', 'hostAgentId'],
         properties: {
           name: { type: 'string', description: '团队名称' },
           description: { type: 'string', description: '团队描述' },
-          hostAgentId: { type: 'string', description: '主持人 Agent ID。创建前建议先调用 agents_list 获取可用 Agent。' },
+          hostAgentId: {
+            type: 'string',
+            description: '主持人 Agent ID。创建前建议先调用 agents_list 获取可用 Agent。',
+          },
           memberAgentIds: {
             type: 'array',
             items: { type: 'string' },
             description: '成员 Agent ID 列表。若包含 hostAgentId，系统会自动剔除。',
           },
-          maxDepth: { type: 'number', minimum: 1, maximum: 3, description: '团队嵌套调用最大深度，1-3，默认 1' },
-          allowNesting: { type: 'boolean', description: '是否允许成员继续调用其他成员，默认 false' },
-          prompt: { type: 'string', description: '团队专属 system prompt 片段，会追加到 Team Roster 后' },
+          maxDepth: {
+            type: 'number',
+            minimum: 1,
+            maximum: 3,
+            description: '团队嵌套调用最大深度，1-3，默认 1',
+          },
+          allowNesting: {
+            type: 'boolean',
+            description: '是否允许成员继续调用其他成员，默认 false',
+          },
+          prompt: {
+            type: 'string',
+            description: '团队专属 system prompt 片段，会追加到 Team Roster 后',
+          },
           enabled: { type: 'boolean', description: '是否启用，默认 true' },
-          metadata: { type: 'object', description: '团队元数据（如 avatar 等）', additionalProperties: true },
+          metadata: {
+            type: 'object',
+            description: '团队元数据（如 avatar 等）',
+            additionalProperties: true,
+          },
         },
       },
     },
     {
       name: 'teams_update',
-      description: '更新长期团队定义。可修改名称、描述、主持人、成员、嵌套设置、团队 prompt、启用状态和元数据。',
+      description:
+        '更新长期团队定义。可修改名称、描述、主持人、成员、嵌套设置、团队 prompt、启用状态和元数据。',
       inputSchema: {
         type: 'object',
         required: ['id'],
@@ -545,7 +662,12 @@ function toolDefinitions() {
             items: { type: 'string' },
             description: '新的成员 Agent ID 列表（整体替换）。若包含主持人，系统会自动剔除。',
           },
-          maxDepth: { type: 'number', minimum: 1, maximum: 3, description: '新的最大嵌套深度，1-3' },
+          maxDepth: {
+            type: 'number',
+            minimum: 1,
+            maximum: 3,
+            description: '新的最大嵌套深度，1-3',
+          },
           allowNesting: { type: 'boolean', description: '是否允许嵌套调用' },
           prompt: { type: 'string', description: '新的团队专属 prompt' },
           enabled: { type: 'boolean', description: '是否启用' },
@@ -568,27 +690,53 @@ function toolDefinitions() {
     // ── Spark Install Artifacts ──
     {
       name: 'artifacts_list',
-      description: '查询 Spark 自建安装源 manifest 中的技能包、运行时安装包和离线依赖包。缺少 Python/Node.js/依赖库时，先用本工具按 type/platform/arch/query 查找自建源，再考虑国内镜像或外网安装。',
+      description:
+        '查询 Spark 自建安装源 manifest 中的技能包、运行时安装包和离线依赖包。缺少 Python/Node.js/依赖库时，先用本工具按 type/platform/arch/query 查找自建源，再考虑国内镜像或外网安装。',
       inputSchema: {
         type: 'object',
         properties: {
-          type: { type: 'string', description: '可选：skill/runtime/python-wheelhouse/npm-store/archive', enum: ['skill', 'runtime', 'python-wheelhouse', 'npm-store', 'archive'] },
-          platform: { type: 'string', description: '可选：darwin/linux/win32/any', enum: ['darwin', 'linux', 'win32', 'any'] },
-          arch: { type: 'string', description: '可选：x64/arm64/any', enum: ['x64', 'arm64', 'any'] },
-          query: { type: 'string', description: '可选关键词，如 python、nodejs、ppt-master、wheelhouse' },
-          manifestUrl: { type: 'string', description: '可选 manifest URL；默认使用 Spark 官方自建安装源' },
+          type: {
+            type: 'string',
+            description: '可选：skill/runtime/python-wheelhouse/npm-store/archive',
+            enum: ['skill', 'runtime', 'python-wheelhouse', 'npm-store', 'archive'],
+          },
+          platform: {
+            type: 'string',
+            description: '可选：darwin/linux/win32/any',
+            enum: ['darwin', 'linux', 'win32', 'any'],
+          },
+          arch: {
+            type: 'string',
+            description: '可选：x64/arm64/any',
+            enum: ['x64', 'arm64', 'any'],
+          },
+          query: {
+            type: 'string',
+            description: '可选关键词，如 python、nodejs、ppt-master、wheelhouse',
+          },
+          manifestUrl: {
+            type: 'string',
+            description: '可选 manifest URL；默认使用 Spark 官方自建安装源',
+          },
         },
       },
     },
     {
       name: 'artifacts_resolve',
-      description: '按 artifactId 解析 Spark 自建安装源中的单个安装包，返回完整下载 URL、sha256、平台、大小和说明。执行安装命令前应先向用户说明计划并获得同意。',
+      description:
+        '按 artifactId 解析 Spark 自建安装源中的单个安装包，返回完整下载 URL、sha256、平台、大小和说明。执行安装命令前应先向用户说明计划并获得同意。',
       inputSchema: {
         type: 'object',
         required: ['artifactId'],
         properties: {
-          artifactId: { type: 'string', description: 'manifest 中的 artifact id，如 runtime.python-3.11.9.win32-x64' },
-          manifestUrl: { type: 'string', description: '可选 manifest URL；默认使用 Spark 官方自建安装源' },
+          artifactId: {
+            type: 'string',
+            description: 'manifest 中的 artifact id，如 runtime.python-3.11.9.win32-x64',
+          },
+          manifestUrl: {
+            type: 'string',
+            description: '可选 manifest URL；默认使用 Spark 官方自建安装源',
+          },
         },
       },
     },
@@ -600,12 +748,23 @@ function toolDefinitions() {
       inputSchema: {
         type: 'object',
         properties: {
-          status: { type: 'string', description: '按状态过滤：todo/in-progress/done/accepted/closed/bug-fix', enum: ['todo', 'in-progress', 'done', 'accepted', 'closed', 'bug-fix'] },
-          priority: { type: 'string', description: '按优先级过滤：low/medium/high/urgent', enum: ['low', 'medium', 'high', 'urgent'] },
+          status: {
+            type: 'string',
+            description: '按状态过滤：todo/in-progress/done/accepted/closed/bug-fix',
+            enum: ['todo', 'in-progress', 'done', 'accepted', 'closed', 'bug-fix'],
+          },
+          priority: {
+            type: 'string',
+            description: '按优先级过滤：low/medium/high/urgent',
+            enum: ['low', 'medium', 'high', 'urgent'],
+          },
           assignee: { type: 'string', description: '按负责人过滤（模糊匹配）' },
           project: { type: 'string', description: '按项目过滤（精确匹配项目名称）' },
           query: { type: 'string', description: '搜索关键词（匹配标题、描述）' },
-          includeDeleted: { type: 'boolean', description: '是否包含已删除的任务（回收站），默认 false' },
+          includeDeleted: {
+            type: 'boolean',
+            description: '是否包含已删除的任务（回收站），默认 false',
+          },
         },
       },
     },
@@ -629,24 +788,44 @@ function toolDefinitions() {
         properties: {
           title: { type: 'string', description: '任务标题' },
           description: { type: 'string', description: '任务描述' },
-          status: { type: 'string', description: '状态，默认 todo', enum: ['todo', 'in-progress', 'done', 'accepted', 'closed', 'bug-fix'] },
-          priority: { type: 'string', description: '优先级，默认 medium', enum: ['low', 'medium', 'high', 'urgent'] },
+          status: {
+            type: 'string',
+            description: '状态，默认 todo',
+            enum: ['todo', 'in-progress', 'done', 'accepted', 'closed', 'bug-fix'],
+          },
+          priority: {
+            type: 'string',
+            description: '优先级，默认 medium',
+            enum: ['low', 'medium', 'high', 'urgent'],
+          },
           assignee: { type: 'string', description: '负责人' },
           project: { type: 'string', description: '所属项目' },
           tags: { type: 'array', items: { type: 'string' }, description: '标签列表' },
           dueDate: { type: 'string', description: '截止日期（ISO 格式，如 2025-12-31）' },
-          processingAgent: { type: 'string', description: '处理 Agent，指定执行任务的 agent 或团队（格式：agent 名称 或 team:团队名称）' },
+          processingAgent: {
+            type: 'string',
+            description:
+              '处理 Agent，指定执行任务的 agent 或团队（格式：agent 名称 或 team:团队名称）',
+          },
           acceptanceCriteria: { type: 'string', description: '验收条件，任务完成后测试验收的标准' },
-          testAgent: { type: 'string', description: '测试 Agent，可选指定测试的 agent（格式：agent 名称 或 team:团队名称）' },
+          testAgent: {
+            type: 'string',
+            description: '测试 Agent，可选指定测试的 agent（格式：agent 名称 或 team:团队名称）',
+          },
           attachments: {
             type: 'array',
-            description: '附件列表（图片或文件），每个元素包含 id / type / name / path 字段；type 为 image 时还可包含 previewPath',
+            description:
+              '附件列表（图片或文件），每个元素包含 id / type / name / path 字段；type 为 image 时还可包含 previewPath',
             items: {
               type: 'object',
               required: ['id', 'type', 'name', 'path'],
               properties: {
                 id: { type: 'string', description: '附件唯一 ID' },
-                type: { type: 'string', enum: ['image', 'file'], description: '附件类型：image 或 file' },
+                type: {
+                  type: 'string',
+                  enum: ['image', 'file'],
+                  description: '附件类型：image 或 file',
+                },
                 name: { type: 'string', description: '显示名' },
                 path: { type: 'string', description: '附件绝对路径' },
                 previewPath: { type: 'string', description: '图片附件可选的预览路径（缩略图等）' },
@@ -666,24 +845,43 @@ function toolDefinitions() {
           id: { type: 'string', description: '任务 ID' },
           title: { type: 'string', description: '新标题' },
           description: { type: 'string', description: '新描述' },
-          status: { type: 'string', description: '新状态', enum: ['todo', 'in-progress', 'done', 'accepted', 'closed', 'bug-fix'] },
-          priority: { type: 'string', description: '新优先级', enum: ['low', 'medium', 'high', 'urgent'] },
+          status: {
+            type: 'string',
+            description: '新状态',
+            enum: ['todo', 'in-progress', 'done', 'accepted', 'closed', 'bug-fix'],
+          },
+          priority: {
+            type: 'string',
+            description: '新优先级',
+            enum: ['low', 'medium', 'high', 'urgent'],
+          },
           assignee: { type: 'string', description: '新负责人' },
           project: { type: 'string', description: '新所属项目' },
           tags: { type: 'array', items: { type: 'string' }, description: '新标签列表（完全替换）' },
           dueDate: { type: 'string', description: '新截止日期' },
-          processingAgent: { type: 'string', description: '新处理 Agent（格式：agent 名称 或 team:团队名称）' },
+          processingAgent: {
+            type: 'string',
+            description: '新处理 Agent（格式：agent 名称 或 team:团队名称）',
+          },
           acceptanceCriteria: { type: 'string', description: '新验收条件' },
-          testAgent: { type: 'string', description: '新测试 Agent（格式：agent 名称 或 team:团队名称）' },
+          testAgent: {
+            type: 'string',
+            description: '新测试 Agent（格式：agent 名称 或 team:团队名称）',
+          },
           attachments: {
             type: 'array',
-            description: '附件列表（整体替换现有附件），每个元素包含 id / type / name / path 字段；type 为 image 时还可包含 previewPath',
+            description:
+              '附件列表（整体替换现有附件），每个元素包含 id / type / name / path 字段；type 为 image 时还可包含 previewPath',
             items: {
               type: 'object',
               required: ['id', 'type', 'name', 'path'],
               properties: {
                 id: { type: 'string', description: '附件唯一 ID' },
-                type: { type: 'string', enum: ['image', 'file'], description: '附件类型：image 或 file' },
+                type: {
+                  type: 'string',
+                  enum: ['image', 'file'],
+                  description: '附件类型：image 或 file',
+                },
                 name: { type: 'string', description: '显示名' },
                 path: { type: 'string', description: '附件绝对路径' },
                 previewPath: { type: 'string', description: '图片附件可选的预览路径' },
@@ -720,8 +918,16 @@ function toolDefinitions() {
               properties: {
                 title: { type: 'string', description: '任务标题' },
                 description: { type: 'string', description: '任务描述' },
-                status: { type: 'string', description: '状态', enum: ['todo', 'in-progress', 'done', 'accepted', 'closed', 'bug-fix'] },
-                priority: { type: 'string', description: '优先级', enum: ['low', 'medium', 'high', 'urgent'] },
+                status: {
+                  type: 'string',
+                  description: '状态',
+                  enum: ['todo', 'in-progress', 'done', 'accepted', 'closed', 'bug-fix'],
+                },
+                priority: {
+                  type: 'string',
+                  description: '优先级',
+                  enum: ['low', 'medium', 'high', 'urgent'],
+                },
                 assignee: { type: 'string', description: '负责人' },
                 project: { type: 'string', description: '所属项目' },
                 tags: { type: 'array', items: { type: 'string' }, description: '标签' },
@@ -767,7 +973,10 @@ function toolDefinitions() {
                 id: { type: 'string', description: '任务 ID' },
                 title: { type: 'string' },
                 description: { type: 'string' },
-                status: { type: 'string', enum: ['todo', 'in-progress', 'done', 'accepted', 'closed', 'bug-fix'] },
+                status: {
+                  type: 'string',
+                  enum: ['todo', 'in-progress', 'done', 'accepted', 'closed', 'bug-fix'],
+                },
                 priority: { type: 'string', enum: ['low', 'medium', 'high', 'urgent'] },
                 assignee: { type: 'string' },
                 project: { type: 'string' },
@@ -1106,7 +1315,8 @@ function toolDefinitions() {
     // ── Session Management ──
     {
       name: 'sessions_get',
-      description: '获取当前会话的运行时状态，包括当前模型、供应商、会话模式、权限模式、推理强度、可用模型列表等。用于 Agent 自查当前运行参数。',
+      description:
+        '获取当前会话的运行时状态，包括当前模型、供应商、会话模式、权限模式、推理强度、可用模型列表等。用于 Agent 自查当前运行参数。',
       inputSchema: {
         type: 'object',
         properties: {},
@@ -1119,13 +1329,17 @@ function toolDefinitions() {
         type: 'object',
         required: ['modelId'],
         properties: {
-          modelId: { type: 'string', description: '要切换到的模型 ID，如 "claude-sonnet-4-6"、"claude-opus-4-7"' },
+          modelId: {
+            type: 'string',
+            description: '要切换到的模型 ID，如 "claude-sonnet-4-6"、"claude-opus-4-7"',
+          },
         },
       },
     },
     {
       name: 'sessions_switch_provider',
-      description: '切换当前会话使用的 AI 供应商（Provider）。切换后模型也会变更到新供应商的默认模型。',
+      description:
+        '切换当前会话使用的 AI 供应商（Provider）。切换后模型也会变更到新供应商的默认模型。',
       inputSchema: {
         type: 'object',
         required: ['providerProfileId'],
@@ -1136,34 +1350,49 @@ function toolDefinitions() {
     },
     {
       name: 'sessions_switch_mode',
-      description: '切换当前会话的聊天模式。不同模式影响 Agent 的行为方式：agent（正常对话）、ask（仅回答不执行）、edit（编辑模式）、review（代码审查模式）。',
+      description:
+        '切换当前会话的聊天模式。不同模式影响 Agent 的行为方式：agent（正常对话）、ask（仅回答不执行）、edit（编辑模式）、review（代码审查模式）。',
       inputSchema: {
         type: 'object',
         required: ['chatMode'],
         properties: {
-          chatMode: { type: 'string', description: '聊天模式', enum: ['agent', 'ask', 'edit', 'review'] },
+          chatMode: {
+            type: 'string',
+            description: '聊天模式',
+            enum: ['agent', 'ask', 'edit', 'review'],
+          },
         },
       },
     },
     {
       name: 'sessions_switch_permission',
-      description: '切换当前会话的权限模式。权限模式控制 Agent 能自动执行哪些操作。default（需确认高风险操作）、claude-auto-edits（自动编辑文件，高风险仍需确认）、bypassPermissions（完全自动，慎用）。',
+      description:
+        '切换当前会话的权限模式。权限模式控制 Agent 能自动执行哪些操作。default（需确认高风险操作）、claude-auto-edits（自动编辑文件，高风险仍需确认）、bypassPermissions（完全自动，慎用）。',
       inputSchema: {
         type: 'object',
         required: ['permissionMode'],
         properties: {
-          permissionMode: { type: 'string', description: '权限模式', enum: ['default', 'plan', 'claude-auto-edits', 'claude-plan', 'bypassPermissions'] },
+          permissionMode: {
+            type: 'string',
+            description: '权限模式',
+            enum: ['default', 'plan', 'claude-auto-edits', 'claude-plan', 'bypassPermissions'],
+          },
         },
       },
     },
     {
       name: 'sessions_switch_reasoning_effort',
-      description: '切换当前会话的推理强度。medium（平衡）、high（深度分析）、xhigh（极致推理）、max（最高推理，消耗更多 token）。',
+      description:
+        '切换当前会话的推理强度。medium（平衡）、high（深度分析）、xhigh（极致推理）、max（最高推理，消耗更多 token）。',
       inputSchema: {
         type: 'object',
         required: ['reasoningEffort'],
         properties: {
-          reasoningEffort: { type: 'string', description: '推理强度', enum: ['medium', 'high', 'xhigh', 'max'] },
+          reasoningEffort: {
+            type: 'string',
+            description: '推理强度',
+            enum: ['medium', 'high', 'xhigh', 'max'],
+          },
         },
       },
     },

@@ -1,5 +1,8 @@
 import { describe, it, expect, afterEach, vi } from 'vitest'
-import { generateCanvasText } from '../../services/canvas-text-generator.js'
+import {
+  generateCanvasText,
+  resolveCanvasTextRequestTimeoutMs,
+} from '../../services/canvas-text-generator.js'
 
 const PNG_DATA_URL =
   'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='
@@ -25,10 +28,57 @@ function stubFetch(
 }
 
 afterEach(() => {
+  vi.useRealTimers()
   vi.unstubAllGlobals()
 })
 
 describe('generateCanvasText multimodal', () => {
+  it('uses a 10 minute default timeout and supports a bounded environment override', () => {
+    expect(resolveCanvasTextRequestTimeoutMs({})).toBe(600_000)
+    expect(resolveCanvasTextRequestTimeoutMs({ SPARK_CANVAS_TEXT_TIMEOUT_MS: '900000' })).toBe(
+      900_000,
+    )
+    expect(resolveCanvasTextRequestTimeoutMs({ SPARK_CANVAS_TEXT_TIMEOUT_MS: '1000' })).toBe(10_000)
+    expect(resolveCanvasTextRequestTimeoutMs({ SPARK_CANVAS_TEXT_TIMEOUT_MS: '99999999' })).toBe(
+      1_800_000,
+    )
+  })
+
+  it('converts an internal abort into an explicit canvas timeout error', async () => {
+    vi.useFakeTimers()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((_url: string, requestInit?: RequestInit) => {
+        return new Promise<Response>((_resolve, reject) => {
+          requestInit?.signal?.addEventListener('abort', () => {
+            reject(new DOMException('This operation was aborted', 'AbortError'))
+          })
+        })
+      }),
+    )
+
+    const pending = generateCanvasText({
+      providerType: 'openai',
+      apiKey: 'sk-x',
+      apiEndpoint: 'https://api.example.com/v1',
+      model: 'gpt-5.4',
+      prompt: '生成剧本',
+      timeoutMs: 25,
+    })
+    const assertion = expect(pending).rejects.toMatchObject({
+      name: 'CanvasTextTimeoutError',
+      code: 'request_timeout',
+      timeoutMs: 25,
+      message: expect.stringContaining('画布文本请求超时'),
+      requestCall: {
+        method: 'POST',
+        url: 'https://api.example.com/v1/chat/completions',
+      },
+    })
+    await vi.advanceTimersByTimeAsync(25)
+    await assertion
+  })
+
   it('OpenAI-compatible: 纯文本时 user content 仍是字符串', async () => {
     const captured = stubFetch({
       choices: [{ message: { content: '一段风格描述' }, finish_reason: 'stop' }],
@@ -43,6 +93,7 @@ describe('generateCanvasText multimodal', () => {
     expect(result.text).toBe('一段风格描述')
     expect(result.finishReason).toBe('stop')
     expect(result.usage).toEqual({ promptTokens: 12, completionTokens: 8, totalTokens: 20 })
+    expect(captured.lastBody().max_tokens).toBe(16_384)
     const messages = captured.lastBody().messages as Array<{ role: string; content: unknown }>
     const user = messages.find((m) => m.role === 'user')!
     expect(user.content).toBe('分析风格')
@@ -57,6 +108,7 @@ describe('generateCanvasText multimodal', () => {
       prompt: '请分析输入图片的视觉风格',
       images: [{ url: 'https://cdn/ref.png' }],
     })
+    expect(captured.lastBody().max_tokens).toBe(16_384)
     const messages = captured.lastBody().messages as Array<{ role: string; content: unknown }>
     const user = messages.find((m) => m.role === 'user')!
     const parts = user.content as Array<Record<string, unknown>>
@@ -74,6 +126,7 @@ describe('generateCanvasText multimodal', () => {
       prompt: '分析风格',
       images: [{ url: 'https://cdn/ref.png' }],
     })
+    expect(captured.lastBody().max_tokens).toBe(16_384)
     const messages = captured.lastBody().messages as Array<{ role: string; content: unknown }>
     const blocks = messages[0]!.content as Array<Record<string, unknown>>
     expect(blocks[0]).toEqual({
@@ -81,6 +134,30 @@ describe('generateCanvasText multimodal', () => {
       source: { type: 'url', url: 'https://cdn/ref.png' },
     })
     expect(blocks[1]).toEqual({ type: 'text', text: '分析风格' })
+  })
+
+  it('Anthropic: 记录 stop_reason 和 token usage，便于识别输出截断', async () => {
+    const captured = stubFetch({
+      content: [{ type: 'text', text: '{"shots":[' }],
+      stop_reason: 'max_tokens',
+      usage: { input_tokens: 4461, output_tokens: 16384, total_tokens: 20845 },
+    })
+    const result = await generateCanvasText({
+      providerType: 'anthropic',
+      apiKey: 'sk-ant',
+      apiEndpoint: 'https://ark.example.com/api/coding',
+      model: 'glm-5.2',
+      prompt: '输出分镜 JSON',
+      maxTokens: 65_536,
+    })
+
+    expect(captured.lastBody().max_tokens).toBe(65_536)
+    expect(result.finishReason).toBe('max_tokens')
+    expect(result.usage).toEqual({
+      promptTokens: 4461,
+      completionTokens: 16384,
+      totalTokens: 20845,
+    })
   })
 
   it('Anthropic: base64 dataUrl 图片转成 base64 source', async () => {
@@ -100,6 +177,38 @@ describe('generateCanvasText multimodal', () => {
     expect(image.source.media_type).toBe('image/png')
     expect(typeof image.source.data).toBe('string')
     expect(String(image.source.data).startsWith('data:')).toBe(false)
+  })
+
+  it('requestCall redacts image credentials and base64 without changing the provider request', async () => {
+    const signedUrl =
+      'https://uploads.spark.example/owners/user-1/reference.png?X-Amz-Signature=secret-signature'
+    const base64Payload = PNG_DATA_URL.slice(PNG_DATA_URL.indexOf(',') + 1)
+    const captured = stubFetch({ content: [{ type: 'text', text: 'ok' }] })
+    const result = await generateCanvasText({
+      providerType: 'anthropic',
+      apiKey: 'sk-ant',
+      apiEndpoint: 'https://api.anthropic.com/v1',
+      model: 'claude-3-5-sonnet',
+      prompt: '分析风格',
+      images: [{ url: signedUrl }, { dataUrl: PNG_DATA_URL, mimeType: 'image/png' }],
+    })
+
+    const providerBody = captured.lastBody()
+    expect(JSON.stringify(providerBody)).toContain(signedUrl)
+    expect(JSON.stringify(providerBody)).toContain(base64Payload)
+    const requestCall = result.requestCall
+    expect(requestCall).toBeDefined()
+    if (!requestCall) throw new Error('requestCall is required for canvas diagnostics')
+    expect(requestCall.url).toBe('https://api.anthropic.com/v1/messages')
+    expect(requestCall.method).toBe('POST')
+    expect(requestCall.body).toMatchObject({ model: 'claude-3-5-sonnet' })
+    const persistedBody = JSON.stringify(requestCall.body)
+    expect(persistedBody).toContain(
+      'https://uploads.spark.example/owners/user-1/reference.png?[REDACTED]',
+    )
+    expect(persistedBody).toContain('[base64')
+    expect(persistedBody).not.toContain('secret-signature')
+    expect(persistedBody).not.toContain(base64Payload)
   })
 
   it('temperature 透传到请求 body', async () => {
@@ -129,10 +238,12 @@ describe('generateCanvasText multimodal', () => {
 
   it('DeepSeek storyboard tasks can disable default thinking mode to avoid hidden reasoning consuming output tokens', async () => {
     const captured = stubFetch({
-      choices: [{
-        finish_reason: 'length',
-        message: { content: '{"shots":[{"index":1}]}', reasoning_content: '思考'.repeat(3000) },
-      }],
+      choices: [
+        {
+          finish_reason: 'length',
+          message: { content: '{"shots":[{"index":1}]}', reasoning_content: '思考'.repeat(3000) },
+        },
+      ],
       usage: { prompt_tokens: 2000, completion_tokens: 30000, total_tokens: 32000 },
     })
     const result = await generateCanvasText({
@@ -188,10 +299,12 @@ describe('generateCanvasText multimodal', () => {
       temperature: 0.3,
       stream: false,
     })
-    expect(result.requestCall).toEqual({
+    expect(result.requestCall).toMatchObject({
       method: 'POST',
       url: 'https://api.openai.com/v1/responses',
+      headers: { authorization: '[redacted]', 'content-type': 'application/json' },
       body: captured.lastBody(),
+      response: { status: 200 },
     })
   })
 
@@ -208,6 +321,7 @@ describe('generateCanvasText multimodal', () => {
 
     expect(captured.lastBody()).toMatchObject({
       reasoning: { effort: 'xhigh' },
+      max_output_tokens: 16_384,
     })
   })
 
@@ -232,6 +346,10 @@ describe('generateCanvasText multimodal', () => {
         method: 'POST',
         url: 'https://api.example.com/v1/chat/completions',
         body: captured.lastBody(),
+        response: {
+          status: 400,
+          body: { error: { message: 'Unsupported parameter: max_tokens' } },
+        },
       },
     })
   })

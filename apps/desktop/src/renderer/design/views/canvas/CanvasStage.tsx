@@ -30,6 +30,7 @@ import {
   type NodeOrigin,
   type ReactFlowInstance,
   type Viewport,
+  type XYPosition,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import { Icons } from '../../Icons'
@@ -46,8 +47,13 @@ import {
   type CanvasAutoLayoutSpacing,
 } from './canvasAutoLayout'
 import { persistCanvasNodeLayoutChanges } from './canvasStageLayout'
-import { CANVAS_CAPABILITIES, isOperationNode } from './canvas.capabilities'
+import { isOperationNode } from './canvas.capabilities'
 import { canvasNodeChromeExtraHeight } from './canvasNodeChrome'
+import {
+  isFullBleedCanvasImageNode,
+  resolveCanvasImageNodePresentationSize,
+  type CanvasImageSourceDimensions,
+} from './canvasImageNodePresentation'
 import {
   CANVAS_NODE_META_BAR_HEIGHT,
   OPERATION_NODE_DEFAULT_SIZE,
@@ -55,18 +61,31 @@ import {
   fitShotScriptOperationNodeSize,
 } from './canvasNodeSize'
 import { readRenderableShotScriptRows } from './canvasShotScriptPresentation'
-import { CANVAS_PIPELINE_OPS } from './canvasPipelineOps'
+import { CANVAS_PIPELINE_MENU_GROUPS, CANVAS_PIPELINE_OPS } from './canvasPipelineOps'
+import { getNodePipelineActions } from './canvasPipeline'
+import {
+  CANVAS_BASE_CREATE_OPERATION_GROUPS,
+  CANVAS_BASE_TASK_MENU_LABEL,
+  CANVAS_FUNCTIONAL_CREATE_OPERATIONS,
+  CANVAS_FUNCTIONAL_MENU_LABEL,
+} from './canvasNodeGenerationMenu'
 import { getOperationVisual } from './canvasOperationIcons'
 import { readCharacterSubviews } from './canvasCharacterLibrary'
+import { readAssetKind } from './canvasFilmAssets'
+import type { CanvasPipelineAssetKind } from './canvasPipelineOps'
 import {
   buildCanvasOperationRunViews,
   canvasOperationRunsFingerprint,
   type CanvasOperationRunView,
 } from './canvasOperationRuns'
-import { resolveCanvasOperationOutputState } from './canvasOperationOutputModel'
+import {
+  resolveCanvasOperationOutputState,
+  resolveCanvasOperationResourceNode,
+} from './canvasOperationOutputModel'
 import { buildCanvasOperationProjection } from './canvasOperationProjection'
 import {
   calculateCanvasContextMenuPosition,
+  CANVAS_CONTEXT_MENU_STAGE_INSETS,
   shouldOpenCanvasSelectionContextMenu,
   summarizeCanvasSelectionContext,
 } from './canvasContextMenuModel'
@@ -74,6 +93,8 @@ import {
   buildPendingConnectionInput,
   type PendingCanvasConnection,
 } from './canvasPendingConnection'
+import { shouldClearCanvasSelectionOnEscape } from './canvasSelectionKeyboard'
+import { findSelectedCanvasNodeScrollRegion } from './canvasWheelInteraction'
 import type {
   CanvasEdge,
   CanvasNode as SparkCanvasNode,
@@ -180,6 +201,7 @@ function CanvasPaneContextSubmenu({
     left: number
     top: number
     maxHeight: number
+    maxWidth: number
   } | null>(null)
 
   const cancelClose = useCallback(() => {
@@ -213,31 +235,37 @@ function CanvasPaneContextSubmenu({
     const updatePosition = () => {
       const triggerRect = trigger.getBoundingClientRect()
       const stageRect = stage.getBoundingClientRect()
-      const inset = 8
-      const maxHeight = Math.max(0, Math.min(440, stageRect.height - inset * 2))
-      const panelWidth = panel.offsetWidth
+      const safeTop = stageRect.top + CANVAS_CONTEXT_MENU_STAGE_INSETS.top
+      const safeRight = stageRect.right - CANVAS_CONTEXT_MENU_STAGE_INSETS.right
+      const safeBottom = stageRect.bottom - CANVAS_CONTEXT_MENU_STAGE_INSETS.bottom
+      const safeLeft = stageRect.left + CANVAS_CONTEXT_MENU_STAGE_INSETS.left
+      const maxHeight = Math.max(0, Math.min(440, safeBottom - safeTop))
+      const maxWidth = Math.max(0, safeRight - safeLeft)
+      const panelWidth = Math.min(panel.offsetWidth, maxWidth)
       const panelHeight = Math.min(panel.scrollHeight, maxHeight)
       const preferredLeft = openLeft ? triggerRect.left - panelWidth + 4 : triggerRect.right - 4
       const preferredTop = openUp ? triggerRect.bottom - panelHeight : triggerRect.top
-      const left = Math.min(
-        Math.max(preferredLeft, stageRect.left + inset),
-        stageRect.right - panelWidth - inset,
-      )
-      const top = Math.min(
-        Math.max(preferredTop, stageRect.top + inset),
-        stageRect.bottom - panelHeight - inset,
-      )
+      const left = Math.min(Math.max(preferredLeft, safeLeft), safeRight - panelWidth)
+      const top = Math.min(Math.max(preferredTop, safeTop), safeBottom - panelHeight)
       setPosition((current) =>
-        current?.left === left && current.top === top && current.maxHeight === maxHeight
+        current?.left === left &&
+        current.top === top &&
+        current.maxHeight === maxHeight &&
+        current.maxWidth === maxWidth
           ? current
-          : { left, top, maxHeight },
+          : { left, top, maxHeight, maxWidth },
       )
     }
 
     updatePosition()
+    const resizeObserver =
+      typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(updatePosition)
+    resizeObserver?.observe(stage)
+    resizeObserver?.observe(panel)
     window.addEventListener('resize', updatePosition)
     window.addEventListener('scroll', updatePosition, true)
     return () => {
+      resizeObserver?.disconnect()
       window.removeEventListener('resize', updatePosition)
       window.removeEventListener('scroll', updatePosition, true)
     }
@@ -278,6 +306,7 @@ function CanvasPaneContextSubmenu({
               left: position?.left ?? 0,
               top: position?.top ?? 0,
               maxHeight: position?.maxHeight,
+              maxWidth: position?.maxWidth,
               visibility: position ? 'visible' : 'hidden',
             }}
             onMouseEnter={cancelClose}
@@ -296,6 +325,55 @@ function CanvasPaneContextSubmenu({
           document.body,
         )}
     </div>
+  )
+}
+
+function CanvasPaneResourceNodeActions({
+  onAddText,
+  onAddImage,
+  onAddDirectorStage3D,
+  onAddVideoWorkbench,
+  onInsertAsset,
+}: {
+  onAddText?: (() => void) | undefined
+  onAddImage?: (() => void) | undefined
+  onAddDirectorStage3D?: (() => void) | undefined
+  onAddVideoWorkbench?: (() => void) | undefined
+  onInsertAsset?: (() => void) | undefined
+}) {
+  return (
+    <>
+      {onAddText && (
+        <button type="button" role="menuitem" onClick={onAddText}>
+          <Icons.File size={14} />
+          <span>添加文本</span>
+        </button>
+      )}
+      {onAddImage && (
+        <button type="button" role="menuitem" onClick={onAddImage}>
+          <Icons.Image size={14} />
+          <span>上传图片</span>
+        </button>
+      )}
+      {onAddDirectorStage3D && (
+        <button type="button" role="menuitem" onClick={onAddDirectorStage3D}>
+          <Icons.Box size={14} />
+          <span>新建 3D 导演台</span>
+        </button>
+      )}
+      {onAddVideoWorkbench && (
+        <button type="button" role="menuitem" onClick={onAddVideoWorkbench}>
+          <Icons.Video size={14} />
+          <span>新建视频工作台</span>
+        </button>
+      )}
+      {onInsertAsset && (
+        <button type="button" role="menuitem" onClick={onInsertAsset}>
+          <Icons.Folder size={14} />
+          <span>从资产选择</span>
+        </button>
+      )}
+    </>
   )
 }
 
@@ -389,13 +467,14 @@ function flowNodeToAutoLayoutNode(node: Node<CanvasFlowNodeData>): CanvasAutoLay
         ? node.height
         : node.data.canvasNode.height
   const hasInlineExtension = Boolean(node.data.inlineToolbar || node.data.inlinePanel)
+  const hasOverlayChrome = isFullBleedCanvasImageNode(node.data.canvasNode)
   return {
     id: node.id,
     x: node.position.x,
     y: node.position.y,
     width,
     height,
-    headerHeight: hasInlineExtension ? 0 : CANVAS_NODE_META_BAR_HEIGHT,
+    headerHeight: hasInlineExtension || hasOverlayChrome ? 0 : CANVAS_NODE_META_BAR_HEIGHT,
   }
 }
 
@@ -407,15 +486,20 @@ function toFlowNode(
   inlineExtension: CanvasNodeInlineExtension | null,
   assetSubviewCount = 0,
   operationRuns: CanvasOperationRunView[] = [],
+  assetKinds: CanvasPipelineAssetKind[] = [],
   isGeneratedOutput = false,
+  imageSourceDimensions?: CanvasImageSourceDimensions,
 ): Node<CanvasFlowNodeData> {
   const inlineToolbarHeight = inlineExtension?.toolbar ? INLINE_NODE_TOOLBAR_HEIGHT : 0
   const cardChromeExtraHeight = canvasNodeChromeExtraHeight(node)
-  const presentationSize = operationNodePresentationSize(node, operationRuns)
+  const presentationSize =
+    resolveCanvasImageNodePresentationSize(node, imageSourceDimensions) ??
+    operationNodePresentationSize(node, operationRuns)
   const baseRenderedHeight = presentationSize.height + cardChromeExtraHeight
   const data: CanvasFlowNodeData = {
     actions,
     canvasNode: node,
+    ...(assetKinds.length > 0 ? { assetKinds } : {}),
     ...(assetSubviewCount > 0 ? { assetSubviewCount } : {}),
     ...(operationRuns.length > 0
       ? {
@@ -530,16 +614,7 @@ function isCanvasZoomWheelEvent(event: WheelEvent): boolean {
 
 function canvasNodeWheelBoundary(event: WheelEvent): HTMLElement | null {
   if (isCanvasZoomWheelEvent(event)) return null
-  const target = event.target
-  if (!(target instanceof Element)) return null
-  const element = target.closest<HTMLElement>(
-    '.canvas-node-text, .canvas-node-task-msg, .canvas-node-shot-table-wrap, .canvas-node-inline-panel',
-  )
-  if (!element) return null
-
-  const canScrollY = element.scrollHeight - element.clientHeight > 1
-  const canScrollX = element.scrollWidth - element.clientWidth > 1
-  return canScrollY || canScrollX ? element : null
+  return findSelectedCanvasNodeScrollRegion(event.target)
 }
 
 function CanvasStageInner({
@@ -568,6 +643,9 @@ function CanvasStageInner({
   onAddNodesToAgent,
   /** 单节点右键：把该节点加入画布 Agent 对话引用列表（节点富菜单入口） */
   onAddNodeToAgent,
+  onRunOperationNode,
+  onConfigureSelectedTasks,
+  onSubmitSelectedTasks,
   onOpenAiComposer,
   onEditNode,
   onSaveNodeToLibrary,
@@ -584,9 +662,8 @@ function CanvasStageInner({
   onAddTextAtPosition,
   onAddImageAtPosition,
   onDropFiles,
-  onAddPromptAtPosition,
-  onAddDirectorStageAtPosition,
   onAddDirectorStage3DAtPosition,
+  onAddVideoWorkbenchAtPosition,
   onInsertAssetFromPane,
   onDeleteSelectedNodes,
   onCreateOperationAtPosition,
@@ -623,6 +700,12 @@ function CanvasStageInner({
   onAddNodesToAgent?: () => void
   /** 单节点右键 → 加入画布 Agent 对话（节点富菜单入口） */
   onAddNodeToAgent?: (nodeId: string) => void
+  /** 单节点右键 → 使用已保存配置提交任务 */
+  onRunOperationNode?: (nodeId: string) => void
+  /** 多选任务节点右键 → 打开批量配置面板 */
+  onConfigureSelectedTasks?: (nodeIds: string[]) => void
+  /** 多选任务节点右键 → 校验并批量提交 */
+  onSubmitSelectedTasks?: (nodeIds: string[]) => void
   onOpenAiComposer: (nodeId: string) => void
   onEditNode: (nodeId: string) => void
   onSaveNodeToLibrary: (nodeId: string) => void
@@ -650,12 +733,10 @@ function CanvasStageInner({
   onAddImageAtPosition: CanvasStageCreateAction
   /** 拖入外部文件落到画布上（图片/视频/音频/文本），位置已转为 flow 坐标 */
   onDropFiles?: (position: CanvasStagePoint, files: File[]) => void
-  /** 空白右键：新建 Prompt 节点 */
-  onAddPromptAtPosition?: CanvasStageCreateAction
-  /** 空白右键：新建画面编排导演台节点（2D 俯视版） */
-  onAddDirectorStageAtPosition?: CanvasStageCreateAction
   /** 空白右键：新建真·3D 导演台节点 */
   onAddDirectorStage3DAtPosition?: CanvasStageCreateAction
+  /** 空白右键或拖线菜单：新建视频工作台节点 */
+  onAddVideoWorkbenchAtPosition?: CanvasStageCreateAction
   /** 空白右键：从资产插入（打开资产面板） */
   onInsertAssetFromPane?: (
     position: CanvasStagePoint,
@@ -673,7 +754,7 @@ function CanvasStageInner({
   onCreatePipelineAtPosition?: (
     actionId: string,
     position: CanvasStagePoint,
-    options?: { openPanel?: boolean },
+    options?: { openPanel?: boolean; sourceNodeId?: string },
   ) => MaybePromise<CanvasStageCreateResult>
   /** 用户明确点击某个节点，用于恢复被手动关闭的节点面板 */
   onNodeSelectIntent?: (nodeId: string) => void
@@ -697,6 +778,7 @@ function CanvasStageInner({
       removeNodeFromGroup: onRemoveNodeFromGroup,
       dissolveGroup: onDissolveGroup,
       ...(onAddNodeToAgent ? { addNodeToAgent: onAddNodeToAgent } : {}),
+      ...(onRunOperationNode ? { runOperationNode: onRunOperationNode } : {}),
       openAiComposer: onOpenAiComposer,
       editNode: onEditNode,
       saveToLibrary: onSaveNodeToLibrary,
@@ -733,6 +815,7 @@ function CanvasStageInner({
       onExpandOperationOutputs,
       onRemoveNodeFromGroup,
       onAddNodeToAgent,
+      onRunOperationNode,
       onCreateOperationChild,
       onPipelineAction,
       onSetProductionState,
@@ -771,6 +854,10 @@ function CanvasStageInner({
     () => buildLineageSummaries(operationProjection.visibleEdges),
     [operationProjection.visibleEdges],
   )
+  const assetById = useMemo(
+    () => new Map(snapshot.assets.map((asset) => [asset.id, asset] as const)),
+    [snapshot.assets],
+  )
   const assetSubviewCountById = useMemo(
     () =>
       new Map(
@@ -796,6 +883,33 @@ function CanvasStageInner({
       ),
     [snapshot],
   )
+  const assetKindsByNodeId = useMemo(() => {
+    const result = new Map<string, CanvasPipelineAssetKind[]>()
+    const readPipelineKind = (assetId: string | undefined): CanvasPipelineAssetKind | undefined => {
+      const asset = assetId ? assetById.get(assetId) : undefined
+      const kind = asset ? readAssetKind(asset) : null
+      return kind === 'character' || kind === 'scene' || kind === 'prop' || kind === 'effect'
+        ? kind
+        : undefined
+    }
+
+    for (const node of snapshot.nodes) {
+      const kinds = new Set<CanvasPipelineAssetKind>()
+      const directKind = readPipelineKind(node.assetId ?? undefined)
+      if (directKind) kinds.add(directKind)
+      if (isOperationNode(node)) {
+        const latestRun = operationRunsByNodeId.get(node.id)?.find((run) => run.outputs.length > 0)
+        for (const output of latestRun?.outputs ?? []) {
+          const kind = readPipelineKind(
+            output.assetId ?? snapshotNodeById.get(output.nodeId ?? '')?.assetId ?? undefined,
+          )
+          if (kind) kinds.add(kind)
+        }
+      }
+      if (kinds.size > 0) result.set(node.id, [...kinds])
+    }
+    return result
+  }, [assetById, operationRunsByNodeId, snapshot.nodes, snapshotNodeById])
   const nodes = useMemo(
     () =>
       operationProjection.visibleNodes.map((node) =>
@@ -807,11 +921,15 @@ function CanvasStageInner({
           nodeInlineExtension?.nodeId === node.id ? nodeInlineExtension : null,
           node.assetId ? (assetSubviewCountById.get(node.assetId) ?? 0) : 0,
           operationRunsByNodeId.get(node.id) ?? [],
+          assetKindsByNodeId.get(node.id) ?? [],
           generatedOutputNodeIds.has(node.id),
+          node.assetId ? assetById.get(node.assetId) : undefined,
         ),
       ),
     [
       assetSubviewCountById,
+      assetById,
+      assetKindsByNodeId,
       generatedOutputNodeIds,
       lineageSummaries,
       nodeActions,
@@ -836,6 +954,7 @@ function CanvasStageInner({
   const dragDepthRef = useRef(0)
   const stageRef = useRef<HTMLDivElement>(null)
   const paneContextMenuRef = useRef<HTMLDivElement>(null)
+  const edgeContextMenuRef = useRef<HTMLDivElement>(null)
   const flowInstanceRef = useRef<ReactFlowInstance<Node<CanvasFlowNodeData>, Edge> | null>(null)
   const flowNodesRef = useRef(flowNodes)
   const latestViewportRef = useRef<Viewport>(boardViewport)
@@ -873,7 +992,37 @@ function CanvasStageInner({
     edgeId: string
     left: number
     top: number
+    maxHeight: number
+    anchorPoint: CanvasStagePoint
   } | null>(null)
+  /**
+   * 牵线到空白处时，菜单应以连线起点节点为上下文展示后续流水线操作。
+   * 没有牵线上下文时保留空白画布原有的通用文本/抽取操作。
+   */
+  const panePipelineOperations = useMemo(() => {
+    const sourceNode = paneContextMenu?.pendingConnection
+      ? snapshotNodeById.get(paneContextMenu.pendingConnection.sourceNodeId)
+      : undefined
+    if (!sourceNode) {
+      return CANVAS_PIPELINE_OPS.filter(
+        (op) => op.appliesToText && (op.kind === 'text' || op.kind === 'extract'),
+      )
+    }
+    const contentNode = isOperationNode(sourceNode)
+      ? resolveCanvasOperationResourceNode(sourceNode, snapshot) ?? sourceNode
+      : sourceNode
+    return getNodePipelineActions(contentNode, {
+      assetKinds: assetKindsByNodeId.get(sourceNode.id) ?? [],
+    })
+  }, [assetKindsByNodeId, paneContextMenu, snapshot, snapshotNodeById])
+  const panePipelineOperationGroups = useMemo(
+    () =>
+      CANVAS_PIPELINE_MENU_GROUPS.map((group) => ({
+        ...group,
+        actions: panePipelineOperations.filter((action) => action.kind === group.id),
+      })).filter((group) => group.actions.length > 0),
+    [panePipelineOperations],
+  )
   const edges = useMemo(
     () =>
       operationProjection.visibleEdges
@@ -1238,6 +1387,20 @@ function CanvasStageInner({
     [notifyViewportChange],
   )
 
+  const handleMinimapClick = useCallback(
+    (_event: ReactMouseEvent, position: XYPosition) => {
+      const instance = flowInstanceRef.current
+      if (!instance) return
+      setPaneContextMenu(null)
+      setEdgeContextMenu(null)
+      void instance.setCenter(position.x, position.y, {
+        zoom: latestViewportRef.current.zoom,
+        duration: 160,
+      })
+    },
+    [],
+  )
+
   const handleInit = useCallback(
     (instance: ReactFlowInstance<Node<CanvasFlowNodeData>, Edge>) => {
       flowInstanceRef.current = instance
@@ -1276,6 +1439,7 @@ function CanvasStageInner({
         container: { width: rect.width, height: rect.height },
         menu: { width: 280, height: 520 },
         submenu: { width: 300 },
+        inset: CANVAS_CONTEXT_MENU_STAGE_INSETS,
       })
 
       // 画布菜单与连线菜单共享同一交互层，任何时刻只保留一个右键菜单。
@@ -1311,6 +1475,7 @@ function CanvasStageInner({
         container: { width: rect.width, height: rect.height },
         menu: { width: menu.offsetWidth, height: menu.scrollHeight },
         submenu: { width: 300 },
+        inset: CANVAS_CONTEXT_MENU_STAGE_INSETS,
       })
       setPaneContextMenu((current) => {
         if (!current) return current
@@ -1500,20 +1665,40 @@ function CanvasStageInner({
   }, [handleStageWheel])
 
   useEffect(() => {
-    if (!paneContextMenu && !edgeContextMenu) return undefined
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
+      if (event.key !== 'Escape') return
+      const hasOpenContextMenu = Boolean(paneContextMenu || edgeContextMenu)
+      if (hasOpenContextMenu) {
         closePaneContextMenu()
         setEdgeContextMenu(null)
+        return
       }
+      if (
+        !shouldClearCanvasSelectionOnEscape({
+          key: event.key,
+          selectedNodeCount: selectedNodeIds.length,
+          hasOpenContextMenu,
+          editableTarget: isEditableEventTarget(event.target),
+        })
+      )
+        return
+      event.preventDefault()
+      onSelectionChange([])
+      setSelectedEdgeIds((previous) => (previous.length === 0 ? previous : []))
     }
     window.addEventListener('keydown', handleKeyDown)
-    window.addEventListener('blur', closePaneContextMenu)
+    if (paneContextMenu) window.addEventListener('blur', closePaneContextMenu)
     return () => {
       window.removeEventListener('keydown', handleKeyDown)
-      window.removeEventListener('blur', closePaneContextMenu)
+      if (paneContextMenu) window.removeEventListener('blur', closePaneContextMenu)
     }
-  }, [closePaneContextMenu, edgeContextMenu, paneContextMenu])
+  }, [
+    closePaneContextMenu,
+    edgeContextMenu,
+    onSelectionChange,
+    paneContextMenu,
+    selectedNodeIds.length,
+  ])
 
   const handleResetZoom = useCallback(() => {
     const instance = flowInstanceRef.current
@@ -1556,20 +1741,15 @@ function CanvasStageInner({
     void runPaneCreateAction(onAddImageAtPosition)
   }, [onAddImageAtPosition, runPaneCreateAction])
 
-  const handleAddPromptFromPane = useCallback(() => {
-    if (!onAddPromptAtPosition) return
-    void runPaneCreateAction(onAddPromptAtPosition)
-  }, [onAddPromptAtPosition, runPaneCreateAction])
-
-  const handleAddDirectorStageFromPane = useCallback(() => {
-    if (!onAddDirectorStageAtPosition) return
-    void runPaneCreateAction(onAddDirectorStageAtPosition)
-  }, [onAddDirectorStageAtPosition, runPaneCreateAction])
-
   const handleAddDirectorStage3DFromPane = useCallback(() => {
     if (!onAddDirectorStage3DAtPosition) return
     void runPaneCreateAction(onAddDirectorStage3DAtPosition)
   }, [onAddDirectorStage3DAtPosition, runPaneCreateAction])
+
+  const handleAddVideoWorkbenchFromPane = useCallback(() => {
+    if (!onAddVideoWorkbenchAtPosition) return
+    void runPaneCreateAction(onAddVideoWorkbenchAtPosition)
+  }, [onAddVideoWorkbenchAtPosition, runPaneCreateAction])
 
   const handleInsertAssetFromPane = useCallback(() => {
     if (!paneContextMenu) return
@@ -1607,6 +1787,7 @@ function CanvasStageInner({
       closePaneContextMenu()
       const created = await onCreatePipelineAtPosition?.(actionId, position, {
         openPanel: pendingConnection == null,
+        ...(pendingConnection ? { sourceNodeId: pendingConnection.sourceNodeId } : {}),
       })
       await connectPendingConnectionToNode(created, pendingConnection)
     },
@@ -1834,14 +2015,70 @@ function CanvasStageInner({
     if (!rect) return
     event.preventDefault()
     event.stopPropagation()
+    const anchorPoint = {
+      x: event.clientX - rect.left,
+      y: event.clientY - rect.top,
+    }
+    const menuPosition = calculateCanvasContextMenuPosition({
+      point: anchorPoint,
+      container: { width: rect.width, height: rect.height },
+      menu: { width: 160, height: 56 },
+      inset: CANVAS_CONTEXT_MENU_STAGE_INSETS,
+    })
     setPaneContextMenu(null)
     setSelectedEdgeIds([edge.id])
     setEdgeContextMenu({
       edgeId: edge.id,
-      left: event.clientX - rect.left,
-      top: event.clientY - rect.top,
+      left: menuPosition.left,
+      top: menuPosition.top,
+      maxHeight: menuPosition.maxHeight,
+      anchorPoint,
     })
   }, [])
+
+  useLayoutEffect(() => {
+    const menu = edgeContextMenuRef.current
+    const stage = stageRef.current
+    const anchorPoint = edgeContextMenu?.anchorPoint
+    if (!menu || !stage || !anchorPoint) return undefined
+
+    const updatePosition = () => {
+      const rect = stage.getBoundingClientRect()
+      const menuPosition = calculateCanvasContextMenuPosition({
+        point: anchorPoint,
+        container: { width: rect.width, height: rect.height },
+        menu: { width: menu.offsetWidth, height: menu.scrollHeight },
+        inset: CANVAS_CONTEXT_MENU_STAGE_INSETS,
+      })
+      setEdgeContextMenu((current) => {
+        if (!current) return current
+        if (
+          current.left === menuPosition.left &&
+          current.top === menuPosition.top &&
+          current.maxHeight === menuPosition.maxHeight
+        ) {
+          return current
+        }
+        return {
+          ...current,
+          left: menuPosition.left,
+          top: menuPosition.top,
+          maxHeight: menuPosition.maxHeight,
+        }
+      })
+    }
+
+    updatePosition()
+    const resizeObserver =
+      typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(updatePosition)
+    resizeObserver?.observe(stage)
+    resizeObserver?.observe(menu)
+    window.addEventListener('resize', updatePosition)
+    return () => {
+      resizeObserver?.disconnect()
+      window.removeEventListener('resize', updatePosition)
+    }
+  }, [edgeContextMenu?.anchorPoint])
 
   const handleNodeClick = useCallback(
     (event: ReactMouseEvent, node: Node<CanvasFlowNodeData>) => {
@@ -2040,6 +2277,8 @@ function CanvasStageInner({
           maxZoom={CANVAS_MAX_ZOOM}
           nodeOrigin={defaultNodeOrigin}
           onlyRenderVisibleElements
+          // 连接热区略大于可见锚点，方便从节点边缘开始牵线并降低误操作。
+          connectionRadius={32}
           nodesDraggable={activeTool === 'select' && nodesInitialized}
           nodesConnectable
           elementsSelectable
@@ -2055,6 +2294,7 @@ function CanvasStageInner({
           onConnect={handleConnect}
           onConnectStart={handleConnectStart}
           onConnectEnd={handleConnectEnd}
+          connectionLineStyle={{ strokeWidth: 3 }}
           onNodeDragStart={handleNodeDragStart}
           onNodeDrag={handleNodeDrag}
           onNodeDragStop={handleNodeDragStop}
@@ -2099,6 +2339,9 @@ function CanvasStageInner({
             <MiniMap
               className="canvas-minimap"
               style={{ width: CANVAS_MINIMAP_WIDTH, height: CANVAS_MINIMAP_HEIGHT }}
+              pannable
+              onClick={handleMinimapClick}
+              ariaLabel="小地图：点击或拖动可视区域以移动画布"
               nodeColor={minimapNodeColor}
               nodeBorderRadius={8}
               nodeStrokeWidth={0}
@@ -2126,8 +2369,13 @@ function CanvasStageInner({
         )}
         {edgeContextMenu && (
           <div
+            ref={edgeContextMenuRef}
             className="canvas-edge-context-menu"
-            style={{ left: edgeContextMenu.left, top: edgeContextMenu.top }}
+            style={{
+              left: edgeContextMenu.left,
+              top: edgeContextMenu.top,
+              maxHeight: edgeContextMenu.maxHeight,
+            }}
             role="menu"
             onMouseDown={(event) => event.stopPropagation()}
             onContextMenu={(event) => event.preventDefault()}
@@ -2164,6 +2412,41 @@ function CanvasStageInner({
             {selectedNodeIds.length > 0 && (
               <>
                 <div className="canvas-pane-context-section-title">选中节点</div>
+                {(onConfigureSelectedTasks || onSubmitSelectedTasks) && (
+                  <>
+                    {onConfigureSelectedTasks && (
+                      <button
+                        type="button"
+                        role="menuitem"
+                        disabled={!selectedContext.canBatchConfigureTasks}
+                        title={selectedContext.batchTaskConfigureDisabledReason ?? undefined}
+                        onClick={() => {
+                          closePaneContextMenu()
+                          onConfigureSelectedTasks(selectedContext.batchTaskNodeIds)
+                        }}
+                      >
+                        <Icons.Sliders size={14} />
+                        <span>批量配置参数…</span>
+                      </button>
+                    )}
+                    {onSubmitSelectedTasks && (
+                      <button
+                        type="button"
+                        role="menuitem"
+                        disabled={!selectedContext.canBatchSubmitTasks}
+                        title={selectedContext.batchTaskSubmitDisabledReason ?? undefined}
+                        onClick={() => {
+                          closePaneContextMenu()
+                          onSubmitSelectedTasks(selectedContext.batchTaskNodeIds)
+                        }}
+                      >
+                        <Icons.Play size={14} />
+                        <span>批量提交运行</span>
+                      </button>
+                    )}
+                    <div className="canvas-pane-context-divider" />
+                  </>
+                )}
                 {onAddNodesToAgent && (
                   <button
                     type="button"
@@ -2265,15 +2548,12 @@ function CanvasStageInner({
                     <span>解散组</span>
                   </button>
                 )}
-                {(selectedContext.canCreateGroup ||
-                  selectedContext.canMergeSelectionToImage ||
-                  selectedContext.canAddToGroup ||
-                  selectedContext.canRemoveFromGroup ||
-                  selectedContext.canDissolveGroup) &&
-                  (onToggleLockSelectedNodes || onBringSelectedNodesToFront) && (
-                    <div className="canvas-pane-context-divider" />
-                  )}
-                {onToggleLockSelectedNodes && (
+                {(onDeleteSelectedNodes ||
+                  (selectedNodeIds.length === 1 &&
+                    (onToggleLockSelectedNodes || onBringSelectedNodesToFront))) && (
+                  <div className="canvas-pane-context-divider" />
+                )}
+                {selectedNodeIds.length === 1 && onToggleLockSelectedNodes && (
                   <button
                     type="button"
                     role="menuitem"
@@ -2286,7 +2566,7 @@ function CanvasStageInner({
                     <span>锁定 / 解锁</span>
                   </button>
                 )}
-                {onBringSelectedNodesToFront && (
+                {selectedNodeIds.length === 1 && onBringSelectedNodesToFront && (
                   <button
                     type="button"
                     role="menuitem"
@@ -2303,6 +2583,7 @@ function CanvasStageInner({
                   <button
                     type="button"
                     role="menuitem"
+                    className="canvas-menu-item-danger"
                     onClick={() => {
                       closePaneContextMenu()
                       onDeleteSelectedNodes()
@@ -2317,85 +2598,92 @@ function CanvasStageInner({
                 )}
               </>
             )}
-            <div className="canvas-pane-context-section-title">资源内容节点</div>
-            <button type="button" role="menuitem" onClick={handleAddTextFromPane}>
-              <Icons.File size={14} />
-              <span>添加文本</span>
-            </button>
-            <button type="button" role="menuitem" onClick={handleAddImageFromPane}>
-              <Icons.Image size={14} />
-              <span>上传图片</span>
-            </button>
-            {onAddPromptAtPosition && (
-              <button type="button" role="menuitem" onClick={handleAddPromptFromPane}>
-                <Icons.Edit size={14} />
-                <span>新建 Prompt</span>
-              </button>
-            )}
-            {onAddDirectorStageAtPosition && (
-              <button type="button" role="menuitem" onClick={handleAddDirectorStageFromPane}>
-                <Icons.Play size={14} />
-                <span>新建 2D 导演台</span>
-              </button>
-            )}
-            {onAddDirectorStage3DAtPosition && (
-              <button type="button" role="menuitem" onClick={handleAddDirectorStage3DFromPane}>
-                <Icons.Box size={14} />
-                <span>新建 3D 导演台</span>
-              </button>
-            )}
-            {onInsertAssetFromPane && (
-              <button type="button" role="menuitem" onClick={handleInsertAssetFromPane}>
-                <Icons.Folder size={14} />
-                <span>从资产选择</span>
-              </button>
-            )}
-            <div className="canvas-pane-context-divider" />
             <div className="canvas-pane-context-section-title">任务节点</div>
             {onCreatePipelineAtPosition && (
               <CanvasPaneContextSubmenu
                 icon={<Icons.Workflow size={14} />}
-                label="剧本流水线"
+                label={CANVAS_FUNCTIONAL_MENU_LABEL}
                 openLeft={paneContextMenu.openSubmenusLeft}
                 openUp={paneContextMenu.openSubmenusUp}
               >
-                {CANVAS_PIPELINE_OPS.filter(
-                  (op) => op.appliesToText && (op.kind === 'text' || op.kind === 'extract'),
-                ).map((op) => (
-                  <button
-                    key={op.id}
-                    type="button"
-                    role="menuitem"
-                    onClick={() => handleCreatePipelineFromPane(op.id)}
-                  >
-                    <Icons.Workflow size={14} />
-                    <span>{op.label}</span>
-                  </button>
+                <CanvasPaneResourceNodeActions
+                  onAddImage={handleAddImageFromPane}
+                  onAddDirectorStage3D={
+                    onAddDirectorStage3DAtPosition
+                      ? handleAddDirectorStage3DFromPane
+                      : undefined
+                  }
+                  onAddVideoWorkbench={
+                    onAddVideoWorkbenchAtPosition ? handleAddVideoWorkbenchFromPane : undefined
+                  }
+                  onInsertAsset={onInsertAssetFromPane ? handleInsertAssetFromPane : undefined}
+                />
+                <div className="canvas-pane-context-divider" />
+                {panePipelineOperationGroups.map((group) => (
+                  <div key={group.id} className="canvas-pane-context-group">
+                    <div className="canvas-pane-context-section-title">{group.label}</div>
+                    {group.actions.map((op) => (
+                      <button
+                        key={op.id}
+                        type="button"
+                        role="menuitem"
+                        onClick={() => handleCreatePipelineFromPane(op.id)}
+                      >
+                        <Icons.Workflow size={14} />
+                        <span>{op.label}</span>
+                      </button>
+                    ))}
+                  </div>
                 ))}
+                <div className="canvas-pane-context-section-title">通用视觉工具</div>
+                {CANVAS_FUNCTIONAL_CREATE_OPERATIONS.map((item) => {
+                  const visual = getOperationVisual(item.operation)
+                  return (
+                    <button
+                      key={item.operation}
+                      type="button"
+                      role="menuitem"
+                      className={`canvas-pane-context-op ${visual.colorClass}`}
+                      onClick={() => handleCreateOperationFromPane(item.operation)}
+                    >
+                      <span className="canvas-pane-context-op-icon">{visual.icon}</span>
+                      <span>{item.label}</span>
+                    </button>
+                  )
+                })}
               </CanvasPaneContextSubmenu>
             )}
             {onCreateOperationAtPosition && (
               <CanvasPaneContextSubmenu
                 icon={<Icons.Sparkles size={14} />}
-                label="AI 操作"
+                label={CANVAS_BASE_TASK_MENU_LABEL}
                 openLeft={paneContextMenu.openSubmenusLeft}
                 openUp={paneContextMenu.openSubmenusUp}
               >
-                {CANVAS_CAPABILITIES.map((capability) => {
-                  const visual = getOperationVisual(capability.operation)
-                  return (
-                    <button
-                      key={capability.id}
-                      type="button"
-                      role="menuitem"
-                      className={`canvas-pane-context-op ${visual.colorClass}`}
-                      onClick={() => handleCreateOperationFromPane(capability.operation)}
-                    >
-                      <span className="canvas-pane-context-op-icon">{visual.icon}</span>
-                      <span>{capability.label}</span>
-                    </button>
-                  )
-                })}
+                <CanvasPaneResourceNodeActions
+                  onAddText={handleAddTextFromPane}
+                />
+                <div className="canvas-pane-context-divider" />
+                {CANVAS_BASE_CREATE_OPERATION_GROUPS.map((group) => (
+                  <div key={group.id} className="canvas-pane-context-group">
+                    <div className="canvas-pane-context-section-title">{group.label}</div>
+                    {group.items.map((item) => {
+                      const visual = getOperationVisual(item.operation)
+                      return (
+                        <button
+                          key={item.operation}
+                          type="button"
+                          role="menuitem"
+                          className={`canvas-pane-context-op ${visual.colorClass}`}
+                          onClick={() => handleCreateOperationFromPane(item.operation)}
+                        >
+                          <span className="canvas-pane-context-op-icon">{visual.icon}</span>
+                          <span>{item.label}</span>
+                        </button>
+                      )
+                    })}
+                  </div>
+                ))}
               </CanvasPaneContextSubmenu>
             )}
             <div className="canvas-pane-context-divider" />

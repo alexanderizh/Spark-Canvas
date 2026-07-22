@@ -7,7 +7,7 @@ export type Modality = 'text' | 'image' | 'audio' | 'video'
 export interface ModelCapability {
   /** 上下文窗口大小（tokens） */
   contextWindow: number
-  /** 最大输出 tokens */
+  /** 单次响应最大输出大小（tokens） */
   maxOutputTokens: number
   /** 是否支持视觉（图片输入） */
   supportsVision: boolean

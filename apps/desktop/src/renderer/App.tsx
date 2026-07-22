@@ -33,7 +33,6 @@ import { WorkflowView } from './design/views/WorkflowView'
 import { AgentsView } from './design/views/AgentsView'
 import { BoardView } from './design/views/BoardView'
 import { CanvasProjectsView } from './design/views/canvas/CanvasProjectsView'
-import { ScheduledTasksView } from './design/views/ScheduledTasksView'
 import { McpView } from './design/views/McpView'
 import { SkillStoreView } from './design/views/SkillStoreView'
 import { SettingsView, ProfileEditModal } from './design/views/SettingsView'
@@ -131,7 +130,6 @@ const SYSTEM_NOTIFICATION_VIEW_TARGETS = new Set<ViewId>([
   'agents',
   'board',
   'canvas',
-  'scheduled-tasks',
   'skills',
   'skill-store',
   'mcp',
@@ -200,7 +198,6 @@ const NAV_ITEMS: Array<{
   { id: 'providers', labelKey: 'nav.providers', icon: Icons.Server },
   { id: 'skill-store', labelKey: 'nav.skills', icon: Icons.Skills },
   { id: 'mcp', labelKey: 'nav.mcp', icon: Icons.MCP },
-  { id: 'scheduled-tasks', labelKey: 'nav.tasks', icon: Icons.Clock },
   { id: 'workflows', labelKey: 'nav.workflows', icon: Icons.Workflow },
   { id: 'board', labelKey: 'nav.board', icon: Icons.Board },
 ]
@@ -1333,8 +1330,6 @@ function Shell() {
         return <BoardView />
       case 'canvas':
         return <CanvasProjectsView onWorkspaceActiveChange={setCanvasWorkspaceActive} />
-      case 'scheduled-tasks':
-        return <ScheduledTasksView />
       case 'skills':
         return <SkillStoreView />
       case 'skill-store':

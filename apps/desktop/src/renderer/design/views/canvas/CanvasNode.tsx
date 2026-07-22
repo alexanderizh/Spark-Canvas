@@ -11,6 +11,8 @@ import {
   Handle,
   NodeResizer,
   Position,
+  useConnection,
+  useStore,
   useUpdateNodeInternals,
   type NodeProps,
 } from '@xyflow/react'
@@ -20,19 +22,28 @@ import { normalizeEduAssetUrl } from '@spark/shared'
 import { Icons } from '../../Icons'
 import { MarkdownText } from '../chat/ChatMarkdown'
 import { canvasFlowNodeDataEqual } from './canvasStageNodeSync'
+import {
+  calculateCanvasContextMenuAnchorSpace,
+  CANVAS_CONTEXT_MENU_STAGE_INSETS,
+} from './canvasContextMenuModel'
 import { operationLabel } from './canvas.api'
 import { isCanvasImageContentNode, isOperationNode, nodeOperation } from './canvas.capabilities'
+import { isFullBleedCanvasImageNode } from './canvasImageNodePresentation'
 import {
   isLongText,
   keepsCanvasMediaNodeAspectRatio,
   pickCanvasNodeMinSize,
 } from './canvasNodeSize'
 import { getNodePipelineActions } from './canvasPipeline'
+import { CANVAS_PIPELINE_MENU_GROUPS, type CanvasPipelineAssetKind } from './canvasPipelineOps'
 import {
-  CANVAS_GENERAL_CREATE_OPERATION_GROUPS,
-  CANVAS_PIPELINE_CREATE_OPERATIONS,
+  CANVAS_BASE_CREATE_OPERATION_GROUPS,
+  CANVAS_BASE_TASK_MENU_LABEL,
+  CANVAS_FUNCTIONAL_CREATE_OPERATIONS,
+  CANVAS_FUNCTIONAL_MENU_LABEL,
 } from './canvasNodeGenerationMenu'
 import { buildCanvasOperationParamSummary } from './canvasOperationParamSummary'
+import { canvasNodeSecondaryLabel, canvasOperationRuntimeSummary } from './canvasNodeSecondaryLabel'
 import {
   getNodeCurrentSubtype,
   getNodeSubtypeOptions,
@@ -51,6 +62,7 @@ import type { CanvasNode as SparkCanvasNode } from './canvas.types'
 import type { CanvasOperationOutputMode, CanvasOperationType } from './canvas.types'
 import type { CanvasNodeData } from './canvas.types'
 import type { CanvasOperationRunView } from './canvasOperationRuns'
+import { effectiveCanvasOperationStatus } from './canvasTaskOutputIntegrity'
 
 /** 把 op 的图标 key 映射为 Icons 组件（找不到回退 Workflow） */
 function resolvePipelineIcon(iconKey: string | undefined, size = 14): React.ReactNode {
@@ -59,116 +71,7 @@ function resolvePipelineIcon(iconKey: string | undefined, size = 14): React.Reac
   return <IconFn size={size} />
 }
 
-/** 从节点数据里解析导演台站位（兼容 v2 items / 旧版 objects），用于卡片迷你俯视图。 */
-function readDirectorStageMini(data: SparkCanvasNode['data']): {
-  items: Array<{ x: number; z: number; color: string }>
-  camera: { x: number; z: number; facing: number; fov: number }
-} | null {
-  const raw = data.directorStage as Record<string, unknown> | undefined
-  if (!raw || typeof raw !== 'object') return null
-  const clamp = (v: number) => Math.min(1, Math.max(-1, v))
-  const fovFromFocal = (focal: number) =>
-    (2 * Math.atan(36 / (2 * Math.min(300, Math.max(8, focal || 35)))) * 180) / Math.PI
-
-  if (Array.isArray(raw.items) && raw.camera && typeof raw.camera === 'object') {
-    const cam = raw.camera as Record<string, unknown>
-    const items = (raw.items as Array<Record<string, unknown>>)
-      .filter((it) => typeof it.x === 'number')
-      .map((it) => ({
-        x: clamp(Number(it.x) || 0),
-        z: clamp(Number(it.z) || 0),
-        color: typeof it.color === 'string' ? it.color : '#60a5fa',
-      }))
-    return {
-      items,
-      camera: {
-        x: clamp(Number(cam.x) || 0),
-        z: clamp(Number.isFinite(Number(cam.z)) ? Number(cam.z) : 0.9),
-        facing: Number(cam.facing) || 0,
-        fov: fovFromFocal(Number(cam.focalLength) || 35),
-      },
-    }
-  }
-
-  if (Array.isArray(raw.objects)) {
-    const objs = raw.objects as Array<Record<string, unknown>>
-    const camObj = objs.find((o) => o.kind === 'camera')
-    const items = objs
-      .filter((o) => o.kind !== 'camera')
-      .map((o) => {
-        const pos = (o.position as { x?: number; z?: number } | undefined) ?? {}
-        return {
-          x: clamp((Number(pos.x) || 0) / 5),
-          z: clamp((Number(pos.z) || 0) / 5),
-          color: o.kind === 'prop' ? '#e2e8f0' : '#60a5fa',
-        }
-      })
-    const camPos = (camObj?.position as { x?: number; z?: number } | undefined) ?? {}
-    return {
-      items,
-      camera: {
-        x: clamp((Number(camPos.x) || 0) / 5),
-        z: clamp((Number(camPos.z) || 4) / 5),
-        facing: 0,
-        fov: 50,
-      },
-    }
-  }
-  return null
-}
-
-/** 导演台节点卡片：迷你俯视图（网格 + 站位点 + 相机 FOV 扇形）。 */
-function DirectorStageMini({ data, nodeId }: { data: SparkCanvasNode['data']; nodeId: string }) {
-  const stage = readDirectorStageMini(data)
-  const clipId = `mini-stage-clip-${nodeId}`
-  const toPlan = (x: number, z: number) => ({ px: 50 + x * 40, py: 50 + z * 40 })
-  const cam = stage ? toPlan(stage.camera.x, stage.camera.z) : { px: 50, py: 90 }
-  const head = (deg: number) => ({
-    hx: Math.sin((deg * Math.PI) / 180),
-    hy: -Math.cos((deg * Math.PI) / 180),
-  })
-  const fov = stage?.camera.fov ?? 50
-  const facing = stage?.camera.facing ?? 0
-  const left = head(facing - fov / 2)
-  const right = head(facing + fov / 2)
-  const L = 120
-  return (
-    <svg
-      className="canvas-node-director-mini"
-      viewBox="0 0 100 100"
-      preserveAspectRatio="xMidYMid slice"
-    >
-      <defs>
-        <clipPath id={clipId}>
-          <rect x="8" y="8" width="84" height="84" rx="4" />
-        </clipPath>
-      </defs>
-      <rect x="8" y="8" width="84" height="84" rx="4" className="mini-floor" />
-      <g clipPath={`url(#${clipId})`} className="mini-grid">
-        {[26, 44, 62, 80].map((v) => (
-          <line key={`mx-${v}`} x1={v} y1="8" x2={v} y2="92" />
-        ))}
-        {[26, 44, 62, 80].map((v) => (
-          <line key={`my-${v}`} x1="8" y1={v} x2="92" y2={v} />
-        ))}
-      </g>
-      <polygon
-        clipPath={`url(#${clipId})`}
-        className="mini-cone"
-        points={`${cam.px},${cam.py} ${cam.px + left.hx * L},${cam.py + left.hy * L} ${cam.px + right.hx * L},${cam.py + right.hy * L}`}
-      />
-      {stage?.items.map((item, index) => {
-        const p = toPlan(item.x, item.z)
-        return (
-          <circle key={index} cx={p.px} cy={p.py} r={3.4} fill={item.color} className="mini-dot" />
-        )
-      })}
-      <rect x={cam.px - 3} y={cam.py - 3} width={6} height={6} rx={1.4} className="mini-cam" />
-    </svg>
-  )
-}
-
-/** 真·3D 导演台节点卡片：角色/道具计数 + 最近一次截图缩略图（若有）。 */
+/** 3D 导演台节点卡片：角色/道具计数 + 最近一次截图缩略图（若有）。 */
 function Stage3DMini({ data }: { data: SparkCanvasNode['data'] }) {
   const raw = data.stage3d as Record<string, unknown> | undefined
   const actors = Array.isArray(raw?.actors) ? (raw!.actors as unknown[]).length : 0
@@ -275,24 +178,16 @@ function operationStatusLabel(status: SparkCanvasNode['data']['status']): string
   return '待提交'
 }
 
-function operationRuntimeSummary(node: SparkCanvasNode): string | null {
-  const model = typeof node.data.modelId === 'string' ? node.data.modelId.trim() : ''
-  if (model) return `模型 ${model}`
-  const manifest = typeof node.data.manifestId === 'string' ? node.data.manifestId.trim() : ''
-  if (manifest) return `工作流 ${manifest}`
-  const provider =
-    typeof node.data.providerProfileId === 'string' ? node.data.providerProfileId.trim() : ''
-  return provider ? `Provider ${provider}` : null
-}
-
 function OperationOutputDeck({
   runs,
   mode,
   fallback,
+  isolateWheel,
 }: {
   runs: CanvasOperationRunView[]
   mode: CanvasOperationOutputMode
   fallback: ReactNode
+  isolateWheel: boolean
 }) {
   const [runIndex, setRunIndex] = useState(0)
   const [outputIndex, setOutputIndex] = useState(0)
@@ -317,10 +212,14 @@ function OperationOutputDeck({
     <div className="canvas-operation-output-deck">
       <div className={`canvas-operation-output-stage${isCollection ? ' is-collection' : ''}`}>
         {isCollection ? (
-          <CanvasOperationOutputList outputs={outputs} />
+          <CanvasOperationOutputList outputs={outputs} isolateWheel={isolateWheel} />
         ) : (
           <>
-            {activeOutput ? <CanvasOperationOutputPreview output={activeOutput} /> : fallback}
+            {activeOutput ? (
+              <CanvasOperationOutputPreview output={activeOutput} isolateWheel={isolateWheel} />
+            ) : (
+              fallback
+            )}
             <div className="canvas-operation-output-stage-label">
               <span>{activeOutput?.title ?? operationStatusLabel(activeRun.status)}</span>
               {outputs.length > 1 ? (
@@ -388,6 +287,8 @@ function OperationOutputDeck({
 
 export type CanvasFlowNodeData = {
   canvasNode: SparkCanvasNode
+  /** 节点自身或最近一次任务产物关联的影视资产类型，用于放宽同类型流水线入口。 */
+  assetKinds?: CanvasPipelineAssetKind[]
   assetSubviewCount?: number
   /** 当前操作节点的运行历史与各次产物，仅用于视图聚合。 */
   operationRuns?: CanvasOperationRunView[]
@@ -424,6 +325,8 @@ export type CanvasFlowNodeData = {
     dissolveGroup: (groupId: string) => void
     /** 单节点右键：把该节点加入画布 Agent 对话引用列表 */
     addNodeToAgent?: (nodeId: string) => void
+    /** 单任务节点右键：使用已保存配置直接提交运行 */
+    runOperationNode?: (nodeId: string) => void
     openAiComposer: (nodeId: string) => void
     saveToLibrary: (nodeId: string) => void
     annotateImage?: (nodeId: string) => void
@@ -527,6 +430,17 @@ const PIPELINE_ROLE_META: Partial<
 const IMAGE_STYLE_EXTRACTION_PROMPT =
   '请分析输入图片的视觉风格，并输出可复用的中文风格描述。重点包括：画面题材、艺术媒介、色彩倾向、光影氛围、构图镜头、材质细节、时代/类型气质，以及适合作为后续生成提示词的风格关键词。'
 
+function buildTextStyleExtractionPrompt(node: SparkCanvasNode): string {
+  const source = sourceNodeText(node)
+  return [
+    '请阅读输入的剧本文本，提炼出这一章节可复用的镜头风格描述（中文）。',
+    '重点包括：整体影像气质、景别偏好、运镜方式、构图习惯、色调与光影氛围、画面材质与年代质感、节奏与剪辑风格，以及适合作为后续分镜 / 生成提示词的风格关键词。',
+    source ? `章节文本：\n${source}` : '',
+  ]
+    .filter(Boolean)
+    .join('\n')
+}
+
 const INLINE_PANEL_TRANSITION_MS = 180
 
 const NODE_TYPE_META_LABEL: Partial<Record<SparkCanvasNode['type'] | 'prompt', string>> = {
@@ -580,13 +494,31 @@ export const CanvasNode = memo(function CanvasNode({
   selected,
   width,
   height,
+  positionAbsoluteX,
+  positionAbsoluteY,
 }: NodeProps) {
   const updateNodeInternals = useUpdateNodeInternals()
+  const connection = useConnection((current) =>
+    current.inProgress && current.toNode?.id === id
+      ? { isValid: current.isValid, pointer: current.pointer }
+      : null,
+  )
+  const viewportTransform = useStore(
+    (state) => (state.connection.inProgress ? state.transform : null),
+    (previous, next) =>
+      previous === next ||
+      (previous != null &&
+        next != null &&
+        previous[0] === next[0] &&
+        previous[1] === next[1] &&
+        previous[2] === next[2]),
+  )
   const {
     actions,
     canvasNode: node,
     assetSubviewCount = 0,
     operationRuns = [],
+    assetKinds = [],
     isGeneratedOutput = false,
     baseRenderedHeight = node.height,
     cardChromeExtraHeight = 0,
@@ -595,6 +527,21 @@ export const CanvasNode = memo(function CanvasNode({
     inlineToolbar,
   } = data as CanvasFlowNodeData
   const locked = Boolean(node.locked)
+  const connectionTargetsNode = connection != null
+  const connectionTargetIsValid = connection?.isValid === true
+  const connectionPointer = connection?.pointer
+  const connectionPointerPosition =
+    connectionTargetIsValid && connectionPointer && viewportTransform
+      ? {
+          // React Flow exposes the pointer in renderer coordinates while custom node
+          // content is laid out in flow coordinates. Convert it back so the marker
+          // can travel through the invisible snap zone without moving the real handle.
+          left:
+            (connectionPointer.x - viewportTransform[0]) / viewportTransform[2] - positionAbsoluteX,
+          top:
+            (connectionPointer.y - viewportTransform[1]) / viewportTransform[2] - positionAbsoluteY,
+        }
+      : null
   const isGroup = node.type === 'group'
   const isTask = isOperationNode(node)
   const operationOutputState = useMemo(
@@ -618,7 +565,6 @@ export const CanvasNode = memo(function CanvasNode({
     node.type === 'prompt' && (!node.title || node.title === 'Prompt')
       ? 'Text note'
       : (node.title ?? metaTypeLabel)
-  const isDirectorStage = node.data.subtype === 'director_stage'
   const isDirectorStage3D = node.data.subtype === 'director_stage_3d'
   const isVideoWorkbench = node.data.subtype === 'video_workbench'
   const isResourceOutput = !isTask && (isGeneratedOutput || node.data.origin === 'task_output')
@@ -640,6 +586,7 @@ export const CanvasNode = memo(function CanvasNode({
   // 未锁定节点在选中或悬浮时挂载缩放控件，无需先点击，同时避免所有节点常驻控件。
   const showResizer = !locked && (selected || resizeHovered || resizing)
   const imageSrc = node.data.thumbnailUrl ?? node.data.url
+  const isFullBleedImageNode = isFullBleedCanvasImageNode(node)
   const normalizedImageSrc = imageSrc ? normalizeEduAssetUrl(imageSrc) : ''
   const normalizedAudioSrc = node.data.url ? normalizeEduAssetUrl(node.data.url) : ''
   const normalizedVideoSrc = node.data.url ? normalizeEduAssetUrl(node.data.url) : ''
@@ -651,7 +598,7 @@ export const CanvasNode = memo(function CanvasNode({
 
   const hasOperationOutput = !isTask || Boolean(operationOutputState.primaryOutput)
   const canCreateOperationFromNode = !isTask || hasOperationOutput
-  const pipelineActions = contentNode ? getNodePipelineActions(contentNode) : []
+  const pipelineActions = contentNode ? getNodePipelineActions(contentNode, { assetKinds }) : []
   // 子类型切换（仅 image/text）：当前子类型 + 可选项，供右键菜单「切换类型」渲染。
   const subtypeSwitch = useMemo(() => {
     if (!isSubtypeSwitchable(node)) return null
@@ -662,6 +609,9 @@ export const CanvasNode = memo(function CanvasNode({
   }, [node])
   const isPanorama360 = Boolean(contentNode?.data.panorama360 ?? node.data.panorama360)
   const isImageContent = contentNode ? isCanvasImageContentNode(contentNode) : false
+  const isTextLikeContent = contentNode
+    ? contentNode.type === 'text' || contentNode.type === 'prompt'
+    : false
   const canExtractCharacterSubview = isImageContent && hasOperationOutput
   const latestOperationOutputCount =
     operationRuns.find((run) => run.outputs.length > 0)?.outputs.length ?? 0
@@ -680,11 +630,14 @@ export const CanvasNode = memo(function CanvasNode({
     return readRenderableShotScriptRows(node.data.text)
   }, [node.type, node.data.text])
   const renderShotTable = shotScriptRows.length > 0
-  const runImageStyleExtraction = () =>
-    actions.createOperationChild(node.id, 'text_generate', {
+  const runStyleExtraction = () => {
+    const target = contentNode ?? node
+    const isTextLike = target.type === 'text' || target.type === 'prompt'
+    return actions.createOperationChild(node.id, 'text_generate', {
       title: '风格提取',
-      prompt: IMAGE_STYLE_EXTRACTION_PROMPT,
+      prompt: isTextLike ? buildTextStyleExtractionPrompt(target) : IMAGE_STYLE_EXTRACTION_PROMPT,
     })
+  }
   const createImageOutpaintTask = () =>
     actions.createOperationChild(node.id, 'image_edit', {
       title: '图片扩图',
@@ -718,10 +671,22 @@ export const CanvasNode = memo(function CanvasNode({
                   <Icons.Sparkles size={14} /> 提取风格
                 </span>
               ),
-              onClick: runImageStyleExtraction,
+              onClick: runStyleExtraction,
             },
           ]
-        : []),
+        : isTextLikeContent
+          ? [
+              {
+                key: 'extract-style',
+                label: (
+                  <span className="canvas-menu-item">
+                    <Icons.Sparkles size={14} /> 提取风格
+                  </span>
+                ),
+                onClick: runStyleExtraction,
+              },
+            ]
+          : []),
       ...(isImageContent ||
       Boolean(
         hasOperationOutput &&
@@ -747,13 +712,38 @@ export const CanvasNode = memo(function CanvasNode({
       createImageOutpaintTask,
       hasOperationOutput,
       isImageContent,
-      runImageStyleExtraction,
+      isTextLikeContent,
+      runStyleExtraction,
     ],
   )
+  const [contextMenuBoundary, setContextMenuBoundary] = useState<{
+    maxHeight: number
+    maxWidth: number
+    placement: 'topLeft' | 'topRight' | 'bottomLeft' | 'bottomRight'
+  }>({ maxHeight: 520, maxWidth: 320, placement: 'bottomLeft' })
   const menu = useMemo(
     () => ({
       className: 'canvas-node-context-menu',
+      style: {
+        maxHeight: Math.max(0, Math.min(520, contextMenuBoundary.maxHeight)),
+        maxWidth: Math.max(0, Math.min(320, contextMenuBoundary.maxWidth)),
+      },
       items: [
+        ...(isTask && actions.runOperationNode
+          ? [
+              {
+                key: 'run-operation',
+                label: (
+                  <span className="canvas-menu-item">
+                    <Icons.Play size={14} /> 提交运行
+                  </span>
+                ),
+                disabled: node.data.status === 'running',
+                onClick: () => actions.runOperationNode?.(node.id),
+              },
+              { type: 'divider' as const },
+            ]
+          : []),
         ...(isPanorama360
           ? [
               {
@@ -789,31 +779,53 @@ export const CanvasNode = memo(function CanvasNode({
           ? [
               {
                 key: 'pipeline-actions',
+                popupClassName: 'canvas-node-context-submenu-popup',
                 label: (
                   <span className="canvas-menu-item">
-                    <Icons.Workflow size={14} /> 剧本流水线
+                    <Icons.Workflow size={14} /> {CANVAS_FUNCTIONAL_MENU_LABEL}
                   </span>
                 ),
                 children: [
-                  ...pipelineActions.map((action) => ({
-                    key: `pipeline-${action.id}`,
-                    label: (
-                      <span className="canvas-menu-item">
-                        {resolvePipelineIcon(action.icon)} {action.label}
-                      </span>
-                    ),
-                    onClick: () => actions.pipelineAction(node.id, action.id),
-                  })),
-                  ...(pipelineActions.length > 0 ? [{ type: 'divider' as const }] : []),
-                  ...CANVAS_PIPELINE_CREATE_OPERATIONS.map((item) => ({
-                    key: `pipeline-op-${item.operation}`,
-                    label: (
-                      <span className="canvas-menu-item">
-                        {resolvePipelineIcon(item.icon)} {item.label}
-                      </span>
-                    ),
-                    onClick: () => actions.createOperationChild(node.id, item.operation),
-                  })),
+                  ...CANVAS_PIPELINE_MENU_GROUPS.flatMap((group) => {
+                    const groupActions = pipelineActions.filter(
+                      (action) => action.kind === group.id,
+                    )
+                    return groupActions.length > 0
+                      ? [
+                          {
+                            type: 'group' as const,
+                            key: `pipeline-group-${group.id}`,
+                            label: group.label,
+                            children: groupActions.map((action) => ({
+                              key: `pipeline-${action.id}`,
+                              label: (
+                                <span className="canvas-menu-item">
+                                  {resolvePipelineIcon(action.icon)} {action.label}
+                                </span>
+                              ),
+                              onClick: () => actions.pipelineAction(node.id, action.id),
+                            })),
+                          },
+                        ]
+                      : []
+                  }),
+                  {
+                    type: 'group' as const,
+                    key: 'pipeline-group-node-enhance',
+                    label: '通用视觉工具',
+                    children: [
+                      ...contextualAiActions,
+                      ...CANVAS_FUNCTIONAL_CREATE_OPERATIONS.map((item) => ({
+                        key: `pipeline-op-${item.operation}`,
+                        label: (
+                          <span className="canvas-menu-item">
+                            {resolvePipelineIcon(item.icon)} {item.label}
+                          </span>
+                        ),
+                        onClick: () => actions.createOperationChild(node.id, item.operation),
+                      })),
+                    ],
+                  },
                 ],
               },
               { type: 'divider' as const },
@@ -904,23 +916,22 @@ export const CanvasNode = memo(function CanvasNode({
           ? [
               {
                 key: 'add-operation',
+                popupClassName: 'canvas-node-context-submenu-popup',
                 label: (
                   <span className="canvas-menu-item">
-                    <Icons.Sparkles size={14} /> 生成任务
+                    <Icons.Sparkles size={14} /> {CANVAS_BASE_TASK_MENU_LABEL}
                   </span>
                 ),
-                children: [
-                  ...contextualAiActions,
-                  ...(contextualAiActions.length > 0 ? [{ type: 'divider' as const }] : []),
-                  ...CANVAS_GENERAL_CREATE_OPERATION_GROUPS.flatMap((group, groupIndex) => [
-                    ...(groupIndex > 0 ? [{ type: 'divider' as const }] : []),
-                    ...group.items.map((item) => ({
-                      key: `op-${item.operation}`,
-                      label: item.label,
-                      onClick: () => actions.createOperationChild(node.id, item.operation),
-                    })),
-                  ]),
-                ],
+                children: CANVAS_BASE_CREATE_OPERATION_GROUPS.map((group) => ({
+                  type: 'group' as const,
+                  key: `base-task-group-${group.id}`,
+                  label: group.label,
+                  children: group.items.map((item) => ({
+                    key: `op-${item.operation}`,
+                    label: item.label,
+                    onClick: () => actions.createOperationChild(node.id, item.operation),
+                  })),
+                })),
               },
             ]
           : []),
@@ -964,6 +975,7 @@ export const CanvasNode = memo(function CanvasNode({
           ? [
               {
                 key: 'switch-subtype',
+                popupClassName: 'canvas-node-context-submenu-popup',
                 label: (
                   <span className="canvas-menu-item">
                     <Icons.Refresh size={14} /> 切换类型
@@ -1085,9 +1097,13 @@ export const CanvasNode = memo(function CanvasNode({
       canExpandOperationOutputs,
       canCreateOperationFromNode,
       contentNode,
+      contextMenuBoundary.maxHeight,
+      contextMenuBoundary.maxWidth,
       hasOperationOutput,
       isImageContent,
+      isTask,
       node.id,
+      node.data.status,
       node.type,
       pipelineActions,
       storyboardSplitSource,
@@ -1153,8 +1169,10 @@ export const CanvasNode = memo(function CanvasNode({
 
   const productionBadge =
     node.data.productionState && PRODUCTION_STATE_BADGE[node.data.productionState]
-  const operationSummary = isOperationNode(node) ? operationRuntimeSummary(node) : null
-  const operationStatus = isOperationNode(node) ? (node.data.status ?? 'pending') : null
+  const operationSummary = isOperationNode(node) ? canvasOperationRuntimeSummary(node) : null
+  const operationStatus = isOperationNode(node)
+    ? effectiveCanvasOperationStatus(node.data.status, Boolean(operationOutputState.primaryOutput))
+    : null
   const operationParamSummary = isOperationNode(node)
     ? buildCanvasOperationParamSummary(node.data.modelParams, 4)
     : []
@@ -1173,57 +1191,23 @@ export const CanvasNode = memo(function CanvasNode({
     (node.type === 'image' || node.type === 'audio' || node.type === 'video') &&
     !isOperationNode(node)
   const shouldShowContentTitle = isTextContentNode || isMediaContentNode
-  const contentTitleMeta = isResourceOutput
-    ? '画布产物'
-    : roleMeta?.label
-      ? `${roleMeta.label}资产`
-      : node.type === 'image'
-        ? node.data.panorama360
-          ? '360° 全景资产'
-          : '图片资产'
-        : node.type === 'video'
-          ? '视频资产'
-          : node.type === 'audio'
-            ? '音频资产'
-            : '双击打开编辑器'
   const passiveStatusLabel = isResourceOutput
     ? '产物'
     : productionBadge?.label
       ? productionBadge.label
-      : isDirectorStage
-        ? '草稿'
-        : node.type === 'group'
-          ? '节点组'
-          : isMediaContentNode
-            ? node.data.url
-              ? '已生成'
-              : '待添加'
-            : isTextContentNode
-              ? '可编辑'
-              : '已就绪'
-  const nodeFooterLabel = operationSummary
-    ? operationSummary
-    : isOperationNode(node)
-      ? '运行记录'
-      : isResourceOutput
-        ? '画布产物'
-        : node.type === 'group'
-          ? '成组排列'
-          : isDirectorStage3D
-            ? '导演场景'
-            : isVideoWorkbench
-              ? '视频工程'
-              : node.type === 'image'
-                ? node.data.panorama360
-                  ? '360° 全景'
-                  : '图片资产'
-                : node.type === 'video'
-                  ? '视频资产'
-                  : node.type === 'audio'
-                    ? '音频资产'
-                    : isTextContentNode
-                      ? `${(node.data.text ?? node.data.message ?? '').length} 字`
-                      : '可编辑'
+      : node.type === 'group'
+        ? '节点组'
+        : isMediaContentNode
+          ? node.data.url
+            ? '已生成'
+            : '待添加'
+          : isTextContentNode
+            ? '可编辑'
+            : '已就绪'
+  const nodeFooterLabel = canvasNodeSecondaryLabel(node, undefined, {
+    isResourceOutput,
+    isTextContentNode,
+  })
   const nodeStyle = {
     ...(roleMeta ? { ['--role-color' as string]: roleMeta.color } : {}),
     ...(hasInlineExtension
@@ -1238,7 +1222,7 @@ export const CanvasNode = memo(function CanvasNode({
             (node.data.panorama360 ? <Icons.Globe size={14} /> : <Icons.Image size={14} />)}
           {node.type === 'audio' && <Icons.Play size={14} />}
           {(node.type === 'text' || node.type === 'prompt') && <Icons.File size={14} />}
-          {isDirectorStage ? (
+          {isDirectorStage3D ? (
             <Icons.Box size={14} />
           ) : isOperationNode(node) ? (
             operationNodeIcon(nodeOperation(node), operationWorkflow)
@@ -1272,11 +1256,35 @@ export const CanvasNode = memo(function CanvasNode({
   )
 
   return (
-    <Dropdown trigger={['contextMenu']} menu={menu} placement="bottomLeft" autoAdjustOverflow>
-      <div className="canvas-node-shell">
+    <Dropdown
+      trigger={['contextMenu']}
+      menu={menu}
+      placement={contextMenuBoundary.placement}
+      autoAdjustOverflow
+    >
+      <div
+        className="canvas-node-shell"
+        onContextMenuCapture={(event) => {
+          const stage = event.currentTarget.closest<HTMLElement>('.canvas-stage')
+          if (!stage) return
+          const rect = stage.getBoundingClientRect()
+          const nextBoundary = calculateCanvasContextMenuAnchorSpace({
+            point: { x: event.clientX - rect.left, y: event.clientY - rect.top },
+            container: { width: rect.width, height: rect.height },
+            inset: CANVAS_CONTEXT_MENU_STAGE_INSETS,
+          })
+          setContextMenuBoundary((current) =>
+            current.maxHeight === nextBoundary.maxHeight &&
+            current.maxWidth === nextBoundary.maxWidth &&
+            current.placement === nextBoundary.placement
+              ? current
+              : nextBoundary,
+          )
+        }}
+      >
         <div
           data-canvas-node-id={node.id}
-          className={`canvas-node canvas-node-${node.type}${selected ? ' canvas-node-selected' : ''}${roleMeta ? ' canvas-node-has-role' : ''}${hasInlineExtension ? ' canvas-node-inline-expanded' : ''}${isTask && node.data.status === 'running' ? ' canvas-node-task-running' : ''}${isTask && node.data.status === 'failed' ? ' canvas-node-task-failed' : ''}${renderShotTable ? ' canvas-node-shot-script' : ''}${isResourceOutput ? ' canvas-node-resource-output' : ''}`}
+          className={`canvas-node canvas-node-${node.type}${selected ? ' canvas-node-selected' : ''}${roleMeta ? ' canvas-node-has-role' : ''}${hasInlineExtension ? ' canvas-node-inline-expanded' : ''}${isTask && operationStatus === 'running' ? ' canvas-node-task-running' : ''}${isTask && operationStatus === 'failed' ? ' canvas-node-task-failed' : ''}${renderShotTable ? ' canvas-node-shot-script' : ''}${isResourceOutput ? ' canvas-node-resource-output' : ''}${isFullBleedImageNode ? ' canvas-node-image-full-bleed' : ''}${connectionTargetsNode ? ' canvas-node-connection-target' : ''}${connectionTargetIsValid ? ' canvas-node-connection-valid' : ''}`}
           style={nodeStyle}
           onPointerEnter={() => setResizeHovered(true)}
           onPointerLeave={() => setResizeHovered(false)}
@@ -1285,6 +1293,13 @@ export const CanvasNode = memo(function CanvasNode({
             actions.editNode(node.id)
           }}
         >
+          {connectionPointerPosition ? (
+            <span
+              className="canvas-node-connection-follow"
+              aria-hidden="true"
+              style={{ left: connectionPointerPosition.left, top: connectionPointerPosition.top }}
+            />
+          ) : null}
           {nodeMetaBar}
           {/* 悬浮、选中或正在拉伸时显示缩放控件。 */}
           <NodeResizer
@@ -1306,13 +1321,10 @@ export const CanvasNode = memo(function CanvasNode({
             {shouldShowContentTitle && isTextContentNode ? (
               <div className="canvas-node-content-title canvas-node-content-title-text">
                 <strong title={title}>{title}</strong>
-                <span>{contentTitleMeta}</span>
               </div>
             ) : null}
-            {/* nowheel：阻止画布 d3-zoom 抢走滚轮做缩放。
-              需要滚动的节点由内部内容区（如 .canvas-node-text / .canvas-node-task-msg）
-              自己处理原生滚动；react-flow 靠事件祖先链上的 nowheel 类跳过缩放。 */}
-            <div className="canvas-node-body nowheel">
+            {/* 仅选中节点时用 nowheel 将滚轮留给节点内容区；未选中时交还画布缩放/平移。 */}
+            <div className={`canvas-node-body${selected ? ' nowheel' : ''}`}>
               {node.type === 'image' ? (
                 node.data.url ? (
                   <div className="canvas-node-image-wrap">
@@ -1396,31 +1408,25 @@ export const CanvasNode = memo(function CanvasNode({
                 <Stage3DMini data={node.data} />
               ) : isVideoWorkbench ? (
                 <VideoWorkbenchMini data={node.data} />
-              ) : isDirectorStage ? (
-                <div className="canvas-node-director-stage">
-                  <DirectorStageMini data={node.data} nodeId={node.id} />
-                  <div className="canvas-node-director-stage-hint">
-                    双击编排画面 · 站位 / 取景 / 提示词
-                  </div>
-                </div>
               ) : isOperationNode(node) ? (
                 <div className="canvas-node-task canvas-node-operation">
                   <OperationOutputDeck
                     runs={operationRuns}
                     mode={operationOutputState.mode}
+                    isolateWheel={selected}
                     fallback={
                       <div className="canvas-operation-empty-state">
                         <div className="canvas-operation-empty-icon">
                           {operationNodeIcon(nodeOperation(node), operationWorkflow)}
                         </div>
-                        {(node.data.status ?? 'pending') !== 'pending' ? (
+                        {(operationStatus ?? 'pending') !== 'pending' ? (
                           <Progress
                             percent={node.data.progress ?? 0}
                             size="middle"
                             status={
-                              node.data.status === 'failed'
+                              operationStatus === 'failed'
                                 ? 'exception'
-                                : node.data.status === 'completed'
+                                : operationStatus === 'completed'
                                   ? 'success'
                                   : 'active'
                             }
@@ -1449,9 +1455,9 @@ export const CanvasNode = memo(function CanvasNode({
                   />
                 </div>
               ) : renderShotTable ? (
-                <CanvasShotScriptTable rows={shotScriptRows} />
+                <CanvasShotScriptTable rows={shotScriptRows} isolateWheel={selected} />
               ) : isResourceOutput && (node.type === 'text' || node.type === 'prompt') ? (
-                <div className="canvas-node-resource-text nowheel">
+                <div className={`canvas-node-resource-text${selected ? ' nowheel' : ''}`}>
                   <div className="canvas-node-resource-text-icon">
                     <Icons.File size={26} />
                   </div>
@@ -1469,29 +1475,47 @@ export const CanvasNode = memo(function CanvasNode({
                 </div>
               )}
             </div>
-            {shouldShowContentTitle && isMediaContentNode ? (
+            {shouldShowContentTitle && isMediaContentNode && !isFullBleedImageNode ? (
               <div className="canvas-node-content-title canvas-node-content-title-media">
                 <strong title={title}>{title}</strong>
-                <span>{contentTitleMeta}</span>
               </div>
             ) : null}
-            <div className="canvas-node-quick-footer nodrag nopan">
-              <span title={nodeFooterLabel}>{nodeFooterLabel}</span>
-              <button
-                type="button"
-                onClick={(event) => {
-                  event.preventDefault()
-                  event.stopPropagation()
-                  actions.editNode(node.id)
-                }}
-              >
-                {nodeActionLabel}
-              </button>
-            </div>
+            {isFullBleedImageNode ? (
+              <div className="canvas-node-image-overlay-footer nodrag nopan">
+                <span className="canvas-node-image-overlay-copy">
+                  <strong title={title}>{title}</strong>
+                  <small title={nodeFooterLabel}>{nodeFooterLabel}</small>
+                </span>
+                <button
+                  type="button"
+                  onClick={(event) => {
+                    event.preventDefault()
+                    event.stopPropagation()
+                    actions.editNode(node.id)
+                  }}
+                >
+                  {nodeActionLabel}
+                </button>
+              </div>
+            ) : (
+              <div className="canvas-node-quick-footer nodrag nopan">
+                <span title={nodeFooterLabel}>{nodeFooterLabel}</span>
+                <button
+                  type="button"
+                  onClick={(event) => {
+                    event.preventDefault()
+                    event.stopPropagation()
+                    actions.editNode(node.id)
+                  }}
+                >
+                  {nodeActionLabel}
+                </button>
+              </div>
+            )}
           </div>
           {renderedInlinePanel ? (
             <div
-              className={`canvas-node-inline-panel nodrag nopan nowheel${inlinePanelVisible ? ' is-visible' : ' is-hiding'}`}
+              className={`canvas-node-inline-panel nodrag nopan${selected ? ' nowheel' : ''}${inlinePanelVisible ? ' is-visible' : ' is-hiding'}`}
               style={{
                 ['--canvas-node-inline-extra-height' as string]: `${inlinePanelDisplayHeight}px`,
               }}

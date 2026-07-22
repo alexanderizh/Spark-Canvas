@@ -18,12 +18,6 @@
 # unsigned for local packaging tests unless REQUIRE_WINDOWS_SIGNING=1.
 set -euo pipefail
 
-# Windows hardened environments may export NoDefaultCurrentDirectoryInExePath,
-# which makes cmd.exe refuse to run executables from the current directory.
-# This breaks native module gyp actions (e.g. node-pty winpty's GetCommitHash.bat).
-# Clear it for the whole build process tree (inherited by electron-rebuild / electron-builder).
-unset NoDefaultCurrentDirectoryInExePath
-
 GREEN='\033[0;32m'
 RED='\033[0;31m'
 YELLOW='\033[1;33m'
@@ -76,6 +70,11 @@ builder_cert_path() {
 
 prepare_windows_signing() {
   step "1/4 Windows signing environment"
+
+  if [ "${REQUIRE_WINDOWS_SIGNING:-0}" = "1" ] \
+    && [ "${ALLOW_UNSIGNED_WINDOWS_RELEASE:-0}" = "1" ]; then
+    fail "REQUIRE_WINDOWS_SIGNING=1 cannot be combined with ALLOW_UNSIGNED_WINDOWS_RELEASE=1"
+  fi
 
   if { [ -n "${WIN_CSC_LINK:-}" ] && [ -z "${WIN_CSC_KEY_PASSWORD:-}" ]; } \
     || { [ -z "${WIN_CSC_LINK:-}" ] && [ -n "${WIN_CSC_KEY_PASSWORD:-}" ]; }; then
@@ -188,95 +187,14 @@ verify_windows_signature() {
     verify_path="$(cygpath -w "$exe_path")"
   fi
 
-  VERIFY_WINDOWS_SIGNATURE_PATH="$verify_path" "$ps_cmd" -NoProfile -Command '
-$path = $env:VERIFY_WINDOWS_SIGNATURE_PATH
-if ([string]::IsNullOrWhiteSpace($path)) {
-  throw "VERIFY_WINDOWS_SIGNATURE_PATH is empty"
-}
-if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
-  throw "Windows artifact does not exist: $path"
-}
-$sig = Get-AuthenticodeSignature -LiteralPath $path
-$allowUnsignedRelease = $env:ALLOW_UNSIGNED_WINDOWS_RELEASE -eq "1"
-Write-Host ("  Status : {0}" -f $sig.Status)
-Write-Host ("  Message: {0}" -f $sig.StatusMessage)
-if ($sig.SignerCertificate) {
-  Write-Host ("  Subject: {0}" -f $sig.SignerCertificate.Subject)
-  Write-Host ("  Issuer : {0}" -f $sig.SignerCertificate.Issuer)
-}
-if ($sig.TimeStamperCertificate) {
-  Write-Host ("  Timestamp signer: {0}" -f $sig.TimeStamperCertificate.Subject)
-}
-
-if (($sig.Status -eq "UnknownError" -or $sig.Status -eq "NotTrusted") -and
-    $sig.SignerCertificate -and
-    $sig.SignerCertificate.Subject -eq $sig.SignerCertificate.Issuer) {
-  if ($allowUnsignedRelease) {
-    Write-Warning "The self-signed signature is not trusted on this runner; skipping temporary root-store trust because unsigned Windows releases are allowed"
-    exit 0
-  }
-
-  # A self-signed certificate proves that the artifact was signed, but a clean
-  # CI runner does not trust it as a root CA. Temporarily trust only its public
-  # certificate and run Authenticode verification again so hash/signature
-  # failures still fail the build. Never persist this trust beyond the check.
-  Write-Host "  Self-signed certificate detected; verifying with temporary CurrentUser trust"
-  $certificate = $sig.SignerCertificate
-  $store = [System.Security.Cryptography.X509Certificates.X509Store]::new(
-    [System.Security.Cryptography.X509Certificates.StoreName]::Root,
-    [System.Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser
-  )
-  $certificateAdded = $false
-
-  try {
-    $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
-    $existing = $store.Certificates.Find(
-      [System.Security.Cryptography.X509Certificates.X509FindType]::FindByThumbprint,
-      $certificate.Thumbprint,
-      $false
-    )
-    if ($existing.Count -eq 0) {
-      $store.Add($certificate)
-      $certificateAdded = $true
-    }
-    $store.Close()
-
-    $sig = Get-AuthenticodeSignature -LiteralPath $path
-    Write-Host ("  Trusted status : {0}" -f $sig.Status)
-    Write-Host ("  Trusted message: {0}" -f $sig.StatusMessage)
-  }
-  finally {
-    try {
-      if ($certificateAdded) {
-        $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
-        $store.Remove($certificate)
-      }
-    }
-    finally {
-      $store.Close()
-    }
-  }
-}
-
-if ($sig.Status -ne "Valid") {
-  if ($allowUnsignedRelease) {
-    Write-Warning ("Authenticode verification failed, but the Windows release may continue: {0} - {1}" -f $sig.Status, $sig.StatusMessage)
-    exit 0
-  }
-  throw "Authenticode signature verification failed: $($sig.Status) - $($sig.StatusMessage)"
-}
-if (-not $sig.TimeStamperCertificate) {
-  if ($allowUnsignedRelease) {
-    Write-Warning "Authenticode signature has no RFC 3161 timestamp, but the Windows release may continue"
-    exit 0
-  }
-  throw "Authenticode signature is valid but has no RFC 3161 timestamp"
-}
-' "$verify_path"
+  "$ps_cmd" -NoProfile -ExecutionPolicy Bypass \
+    -File "$SCRIPT_DIR/verify-windows-signature.ps1" \
+    -ArtifactPath "$verify_path" \
+    -PolicyPath "$SCRIPT_DIR/windows-signature-policy.mjs"
   if [ "${ALLOW_UNSIGNED_WINDOWS_RELEASE:-0}" = "1" ]; then
     ok "Windows signature verification step completed (unsigned fallback is allowed)"
   else
-    ok "Authenticode signature is valid"
+    ok "Authenticode signature, trusted chains, and RFC3161 timestamp are valid"
   fi
 }
 

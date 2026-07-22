@@ -204,6 +204,7 @@ describe('SessionRepository', () => {
     expect(session.status).toBe('idle')
     expect(session.project_id).toBe('proj-1')
     expect(session.workspace_ids_json).toBe('[]')
+    expect(session.agent_id).toBe('canvas-assistant-agent')
   })
 
   it('should create a session with workspace ids', () => {
@@ -293,6 +294,84 @@ describe('SessionRepository', () => {
     // 无过滤
     const all = repo.list()
     expect(all.total).toBe(3)
+  })
+
+  it('filters workspace and canvas surface before counting and paginating', () => {
+    repo.create({
+      id: 'canvas-new',
+      kind: 'agent',
+      title: 'Canvas new',
+      status: 'idle',
+      projectId: 'project-1',
+      workspaceIds: ['workspace-1'],
+    })
+    repo.patchMetadata('canvas-new', { surface: 'canvas' })
+    repo.create({
+      id: 'general-newest',
+      kind: 'agent',
+      title: 'General',
+      status: 'idle',
+      projectId: 'project-1',
+      workspaceIds: ['workspace-1'],
+    })
+    repo.create({
+      id: 'canvas-other-workspace',
+      kind: 'agent',
+      title: 'Other workspace',
+      status: 'idle',
+      projectId: 'project-1',
+      workspaceIds: ['workspace-2'],
+    })
+    repo.patchMetadata('canvas-other-workspace', { surface: 'canvas' })
+    repo.create({
+      id: 'canvas-old',
+      kind: 'agent',
+      title: 'Canvas old',
+      status: 'idle',
+      projectId: 'project-1',
+      workspaceIds: ['workspace-1'],
+    })
+    repo.patchMetadata('canvas-old', { surface: 'canvas' })
+    repo.create({
+      id: 'canvas-wrong-agent',
+      kind: 'agent',
+      title: 'Wrong agent',
+      status: 'idle',
+      projectId: 'project-1',
+      workspaceIds: ['workspace-1'],
+      agentId: 'platform-manager-agent',
+    })
+    repo.patchMetadata('canvas-wrong-agent', { surface: 'canvas' })
+    repo.create({
+      id: 'canvas-other-project',
+      kind: 'agent',
+      title: 'Other project',
+      status: 'idle',
+      projectId: 'project-2',
+      workspaceIds: ['workspace-1'],
+      agentId: 'canvas-assistant-agent',
+    })
+    repo.patchMetadata('canvas-other-project', { surface: 'canvas' })
+
+    const setUpdatedAt = db.raw.prepare('UPDATE sessions SET updated_at = ? WHERE id = ?')
+    setUpdatedAt.run('2026-07-20T00:00:04.000Z', 'canvas-new')
+    setUpdatedAt.run('2026-07-20T00:00:05.000Z', 'general-newest')
+    setUpdatedAt.run('2026-07-20T00:00:06.000Z', 'canvas-other-workspace')
+    setUpdatedAt.run('2026-07-20T00:00:02.000Z', 'canvas-old')
+    setUpdatedAt.run('2026-07-20T00:00:07.000Z', 'canvas-wrong-agent')
+    setUpdatedAt.run('2026-07-20T00:00:08.000Z', 'canvas-other-project')
+
+    const result = repo.list({
+      projectId: 'project-1',
+      workspaceId: 'workspace-1',
+      surface: 'canvas',
+      agentId: 'canvas-assistant-agent',
+      limit: 1,
+      offset: 1,
+    })
+
+    expect(result.total).toBe(2)
+    expect(result.sessions.map((session) => session.id)).toEqual(['canvas-old'])
   })
 })
 

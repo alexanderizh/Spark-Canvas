@@ -40,8 +40,6 @@ export function ChatTabbar({
   setShowInspector,
   showConfigPanel,
   setShowConfigPanel,
-  showTerminalPanel,
-  setShowTerminalPanel,
   showSideChatPanel,
   onToggleSideChat,
   showCheckpointTimeline,
@@ -71,8 +69,6 @@ export function ChatTabbar({
   setShowInspector: (v: boolean) => void
   showConfigPanel: boolean
   setShowConfigPanel: (v: boolean) => void
-  showTerminalPanel: boolean
-  setShowTerminalPanel: (v: boolean) => void
   showSideChatPanel: boolean
   onToggleSideChat: () => void
   showCheckpointTimeline: boolean
@@ -245,5 +241,4 @@ export function ChatTabbar({
     </div>
   )
 }
-
 

@@ -16,11 +16,13 @@ import type {
 import type { MediaCapabilityId, MediaRequestCall } from '@spark/protocol'
 import { createLogger } from '@spark/shared'
 import { MediaProviderError } from './media-adapter.types.js'
+import { compactForLog } from './media-debug-log.js'
 import type {
   MediaGeneratedAsset,
   MediaGenerateInput,
   MediaGenerateOutput,
 } from './media-adapter.types.js'
+import type { MediaUploader } from './media-uploader.js'
 import { MediaRouterService } from './media-router.service.js'
 import type { InvokeOptions, MediaProviderProfile } from './media-router.service.js'
 
@@ -43,6 +45,8 @@ export interface MediaTaskRecord {
   outputDir: string
   requestId: string | null
   assets: MediaGeneratedAsset[]
+  /** 轮询任务提交接口的响应摘要（包含渠道任务 ID）。 */
+  submitResponse: unknown
   rawResponse: unknown
   /** 实际发给 provider 的请求摘要（method + url + 已截断 body），来自 router 的 fetch 捕获。 */
   requestCall: MediaRequestCall | null
@@ -61,10 +65,15 @@ export interface MediaTaskSubmitOptions {
   capability?: MediaCapabilityId
   extraParams?: Record<string, unknown>
   fetch?: typeof fetch
+  skipValidation?: boolean
+  fallbackUploader?: MediaUploader
 }
 
 export interface MediaTaskRouterLike {
-  invoke(input: MediaGenerateInput, options: InvokeOptions): Promise<{
+  invoke(
+    input: MediaGenerateInput,
+    options: InvokeOptions,
+  ): Promise<{
     output: MediaGenerateOutput
     providerProfileId: string
   }>
@@ -80,7 +89,10 @@ export class MediaTaskRuntimeService {
     this.repo.ensureSchema()
   }
 
-  async submit(input: MediaGenerateInput, options: MediaTaskSubmitOptions): Promise<MediaTaskRecord> {
+  async submit(
+    input: MediaGenerateInput,
+    options: MediaTaskSubmitOptions,
+  ): Promise<MediaTaskRecord> {
     const row = this.createRunningTask(input, options)
     log.info(
       `media task submitted (sync): id=${row.id} op=${row.operation} provider=${row.provider_profile_id ?? '(none)'} model=${row.model_id ?? '(auto)'}`,
@@ -100,7 +112,7 @@ export class MediaTaskRuntimeService {
     )
     void Promise.resolve(onUpdate?.(started)).catch(() => {})
     queueMicrotask(() => {
-      void this.execute(row, input, options)
+      void this.execute(row, input, options, onUpdate)
         .then((record) => {
           log.info(
             `media task finished (background): id=${record.id} op=${record.operation} status=${record.status}`,
@@ -116,7 +128,10 @@ export class MediaTaskRuntimeService {
     return started
   }
 
-  private createRunningTask(input: MediaGenerateInput, options: MediaTaskSubmitOptions): MediaGenerationTaskRow {
+  private createRunningTask(
+    input: MediaGenerateInput,
+    options: MediaTaskSubmitOptions,
+  ): MediaGenerationTaskRow {
     const submittedAt = new Date().toISOString()
     return this.repo.create({
       providerProfileId: options.providerProfileId ?? null,
@@ -126,7 +141,13 @@ export class MediaTaskRuntimeService {
       status: 'running',
       prompt: input.prompt ?? null,
       negativePrompt: input.negativePrompt ?? null,
-      inputFilesJson: JSON.stringify(input.inputFiles ?? []),
+      inputFilesJson: JSON.stringify(
+        (input.inputFiles ?? []).map((file) => ({
+          type: file.type,
+          ...(file.role !== undefined ? { role: file.role } : {}),
+          ...(file.mimeType !== undefined ? { mimeType: file.mimeType } : {}),
+        })),
+      ),
       modelParamsJson: JSON.stringify(input.modelParams ?? {}),
       outputDir: input.outputDir,
       submittedAt,
@@ -137,16 +158,38 @@ export class MediaTaskRuntimeService {
     row: MediaGenerationTaskRow,
     input: MediaGenerateInput,
     options: MediaTaskSubmitOptions,
+    onUpdate?: MediaTaskUpdateHandler,
   ): Promise<MediaTaskRecord> {
+    let submitResponse: unknown = null
     try {
       const invokeOptions: InvokeOptions = {
         providers: options.providers,
-        ...(options.providerProfileId !== undefined ? { providerProfileId: options.providerProfileId } : {}),
+        ...(options.providerProfileId !== undefined
+          ? { providerProfileId: options.providerProfileId }
+          : {}),
         ...(options.modelId !== undefined ? { modelId: options.modelId } : {}),
         ...(options.manifestId !== undefined ? { manifestId: options.manifestId } : {}),
         ...(options.capability !== undefined ? { capability: options.capability } : {}),
         ...(options.extraParams !== undefined ? { extraParams: options.extraParams } : {}),
         ...(options.fetch !== undefined ? { fetch: options.fetch } : {}),
+        ...(options.skipValidation === true ? { skipValidation: true } : {}),
+        ...(options.fallbackUploader !== undefined
+          ? { fallbackUploader: options.fallbackUploader }
+          : {}),
+        onTaskSubmitted: (nextSubmission) => {
+          submitResponse = nextSubmission.response
+          const submitted = this.repo.update(row.id, {
+            mode: 'async',
+            requestId: nextSubmission.requestId,
+          })
+          const record = rowToRecord(submitted ?? this.repo.getById(row.id) ?? row)
+          record.submitResponse = nextSubmission.response
+          record.requestCall = nextSubmission.requestCall ?? null
+          log.info(
+            `media task provider submitted: id=${row.id} providerRequestId=${nextSubmission.requestId} response=${JSON.stringify(nextSubmission.response).slice(0, 2000)}`,
+          )
+          void Promise.resolve(onUpdate?.(record)).catch(() => {})
+        },
       }
       const { output, providerProfileId } = await this.router.invoke(input, invokeOptions)
       const latest = this.repo.getById(row.id)
@@ -162,13 +205,17 @@ export class MediaTaskRuntimeService {
         mode: output.mode,
         requestId: output.requestId ?? null,
         assetsJson: JSON.stringify(output.assets),
-        rawResponseJson: output.rawResponse === undefined ? null : JSON.stringify(output.rawResponse),
+        rawResponseJson:
+          output.rawResponse === undefined
+            ? null
+            : JSON.stringify(compactForLog(output.rawResponse)),
         completedAt: new Date().toISOString(),
       })
       const record = rowToRecord(completed ?? this.repo.getById(row.id) ?? row)
       // requestCall 仅存在于内存的 router output 中（不落 media_generation_tasks 表），
       // 在此处挂到 record 上，经 IPC 传给画布任务，由画布快照负责持久化。
       record.requestCall = output.requestCall ?? null
+      record.submitResponse = submitResponse
       log.info(
         `media task succeeded: id=${record.id} op=${record.operation} provider=${providerProfileId} model=${output.model} assets=${output.assets.length}`,
       )
@@ -190,6 +237,7 @@ export class MediaTaskRuntimeService {
       const record = rowToRecord(failed ?? this.repo.getById(row.id) ?? row)
       // 失败任务也带上请求摘要（router 已挂到 error 上），方便在详情里排查 422/参数错误。
       record.requestCall = err instanceof MediaProviderError ? err.requestCall ?? null : null
+      record.submitResponse = submitResponse
       log.warn(
         `media task failed: id=${record.id} op=${record.operation} code=${code} msg=${message}`,
       )
@@ -212,7 +260,8 @@ export class MediaTaskRuntimeService {
       log.warn(`media task cancel miss: id=${taskId}`)
       return null
     }
-    const wasAlreadyTerminal = row.status === 'cancelled' || row.status === 'failed' || row.status === 'succeeded'
+    const wasAlreadyTerminal =
+      row.status === 'cancelled' || row.status === 'failed' || row.status === 'succeeded'
     log.info(
       `media task cancel: id=${row.id} status=${row.status}${wasAlreadyTerminal ? ' (already terminal)' : ''}`,
     )
@@ -222,15 +271,11 @@ export class MediaTaskRuntimeService {
   materialize(taskId: string): MediaGeneratedAsset[] | null {
     const row = this.repo.getById(taskId)
     if (!row || row.status !== 'succeeded') {
-      log.warn(
-        `media task materialize miss: id=${taskId} status=${row?.status ?? 'not_found'}`,
-      )
+      log.warn(`media task materialize miss: id=${taskId} status=${row?.status ?? 'not_found'}`)
       return null
     }
     const assets = parseJson(row.assets_json, []) as MediaGeneratedAsset[]
-    log.info(
-      `media task materialize: id=${taskId} assets=${assets.length}`,
-    )
+    log.info(`media task materialize: id=${taskId} assets=${assets.length}`)
     return assets
   }
 }
@@ -253,12 +298,17 @@ function rowToRecord(row: MediaGenerationTaskRow): MediaTaskRecord {
     outputDir: row.output_dir,
     requestId: row.request_id,
     assets: parseJson(row.assets_json, []),
+    submitResponse: null,
     rawResponse: parseJson(row.raw_response_json, null),
     // requestCall 不落 DB，仅由 execute() 从内存 output 挂载；rowToRecord 给 null 兜底。
     requestCall: null,
-    error: row.error_code || row.error_message
-      ? { code: row.error_code ?? 'unknown', message: row.error_message ?? 'Unknown media task error' }
-      : null,
+    error:
+      row.error_code || row.error_message
+        ? {
+            code: row.error_code ?? 'unknown',
+            message: row.error_message ?? 'Unknown media task error',
+          }
+        : null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     submittedAt: row.submitted_at,

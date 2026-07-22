@@ -23,6 +23,8 @@ export type ParsedShotRow = {
   movement?: string
   /** 场景布局 / 场景描述 */
   sceneLayout?: string
+  /** 构图、画面分割与视觉中心 */
+  composition?: string
   /** 站位与场面调度 */
   blocking?: string
   /** 光照方案 */
@@ -55,6 +57,20 @@ export type ParsedShotRow = {
   narration?: string
   /** 角色名（原始文本，调用方可再匹配为 assetId） */
   characterNames?: string[]
+  /** 角色图 / 角色资产参考与本镜造型状态 */
+  characterReferences?: string
+  /** 0.5s 精度的动作节拍 */
+  actionBeats?: string
+  /** 环境声、拟音、音乐等声音设计 */
+  soundEffects?: string
+  /** 入镜 / 出镜剪辑与转场标识 */
+  transition?: string
+  /** 镜头 0.0s 首帧 */
+  firstFrame?: string
+  /** 镜头末尾帧 */
+  lastFrame?: string
+  /** 轴线、道具、光向等镜间连续性约束 */
+  continuity?: string
   /** 镜头语言合并文本（景别+角度+运镜，或「镜头」列原文） */
   shotPrompt?: string
   /** 反向提示词 / 不应出现内容 */
@@ -75,11 +91,13 @@ export function isShotScriptText(text: string | null | undefined): boolean {
 /** 表头关键字 → 逻辑列名 */
 type ColumnKey =
   | 'index'
+  | 'title'
   | 'duration'
   | 'shotSize'
   | 'angle'
   | 'movement'
   | 'sceneLayout'
+  | 'composition'
   | 'blocking'
   | 'lighting'
   | 'cameraParams'
@@ -97,17 +115,32 @@ type ColumnKey =
   | 'dialogue'
   | 'narration'
   | 'characters'
+  | 'characterReferences'
+  | 'actionBeats'
+  | 'soundEffects'
+  | 'transition'
+  | 'firstFrame'
+  | 'lastFrame'
+  | 'continuity'
   | 'negativePrompt'
 
 const HEADER_MATCHERS: Array<{ key: ColumnKey; test: (h: string) => boolean }> = [
   { key: 'index', test: (h) => /镜号|分镜号|序号|^#$|^no\.?$/i.test(h) },
+  { key: 'title', test: (h) => /^标题$|镜头标题|shot\s*title/i.test(h) },
+  // 精确字段必须先于「时间」「动作」等宽泛匹配，否则精简表中的
+  // 「时间轴 / 动作节拍」会分别被误识别成 duration / description。
+  { key: 'actionBeats', test: (h) => /动作节拍|时间轴|节拍|action\s*beats?/i.test(h) },
   { key: 'duration', test: (h) => /时长|时间|秒|duration|time/i.test(h) },
   { key: 'shotSize', test: (h) => /景别|景\b|shot\s*size|scale/i.test(h) },
   { key: 'angle', test: (h) => /角度|机位|angle/i.test(h) },
   { key: 'movement', test: (h) => /运镜|镜头运动|运动|movement|camera\s*move/i.test(h) },
-  { key: 'sceneLayout', test: (h) => /场景布局|场景描述|空间|scene\s*layout|setting/i.test(h) },
+  {
+    key: 'sceneLayout',
+    test: (h) => /场景布局|场景描述|^场景$|空间|scene\s*layout|setting/i.test(h),
+  },
+  { key: 'composition', test: (h) => /构图|画面分割|九宫格|composition|framing/i.test(h) },
   { key: 'blocking', test: (h) => /站位|调度|走位|场面调度|blocking/i.test(h) },
-  { key: 'lighting', test: (h) => /光照|灯光|光影|lighting/i.test(h) },
+  { key: 'lighting', test: (h) => /光照|布光|灯光|光影|lighting/i.test(h) },
   { key: 'cameraParams', test: (h) => /镜头参数|camera\s*params|lens\s*params/i.test(h) },
   { key: 'focalLength', test: (h) => /焦距|焦段|focal\s*length|^lens$/i.test(h) },
   { key: 'aperture', test: (h) => /光圈|景深|aperture|depth\s*of\s*field/i.test(h) },
@@ -122,7 +155,13 @@ const HEADER_MATCHERS: Array<{ key: ColumnKey; test: (h: string) => boolean }> =
   { key: 'description', test: (h) => /画面|动作|描述|内容|场景描述|description|action/i.test(h) },
   { key: 'dialogue', test: (h) => /对白|台词|dialogue|line/i.test(h) },
   { key: 'narration', test: (h) => /旁白|narration|voice\s*over|vo/i.test(h) },
+  { key: 'characterReferences', test: (h) => /角色参考|角色图|资产参考|character\s*ref/i.test(h) },
   { key: 'characters', test: (h) => /角色|人物|出场|character|cast/i.test(h) },
+  { key: 'soundEffects', test: (h) => /音效|声音|拟音|sfx|sound/i.test(h) },
+  { key: 'transition', test: (h) => /转场|入镜|出镜|剪辑|transition|cut/i.test(h) },
+  { key: 'firstFrame', test: (h) => /首帧|起始帧|first\s*frame/i.test(h) },
+  { key: 'lastFrame', test: (h) => /尾帧|结束帧|last\s*frame/i.test(h) },
+  { key: 'continuity', test: (h) => /连续性|衔接|轴线|continuity/i.test(h) },
   { key: 'negativePrompt', test: (h) => /反向|负面|不应出现|negative/i.test(h) },
 ]
 
@@ -131,7 +170,24 @@ function splitRow(line: string): string[] {
   let s = line.trim()
   if (s.startsWith('|')) s = s.slice(1)
   if (s.endsWith('|')) s = s.slice(0, -1)
-  return s.split('|').map((cell) => cell.trim())
+  const cells: string[] = []
+  let cell = ''
+  for (let index = 0; index < s.length; index += 1) {
+    const character = s.charAt(index)
+    if (character === '\\' && s[index + 1] === '|') {
+      cell += '|'
+      index += 1
+      continue
+    }
+    if (character === '|') {
+      cells.push(cell.trim())
+      cell = ''
+      continue
+    }
+    cell += character
+  }
+  cells.push(cell.trim())
+  return cells
 }
 
 /** 是否为分隔行（如 |---|:--:|） */
@@ -156,7 +212,7 @@ function parseCharacterNames(cell: string): string[] {
 }
 
 function cleanCell(cell: string | undefined): string {
-  const value = (cell ?? '').trim()
+  const value = (cell ?? '').trim().replace(/<br\s*\/?>/gi, '\n')
   return value === '—' || value === '-' ? '' : value
 }
 
@@ -176,7 +232,17 @@ function tryParseJsonObject(text: string): unknown | null {
     candidates.push(trimmed.slice(firstBrace, lastBrace + 1))
   for (const candidate of candidates) {
     try {
-      return JSON.parse(candidate)
+      const parsed = JSON.parse(candidate) as unknown
+      // Some adapters serialize the model's JSON one extra time. Accept that shape
+      // without making the task detail depend on provider-specific escaping.
+      if (typeof parsed === 'string') {
+        try {
+          return JSON.parse(parsed)
+        } catch {
+          return parsed
+        }
+      }
+      return parsed
     } catch {
       // try next candidate
     }
@@ -282,6 +348,7 @@ function hasShotRowContent(row: ParsedShotRow): boolean {
     !!row.angle ||
     !!row.movement ||
     !!row.sceneLayout ||
+    !!row.composition ||
     !!row.blocking ||
     !!row.lighting ||
     !!row.cameraParams ||
@@ -294,6 +361,13 @@ function hasShotRowContent(row: ParsedShotRow): boolean {
     !!row.costume ||
     !!row.groupName ||
     !!row.sceneName ||
+    !!row.characterReferences ||
+    !!row.actionBeats ||
+    !!row.soundEffects ||
+    !!row.transition ||
+    !!row.firstFrame ||
+    !!row.lastFrame ||
+    !!row.continuity ||
     !!row.shotPrompt ||
     !!row.negativePrompt ||
     (row.characterNames?.length ?? 0) > 0
@@ -309,15 +383,27 @@ function mapShotItem(item: Record<string, unknown>, fallbackIndex: number): Pars
         ? Number.parseInt(stringField(item.index).match(/\d+/)![0]!, 10)
         : undefined
   const durationSec = numberField(item.durationSec ?? item.duration ?? item['时长'])
-  const description = stringField(item.description ?? item.action ?? item['画面/动作'])
+  const description = stringField(
+    item.description ??
+      item.action ??
+      item['画面/动作'] ??
+      item['画面'] ??
+      item['内容'] ??
+      item['描述'],
+  )
   const dialogue = stringField(item.dialogue ?? item['对白'])
   const narration = stringField(item.narration ?? item['旁白'])
   const shotSize = stringField(item.shotSize ?? item['景别'])
   const angle = stringField(item.angle ?? item['角度'])
   const movement = stringField(item.movement ?? item['运镜'])
   const sceneLayout = stringField(
-    item.sceneLayout ?? item.sceneDescription ?? item['场景布局'] ?? item['场景描述'],
+    item.sceneLayout ??
+      item.sceneDescription ??
+      item['场景布局'] ??
+      item['场景描述'] ??
+      item['场景'],
   )
+  const composition = stringField(item.composition ?? item.framing ?? item['构图'])
   const blocking = stringField(
     item.blocking ?? item.staging ?? item['站位调度'] ?? item['场面调度'],
   )
@@ -340,6 +426,15 @@ function mapShotItem(item: Record<string, unknown>, fallbackIndex: number): Pars
   const sceneName = stringField(item.sceneName ?? item.location ?? item['场景名'] ?? item['地点'])
   const shotPrompt = stringField(item.shotPrompt ?? item.shot ?? item['镜头语言'])
   const negativePrompt = stringField(item.negativePrompt ?? item.negative ?? item['反向提示词'])
+  const characterReferences = stringField(
+    item.characterReferences ?? item.characterRefs ?? item['角色参考'] ?? item['角色图'],
+  )
+  const actionBeats = stringField(item.actionBeats ?? item.timeline ?? item['动作节拍'])
+  const soundEffects = stringField(item.soundEffects ?? item.sfx ?? item['音效'] ?? item['声音'])
+  const transition = stringField(item.transition ?? item['转场'])
+  const firstFrame = stringField(item.firstFrame ?? item['首帧'])
+  const lastFrame = stringField(item.lastFrame ?? item['尾帧'])
+  const continuity = stringField(item.continuity ?? item['连续性'] ?? item['衔接'])
   const rawCharacters = item.characters ?? item.characterNames ?? item['角色']
   const characterNames = Array.isArray(rawCharacters)
     ? rawCharacters.map(stringField).filter(Boolean)
@@ -354,6 +449,7 @@ function mapShotItem(item: Record<string, unknown>, fallbackIndex: number): Pars
     ...(angle ? { angle } : {}),
     ...(movement ? { movement } : {}),
     ...(sceneLayout ? { sceneLayout } : {}),
+    ...(composition ? { composition } : {}),
     ...(blocking ? { blocking } : {}),
     ...(lighting ? { lighting } : {}),
     ...(cameraParams ? { cameraParams } : {}),
@@ -370,6 +466,13 @@ function mapShotItem(item: Record<string, unknown>, fallbackIndex: number): Pars
     ...(dialogue ? { dialogue } : {}),
     ...(narration ? { narration } : {}),
     ...(characterNames.length > 0 ? { characterNames } : {}),
+    ...(characterReferences ? { characterReferences } : {}),
+    ...(actionBeats ? { actionBeats } : {}),
+    ...(soundEffects ? { soundEffects } : {}),
+    ...(transition ? { transition } : {}),
+    ...(firstFrame ? { firstFrame } : {}),
+    ...(lastFrame ? { lastFrame } : {}),
+    ...(continuity ? { continuity } : {}),
     ...(shotPrompt ? { shotPrompt } : {}),
     ...(negativePrompt ? { negativePrompt } : {}),
   }
@@ -422,13 +525,27 @@ function parseJsonShotRows(text: string): ParsedShotRow[] {
  * 优先解析标准 JSON shots；找不到 JSON/表格时返回 []。
  * 无法识别表头则按「镜号|时长|景别|运镜|画面|对白|角色」默认列序兜底。
  */
-export function parseShotTable(markdown: string): ParsedShotRow[] {
+export type ParseShotTableOptions = {
+  /**
+   * 仅供人工导入/历史内容抢救。模型任务的语义校验必须关闭，避免把被 token
+   * 截断的 JSON 前缀误判为完整分镜。
+   */
+  allowPartialJsonRecovery?: boolean
+}
+
+export function parseShotTable(
+  markdown: string,
+  options: ParseShotTableOptions = {},
+): ParsedShotRow[] {
   const jsonRows = parseJsonShotRows(markdown)
   if (jsonRows.length > 0) return jsonRows
 
   // 容错兜底：JSON 整体 parse 失败（截断/未闭合/字符串内未转义引号）时，
   // 用括号匹配逐个救出完整的 shot/segment 对象。仅当文本明显像 JSON 分镜才尝试。
-  if (/"shots"\s*:|"segments"\s*:|"groups"\s*:/.test(markdown)) {
+  if (
+    options.allowPartialJsonRecovery !== false &&
+    /"shots"\s*:|"segments"\s*:|"groups"\s*:/.test(markdown)
+  ) {
     const recovered = recoverShotObjects(markdown)
     if (recovered.length >= 2) {
       const rows: ParsedShotRow[] = []
@@ -488,6 +605,7 @@ export function parseShotTable(markdown: string): ParsedShotRow[] {
     const angle = at(cells, 'angle')
     const movement = at(cells, 'movement')
     const sceneLayout = at(cells, 'sceneLayout')
+    const composition = at(cells, 'composition')
     const blocking = at(cells, 'blocking')
     const lighting = at(cells, 'lighting')
     const cameraParams = at(cells, 'cameraParams')
@@ -502,8 +620,16 @@ export function parseShotTable(markdown: string): ParsedShotRow[] {
     const sceneName = at(cells, 'sceneName')
     const shotCol = at(cells, 'shot')
     const negativePrompt = at(cells, 'negativePrompt')
+    const characterReferences = at(cells, 'characterReferences')
+    const actionBeats = at(cells, 'actionBeats')
+    const soundEffects = at(cells, 'soundEffects')
+    const transition = at(cells, 'transition')
+    const firstFrame = at(cells, 'firstFrame')
+    const lastFrame = at(cells, 'lastFrame')
+    const continuity = at(cells, 'continuity')
     const charactersCell = at(cells, 'characters')
     const indexCell = at(cells, 'index')
+    const title = at(cells, 'title')
     const indexMatch = indexCell.match(/\d+/)
     const index = indexMatch ? Number.parseInt(indexMatch[0]!, 10) : undefined
 
@@ -513,13 +639,14 @@ export function parseShotTable(markdown: string): ParsedShotRow[] {
     const fallbackIndex = rows.length + 1
 
     const row: ParsedShotRow = {
-      title: `镜${index ?? fallbackIndex}`,
+      title: title || `镜${index ?? fallbackIndex}`,
       ...(index !== undefined ? { index } : {}),
       ...(durationSec !== undefined ? { durationSec } : {}),
       ...(shotSize ? { shotSize } : {}),
       ...(angle ? { angle } : {}),
       ...(movement ? { movement } : {}),
       ...(sceneLayout ? { sceneLayout } : {}),
+      ...(composition ? { composition } : {}),
       ...(blocking ? { blocking } : {}),
       ...(lighting ? { lighting } : {}),
       ...(cameraParams ? { cameraParams } : {}),
@@ -536,6 +663,13 @@ export function parseShotTable(markdown: string): ParsedShotRow[] {
       ...(dialogue ? { dialogue } : {}),
       ...(narration ? { narration } : {}),
       ...(characterNames.length > 0 ? { characterNames } : {}),
+      ...(characterReferences ? { characterReferences } : {}),
+      ...(actionBeats ? { actionBeats } : {}),
+      ...(soundEffects ? { soundEffects } : {}),
+      ...(transition ? { transition } : {}),
+      ...(firstFrame ? { firstFrame } : {}),
+      ...(lastFrame ? { lastFrame } : {}),
+      ...(continuity ? { continuity } : {}),
       ...(shotPrompt ? { shotPrompt } : {}),
       ...(negativePrompt ? { negativePrompt } : {}),
     }

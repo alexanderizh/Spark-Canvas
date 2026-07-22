@@ -122,6 +122,16 @@ export class CodexCliExecutor {
       tempProfile = await writeCodexTempProfile(config)
       if (this.cancelled) return
       const args = buildCodexArgs(config, outputFile, tempProfile?.name)
+      config.invocationObserver?.({
+        transport: 'codex-cli',
+        request: {
+          command: 'codex',
+          args,
+          cwd: config.workspaceRootPath,
+          stdin: prompt,
+          credentials: '[local-cli configuration]',
+        },
+      })
       const result = await this.runCodex(args, prompt, makeBase, config.workspaceRootPath, config)
       if (result.exitCode !== 0) {
         for (const event of streamTerminalizer.finalize(makeBase)) this.emit(event)
@@ -472,12 +482,17 @@ async function writeCodexTempProfile(config: SDKExecutorConfig): Promise<CodexTe
   await mkdir(codexHome, { recursive: true })
   const name = `spark-${randomUUID()}`
   const filePath = path.join(codexHome, `${name}.config.toml`)
-  await writeFile(filePath, `${items.join('\n')}\n`, 'utf8')
+  await writeFile(filePath, `${items.join('\n')}\n`, {
+    encoding: 'utf8',
+    mode: 0o600,
+    flag: 'wx',
+  })
   return { name, filePath }
 }
 
 function buildCodexProfileConfigItems(config: SDKExecutorConfig): string[] {
   const items = [
+    ...(config.disableCodexNativeSkills === true ? ['features.plugins=false'] : []),
     ...(config.goal?.mode === 'codex-native' ? ['features.goals=true'] : []),
     ...buildCodexModelProviderConfigArgs(config),
     ...buildCodexMcpConfigArgs(config.mcpServers),
@@ -652,8 +667,16 @@ function buildCodexMcpConfigArgs(
     if (server.args != null) result.push(`mcp_servers.${name}.args=${tomlArray(server.args)}`)
     if (server.cwd != null) result.push(`mcp_servers.${name}.cwd=${tomlString(server.cwd)}`)
     if (server.env != null) {
+      const forwardedSecretKeys: string[] = []
       for (const [key, value] of Object.entries(server.env)) {
+        if (isForwardedMcpSecretEnvKey(key)) {
+          forwardedSecretKeys.push(key)
+          continue
+        }
         result.push(`mcp_servers.${name}.env.${sanitizeConfigKey(key)}=${tomlString(value)}`)
+      }
+      if (forwardedSecretKeys.length > 0) {
+        result.push(`mcp_servers.${name}.env_vars=${tomlArray(forwardedSecretKeys)}`)
       }
     }
   }
@@ -670,10 +693,20 @@ function buildCodexMcpEnv(
   const env: Record<string, string> = {}
   for (const [rawName, server] of Object.entries(mcpServers ?? {})) {
     const token = codexBearerToken(server)
-    if (token == null) continue
-    env[codexBearerTokenEnvVar(rawName)] = token
+    if (token != null) env[codexBearerTokenEnvVar(rawName)] = token
+    for (const [key, value] of Object.entries(server.env ?? {})) {
+      if (isForwardedMcpSecretEnvKey(key)) env[key] = value
+    }
   }
   return env
+}
+
+function isForwardedMcpSecretEnvKey(key: string): boolean {
+  return (
+    key === 'SPARK_PLATFORM_MANAGEMENT_BRIDGE_TOKEN' ||
+    key === 'SPARK_CANVAS_BRIDGE_TOKEN' ||
+    key === 'SPARK_MEMORY_BRIDGE_TOKEN'
+  )
 }
 
 function codexBearerTokenEnvVarName(rawName: string, server: SDKMcpServerConfig): string | null {

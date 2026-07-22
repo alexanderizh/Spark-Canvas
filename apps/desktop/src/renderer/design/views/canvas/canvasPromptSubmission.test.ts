@@ -30,7 +30,7 @@ const snapshot = (): CanvasSnapshot => ({
 })
 
 describe('canvasPromptSubmission', () => {
-  it('keeps media inputs out of the visible editor document', () => {
+  it('keeps media inputs visible as tags in the editor document', () => {
     const document = buildCanvasPromptDocumentForInputs({
       prompt: '保持人物一致',
       nodes: [imageNode()],
@@ -38,10 +38,17 @@ describe('canvasPromptSubmission', () => {
     })
     expect(document.blocks).toEqual([
       { kind: 'text', id: expect.any(String), text: '保持人物一致' },
+      expect.objectContaining({
+        kind: 'reference',
+        source: 'connection',
+        sourceNodeId: 'hero',
+        relation: 'reference_image',
+      }),
+      { kind: 'text', id: expect.any(String), text: '' },
     ])
   })
 
-  it('injects a media-selector input into the executable request without exposing its tag', async () => {
+  it('compiles a visible media tag into the executable request', async () => {
     const document = buildCanvasPromptDocumentForInputs({
       prompt: '保持人物一致',
       nodes: [imageNode()],
@@ -56,7 +63,10 @@ describe('canvasPromptSubmission', () => {
     })
 
     expect(result.promptDocument).toEqual(document)
-    expect(result.prompt).toContain('[参考图 ref-1: 小满]')
+    expect(result.prompt).toContain(
+      '[用户输入与引用关系]\n保持人物一致参考图 #1\n[/用户输入与引用关系]',
+    )
+    expect(result.prompt).toContain('参考图 #1：小满（参考图）')
     expect(result.inputFiles).toEqual([
       { type: 'image', role: 'reference', dataUrl: 'data:image/png;base64,AA==', mimeType: 'image/png' },
     ])
@@ -82,7 +92,13 @@ describe('canvasPromptSubmission', () => {
       expect.objectContaining({ kind: 'reference', sourceNodeId: 'script', relation: 'screenplay' }),
       expect.objectContaining({ kind: 'text', text: '' }),
     ])
-    expect(result.prompt).toContain('[剧本 ref-1: 场次剧本]')
+    expect(result.prompt).toContain(
+      '[用户输入与引用关系]\n提取主要场景：文本引用 T1\n[/用户输入与引用关系]',
+    )
+    expect(result.prompt).toContain('[文本引用 T1 开始]')
+    expect(result.prompt).toContain('类型：剧本')
+    expect(result.prompt).toContain('名称：场次剧本')
+    expect(result.prompt).toContain('[/文本引用 T1 结束]')
     expect(result.prompt).toContain('雨夜里，小满走进车站。')
     expect(result.relationManifest).toEqual([
       expect.objectContaining({ sourceNodeId: 'script', relation: 'screenplay' }),
@@ -99,12 +115,46 @@ describe('canvasPromptSubmission', () => {
     }
     const result = await buildCanvasPromptSubmission({ document, snapshot: snapshot(), operation: 'text_to_image', inputTransport: 'base64', systemPrompt: 'hidden' })
 
-    expect(result.prompt).toContain('[角色 ref-1: 小满]')
+    expect(result.prompt).toContain('参考图 #1：小满（角色）')
     expect(result.compiledUserText).toBe(result.prompt)
     expect(result.promptDocument).toEqual(document)
     expect(result.promptSnapshot?.capturedAt).toEqual(expect.any(String))
     expect(result.systemPrompt).toBe('hidden')
     expect(result.inputFiles).toEqual([{ type: 'image', role: 'reference', dataUrl: 'data:image/png;base64,AA==', mimeType: 'image/png' }])
     expect(result.relationManifest?.[0]).toMatchObject({ relation: 'character', sourceNodeId: 'hero' })
+  })
+
+  it('uses active input bindings as the canonical executable input set', async () => {
+    const document: CanvasPromptDocument = {
+      version: 2,
+      blocks: [
+        { kind: 'text', id: 'text', text: '保持主体一致' },
+        { kind: 'reference', id: 'image', source: 'manual', sourceNodeId: 'hero', relation: 'reference_image', label: '小满', order: 0 },
+      ],
+    }
+    const result = await buildCanvasPromptSubmission({
+      document,
+      snapshot: snapshot(),
+      operation: 'text_to_image',
+      inputNodeIds: ['hero'],
+      inputBindings: [
+        {
+          id: 'manual:hero:reference',
+          sourceNodeId: 'hero',
+          origin: 'manual',
+          kind: 'image',
+          relation: 'reference_image',
+          role: 'reference',
+          enabled: false,
+          order: 0,
+          promptBlockId: 'image',
+        },
+      ],
+    })
+
+    expect(result.inputBindings).toEqual([expect.objectContaining({ enabled: false })])
+    expect(result.inputFiles).toBeUndefined()
+    expect(result.compiledUserText).toBe('保持主体一致')
+    expect(result.relationManifest).toEqual([])
   })
 })

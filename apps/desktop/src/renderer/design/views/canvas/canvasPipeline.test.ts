@@ -4,6 +4,7 @@ import {
   collectDownstream,
   confirmPatch,
   getPipelineActions,
+  getNodePipelineActions,
   humanEditPatch,
   isConfirmed,
   readManuscriptIndex,
@@ -23,11 +24,13 @@ describe('canvasPipeline', () => {
       expect(actions[0]!.produces).toBe('screenplay')
     })
 
-    it('剧本可生成分镜脚本 / 提取角色 / 提取场景 / 分镜关键帧图', () => {
+    it('剧本可生成分镜脚本 / 提取完整实体 / 分镜关键帧图', () => {
       expect(getPipelineActions('screenplay').map((a) => a.id)).toEqual([
         'screenplay.to_shot_script',
         'screenplay.extract_characters',
         'screenplay.extract_scenes',
+        'screenplay.extract_props',
+        'screenplay.extract_effects',
         'screenplay.storyboard_grid',
       ])
     })
@@ -48,6 +51,27 @@ describe('canvasPipeline', () => {
     it('无角色或未知角色返回空', () => {
       expect(getPipelineActions(undefined)).toEqual([])
       expect(getPipelineActions('style_bible')).toEqual([])
+    })
+
+    it('节点关联同类型资产时可放宽到对应出图任务', () => {
+      expect(
+        getNodePipelineActions({ type: 'image' }, { assetKinds: ['scene'] }).map(
+          (action) => action.id,
+        ),
+      ).toEqual(['scene.scene_image'])
+    })
+
+    it('分镜脚本等功能文本节点仍保留完整标准文本能力', () => {
+      const actions = getNodePipelineActions({
+        type: 'text',
+        data: {
+          text: ['| 镜号 | 画面 |', '| --- | --- |', '| 1 | 夜景 |', '| 2 | 近景 |'].join('\n'),
+        },
+      })
+
+      expect(actions.map((action) => action.id)).toContain('screenplay.extract_characters')
+      expect(actions.map((action) => action.id)).toContain('character.three_view')
+      expect(actions.every((action) => Boolean(action.kind))).toBe(true)
     })
   })
 

@@ -21,12 +21,18 @@ import { mkdir, rename, rm, stat } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { app } from 'electron'
 import { createLogger } from '@spark/shared'
-import type {
-  UpdateStatus,
-  UpdateInfo,
-  UpdateProgressInfo,
-  UpdateChannel,
-} from '@spark/protocol'
+import type { UpdateStatus, UpdateInfo, UpdateProgressInfo, UpdateChannel } from '@spark/protocol'
+import {
+  CANVAS_UPDATE_APP_ID,
+  CANVAS_UPDATE_PRODUCT,
+  CanvasUpdateBoundaryError,
+  buildCanvasVersionCenterLatestUrl,
+  parseCanvasVersionCenterResponse,
+  type CanvasUpdateArch,
+  type CanvasUpdatePlatform,
+  type CanvasVersionCenterRelease,
+} from './CanvasUpdateBoundary.js'
+import { verifyCanvasUpdateArtifact } from './CanvasUpdateArtifactIntegrity.js'
 
 const log = createLogger('update-service')
 
@@ -34,11 +40,10 @@ const STARTUP_CHECK_DELAY_MS = 5_000
 const FOCUS_RECHECK_THRESHOLD_MS = 2 * 60 * 60 * 1000
 /** macOS：启动 dmg 后延迟退出，给安装镜像挂载/弹窗留时间 */
 const MAC_INSTALL_QUIT_DELAY_MS = 1_200
-const RELEASE_REQUEST_USER_AGENT = 'Spark-Agent-Updater'
+const RELEASE_REQUEST_USER_AGENT = 'Spark-Canvas-Updater'
 const DEFAULT_RELEASE_OWNER = 'alexanderizh'
-const DEFAULT_RELEASE_REPO = 'spark-agent'
-const DEFAULT_UPDATER_CACHE_DIR = 'spark-agent-updater'
-const DEFAULT_RELEASES_API_BASE = 'https://spark.yiqibyte.com'
+const DEFAULT_RELEASE_REPO = 'Spark-Canvas'
+const DEFAULT_UPDATER_CACHE_DIR = 'spark-canvas-updater'
 
 export interface UpdatePreferences {
   autoCheck: boolean
@@ -70,6 +75,7 @@ interface GithubReleaseFeedConfig {
   updaterCacheDirName: string
   token?: string
   releasesApiBase?: string
+  versionCenterDownloadHosts?: string[]
 }
 
 interface LoadedReleaseFeedConfig {
@@ -82,6 +88,19 @@ interface GithubReleaseAsset {
   browser_download_url: string
   size?: number
   content_type?: string
+  canvasIntegrity?: {
+    sha256: string
+    sha512: string
+    releaseManifestSha256: string
+    signatureEvidenceDigest: string
+  }
+  canvasIdentity?: {
+    product: typeof CANVAS_UPDATE_PRODUCT
+    appId: typeof CANVAS_UPDATE_APP_ID
+    channel: UpdateChannel
+    platform: CanvasUpdatePlatform
+    arch: CanvasUpdateArch
+  }
 }
 
 interface GithubRelease {
@@ -99,18 +118,6 @@ interface ResolvedReleaseAsset {
   source: 'github' | 'version-center'
 }
 
-interface VersionCenterRelease {
-  version: string
-  channel: string
-  platform: 'mac' | 'win' | 'linux'
-  arch: 'arm64' | 'x64' | 'universal'
-  fileName: string
-  fileSize: number
-  publicUrl: string
-  releaseNotes: string | null
-  publishedAt: string | null
-}
-
 interface ParsedVersion {
   core: number[]
   prerelease: Array<number | string> | null
@@ -119,6 +126,13 @@ interface ParsedVersion {
 interface GitHubRateLimitState {
   message: string
   retryAt: number | null
+}
+
+class VersionCenterTransportError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options)
+    this.name = 'VersionCenterTransportError'
+  }
 }
 
 const DEFAULT_PREFERENCES: UpdatePreferences = {
@@ -151,10 +165,11 @@ function loadReleaseFeedConfig(): LoadedReleaseFeedConfig {
     owner: DEFAULT_RELEASE_OWNER,
     repo: DEFAULT_RELEASE_REPO,
     updaterCacheDirName: DEFAULT_UPDATER_CACHE_DIR,
-    releasesApiBase: DEFAULT_RELEASES_API_BASE,
   }
 
-  const configPath = app.isPackaged ? resolvePackagedUpdateConfigPath() : resolveDevUpdateConfigPath()
+  const configPath = app.isPackaged
+    ? resolvePackagedUpdateConfigPath()
+    : resolveDevUpdateConfigPath()
   if (configPath == null) {
     return {
       config: fallback,
@@ -169,22 +184,33 @@ function loadReleaseFeedConfig(): LoadedReleaseFeedConfig {
       return { config: fallback, source: `fallback (invalid config: ${configPath})` }
     }
     const record = parsed as Record<string, unknown>
-    const owner = typeof record.owner === 'string' && record.owner.trim().length > 0
-      ? record.owner.trim()
-      : fallback.owner
-    const repo = typeof record.repo === 'string' && record.repo.trim().length > 0
-      ? record.repo.trim()
-      : fallback.repo
+    const owner =
+      typeof record.owner === 'string' && record.owner.trim().length > 0
+        ? record.owner.trim()
+        : fallback.owner
+    const repo =
+      typeof record.repo === 'string' && record.repo.trim().length > 0
+        ? record.repo.trim()
+        : fallback.repo
     const updaterCacheDirName =
       typeof record.updaterCacheDirName === 'string' && record.updaterCacheDirName.trim().length > 0
         ? record.updaterCacheDirName.trim()
         : fallback.updaterCacheDirName
-    const token = typeof record.token === 'string' && record.token.trim().length > 0
-      ? record.token.trim()
-      : undefined
-    const releasesApiBase = typeof record.releasesApiBase === 'string' && record.releasesApiBase.trim().length > 0
-      ? record.releasesApiBase.trim().replace(/\/$/, '')
-      : fallback.releasesApiBase
+    const token =
+      typeof record.token === 'string' && record.token.trim().length > 0
+        ? record.token.trim()
+        : undefined
+    const releasesApiBase =
+      typeof record.releasesApiBase === 'string' && record.releasesApiBase.trim().length > 0
+        ? record.releasesApiBase.trim().replace(/\/$/, '')
+        : fallback.releasesApiBase
+    const versionCenterDownloadHosts =
+      typeof record.versionCenterDownloadHosts === 'string'
+        ? record.versionCenterDownloadHosts
+            .split(',')
+            .map((host) => host.trim().toLowerCase())
+            .filter(Boolean)
+        : fallback.versionCenterDownloadHosts
     return {
       config: {
         provider: 'github',
@@ -193,6 +219,9 @@ function loadReleaseFeedConfig(): LoadedReleaseFeedConfig {
         updaterCacheDirName,
         ...(token != null ? { token } : {}),
         ...(releasesApiBase != null ? { releasesApiBase } : {}),
+        ...(versionCenterDownloadHosts != null && versionCenterDownloadHosts.length > 0
+          ? { versionCenterDownloadHosts }
+          : {}),
       },
       source: configPath,
     }
@@ -211,7 +240,10 @@ function parseFlatYaml(raw: string): Record<string, string> {
     if (separatorIndex <= 0) continue
     const key = trimmed.slice(0, separatorIndex).trim()
     let value = trimmed.slice(separatorIndex + 1).trim()
-    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith('\'') && value.endsWith('\''))) {
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
       value = value.slice(1, -1)
     }
     if (key.length > 0) {
@@ -233,12 +265,13 @@ function parseVersion(value: string): ParsedVersion {
     const parsed = Number.parseInt(segment, 10)
     return Number.isFinite(parsed) ? parsed : 0
   })
-  const prerelease = prereleasePart == null || prereleasePart.length === 0
-    ? null
-    : prereleasePart.split('.').map((segment) => {
-      if (/^\d+$/.test(segment)) return Number.parseInt(segment, 10)
-      return segment
-    })
+  const prerelease =
+    prereleasePart == null || prereleasePart.length === 0
+      ? null
+      : prereleasePart.split('.').map((segment) => {
+          if (/^\d+$/.test(segment)) return Number.parseInt(segment, 10)
+          return segment
+        })
   return { core, prerelease }
 }
 
@@ -284,18 +317,18 @@ function getPlatformLabel(): string {
   }
 }
 
-function getVersionCenterPlatform(): VersionCenterRelease['platform'] | null {
+function getVersionCenterPlatform(): CanvasUpdatePlatform | null {
   if (process.platform === 'darwin') return 'mac'
   if (process.platform === 'win32') return 'win'
   if (process.platform === 'linux') return 'linux'
   return null
 }
 
-function getVersionCenterArch(): VersionCenterRelease['arch'] {
+function getVersionCenterArch(): CanvasUpdateArch {
   return process.arch === 'arm64' ? 'arm64' : 'x64'
 }
 
-function toGithubLikeRelease(release: VersionCenterRelease): GithubRelease {
+function toGithubLikeRelease(release: CanvasVersionCenterRelease): GithubRelease {
   return {
     tag_name: release.version,
     prerelease: release.channel !== 'stable',
@@ -308,6 +341,19 @@ function toGithubLikeRelease(release: VersionCenterRelease): GithubRelease {
         name: release.fileName,
         browser_download_url: release.publicUrl,
         size: release.fileSize,
+        canvasIntegrity: {
+          sha256: release.sha256,
+          sha512: release.sha512,
+          releaseManifestSha256: release.releaseManifestSha256,
+          signatureEvidenceDigest: release.signatureEvidenceDigest,
+        },
+        canvasIdentity: {
+          product: release.product,
+          appId: release.appId,
+          channel: release.channel,
+          platform: release.platform,
+          arch: release.arch,
+        },
       },
     ],
   }
@@ -339,11 +385,15 @@ function buildGitHubRateLimitMessage(retryAt: number | null): string {
   return 'GitHub 更新检查触发了频率限制，请稍后再试。'
 }
 
-function parseGitHubRateLimitState(response: Response, responseText: string): GitHubRateLimitState | null {
+function parseGitHubRateLimitState(
+  response: Response,
+  responseText: string,
+): GitHubRateLimitState | null {
   if (response.status !== 403 && response.status !== 429) return null
 
   const retryAfterHeader = response.headers.get('retry-after')
-  const retryAfterSeconds = retryAfterHeader == null ? Number.NaN : Number.parseInt(retryAfterHeader, 10)
+  const retryAfterSeconds =
+    retryAfterHeader == null ? Number.NaN : Number.parseInt(retryAfterHeader, 10)
   const retryAtFromRetryAfter = Number.isFinite(retryAfterSeconds)
     ? Date.now() + retryAfterSeconds * 1000
     : null
@@ -352,21 +402,22 @@ function parseGitHubRateLimitState(response: Response, responseText: string): Gi
   const remaining = remainingHeader == null ? Number.NaN : Number.parseInt(remainingHeader, 10)
   const resetHeader = response.headers.get('x-ratelimit-reset')
   const resetEpochSeconds = resetHeader == null ? Number.NaN : Number.parseInt(resetHeader, 10)
-  const retryAtFromReset = Number.isFinite(resetEpochSeconds)
-    ? resetEpochSeconds * 1000
-    : null
+  const retryAtFromReset = Number.isFinite(resetEpochSeconds) ? resetEpochSeconds * 1000 : null
 
   const lowerText = responseText.toLowerCase()
   const looksLikeRateLimit =
-    response.status === 429
-    || retryAtFromRetryAfter != null
-    || (remaining === 0 && retryAtFromReset != null)
-    || lowerText.includes('secondary rate limit')
-    || lowerText.includes('api rate limit exceeded')
+    response.status === 429 ||
+    retryAtFromRetryAfter != null ||
+    (remaining === 0 && retryAtFromReset != null) ||
+    lowerText.includes('secondary rate limit') ||
+    lowerText.includes('api rate limit exceeded')
 
   if (!looksLikeRateLimit) return null
 
-  const retryAt = retryAtFromRetryAfter ?? retryAtFromReset ?? (lowerText.includes('secondary rate limit') ? Date.now() + 60_000 : null)
+  const retryAt =
+    retryAtFromRetryAfter ??
+    retryAtFromReset ??
+    (lowerText.includes('secondary rate limit') ? Date.now() + 60_000 : null)
 
   return {
     message: buildGitHubRateLimitMessage(retryAt),
@@ -388,7 +439,12 @@ function toUpdateInfo(release: GithubRelease, asset: GithubReleaseAsset): Update
   return result
 }
 
+function isPlainReleaseAssetName(name: string): boolean {
+  return name !== '.' && name !== '..' && !/[/\\]/.test(name)
+}
+
 function scoreMacAsset(name: string): number {
+  if (!isPlainReleaseAssetName(name)) return Number.POSITIVE_INFINITY
   const lower = name.toLowerCase()
   if (!lower.endsWith('.dmg') || lower.endsWith('.dmg.blockmap')) return Number.POSITIVE_INFINITY
   const arch = process.arch
@@ -404,6 +460,7 @@ function scoreMacAsset(name: string): number {
 }
 
 function scoreWindowsAsset(name: string): number {
+  if (!isPlainReleaseAssetName(name)) return Number.POSITIVE_INFINITY
   const lower = name.toLowerCase()
   if (!lower.endsWith('.exe') || lower.endsWith('.exe.blockmap')) return Number.POSITIVE_INFINITY
   let score = 10
@@ -440,8 +497,10 @@ export class UpdateService {
   private startupCheckTimer: ReturnType<typeof setTimeout> | null = null
   private onStatusChange: StatusChangeHandler | null = null
   private onLastCheckedChange: ((iso: string) => void) | null = null
-  private onUpdateAvailable: ((info: UpdateInfo, preferences: UpdatePreferences) => void) | null = null
-  private onUpdateDownloaded: ((info: UpdateInfo, preferences: UpdatePreferences) => void) | null = null
+  private onUpdateAvailable: ((info: UpdateInfo, preferences: UpdatePreferences) => void) | null =
+    null
+  private onUpdateDownloaded: ((info: UpdateInfo, preferences: UpdatePreferences) => void) | null =
+    null
   private onUpdateError: ((message: string) => void) | null = null
   private onRequestQuit: (() => void) | null = null
   private initialized = false
@@ -451,7 +510,6 @@ export class UpdateService {
     owner: DEFAULT_RELEASE_OWNER,
     repo: DEFAULT_RELEASE_REPO,
     updaterCacheDirName: DEFAULT_UPDATER_CACHE_DIR,
-    releasesApiBase: DEFAULT_RELEASES_API_BASE,
   }
   private releaseAsset: ResolvedReleaseAsset | null = null
   private releaseInfo: UpdateInfo | null = null
@@ -512,7 +570,9 @@ export class UpdateService {
 
     const loadedConfig = loadReleaseFeedConfig()
     this.releaseFeedConfig = loadedConfig.config
-    log.info(`Update feed configured from ${loadedConfig.source} -> ${loadedConfig.config.owner}/${loadedConfig.config.repo}`)
+    log.info(
+      `Update feed configured from ${loadedConfig.source} -> ${loadedConfig.config.owner}/${loadedConfig.config.repo}`,
+    )
 
     app.on('browser-window-focus', this.onWindowFocus)
     app.on('will-quit', this.onWillQuit)
@@ -540,7 +600,9 @@ export class UpdateService {
     }
   }
 
-  async checkForUpdates(_reason: 'manual' | 'startup' | 'interval' | 'focus' = 'manual'): Promise<UpdateStatus> {
+  async checkForUpdates(
+    _reason: 'manual' | 'startup' | 'interval' | 'focus' = 'manual',
+  ): Promise<UpdateStatus> {
     if (this.status.state === 'checking' || this.status.state === 'downloading') {
       return this.status
     }
@@ -593,7 +655,7 @@ export class UpdateService {
       const updateInfo = toUpdateInfo(release, resolvedAsset.asset)
       this.releaseAsset = resolvedAsset
       this.releaseInfo = updateInfo
-      const cachedPath = await this.resolveCachedDownloadPath(version, resolvedAsset.asset.name)
+      const cachedPath = await this.resolveCachedDownloadPath(version, resolvedAsset)
       if (cachedPath != null) {
         this.downloadedFilePath = cachedPath
         this.updateStatus({
@@ -633,7 +695,11 @@ export class UpdateService {
   }
 
   async downloadUpdate(): Promise<boolean> {
-    if ((this.status.state !== 'available' && this.status.state !== 'downloaded') || this.releaseAsset == null || this.releaseInfo == null) {
+    if (
+      (this.status.state !== 'available' && this.status.state !== 'downloaded') ||
+      this.releaseAsset == null ||
+      this.releaseInfo == null
+    ) {
       log.warn(`Cannot download: current state is ${this.status.state}`)
       return false
     }
@@ -644,7 +710,7 @@ export class UpdateService {
 
     try {
       const version = this.releaseInfo.version
-      const targetDir = join(app.getPath('userData'), this.releaseFeedConfig.updaterCacheDirName, version)
+      const targetDir = this.resolveUpdateTargetDir(version, this.releaseAsset)
       const finalPath = join(targetDir, this.releaseAsset.asset.name)
       const tempPath = `${finalPath}.download`
 
@@ -658,6 +724,7 @@ export class UpdateService {
 
       const response = await fetch(this.releaseAsset.asset.browser_download_url, {
         headers: this.getDownloadRequestHeaders(this.releaseAsset.source),
+        redirect: this.releaseAsset.source === 'version-center' ? 'error' : 'follow',
       })
       if (!response.ok || response.body == null) {
         throw new Error(`下载更新失败：服务器返回 ${response.status}`)
@@ -703,6 +770,26 @@ export class UpdateService {
         writer.destroy()
         await rm(tempPath, { force: true }).catch(() => undefined)
         throw error
+      }
+
+      if (this.releaseAsset.source === 'version-center') {
+        const integrity = this.releaseAsset.asset.canvasIntegrity
+        if (integrity == null || this.releaseAsset.asset.size == null) {
+          await rm(tempPath, { force: true }).catch(() => undefined)
+          throw new CanvasUpdateBoundaryError(
+            'Spark Canvas v2 update rejected: artifact integrity metadata is missing',
+          )
+        }
+        try {
+          await verifyCanvasUpdateArtifact(tempPath, {
+            fileSize: this.releaseAsset.asset.size,
+            sha256: integrity.sha256,
+            sha512: integrity.sha512,
+          })
+        } catch (error) {
+          await rm(tempPath, { force: true }).catch(() => undefined)
+          throw error
+        }
       }
 
       await rm(finalPath, { force: true })
@@ -855,7 +942,9 @@ export class UpdateService {
     return headers
   }
 
-  private getDownloadRequestHeaders(source: ResolvedReleaseAsset['source']): Record<string, string> {
+  private getDownloadRequestHeaders(
+    source: ResolvedReleaseAsset['source'],
+  ): Record<string, string> {
     if (source === 'github') return this.getRequestHeaders()
     return {
       'user-agent': RELEASE_REQUEST_USER_AGENT,
@@ -863,12 +952,14 @@ export class UpdateService {
   }
 
   private async fetchTargetRelease(): Promise<GithubRelease | null> {
-    const versionCenterRelease = await this.fetchVersionCenterRelease().catch((error: unknown) => {
-      log.warn(`Version center update check failed, falling back to GitHub: ${String(error)}`)
-      return null
-    })
-    if (versionCenterRelease != null) {
-      return versionCenterRelease
+    try {
+      const versionCenterRelease = await this.fetchVersionCenterRelease()
+      if (versionCenterRelease !== undefined) {
+        return versionCenterRelease
+      }
+    } catch (error) {
+      if (!(error instanceof VersionCenterTransportError)) throw error
+      log.warn(`Version center unavailable, falling back to Spark Canvas GitHub: ${String(error)}`)
     }
 
     if (this.preferences.channel === 'stable') {
@@ -881,35 +972,51 @@ export class UpdateService {
     return releases.find((release) => !release.draft) ?? null
   }
 
-  private async fetchVersionCenterRelease(): Promise<GithubRelease | null> {
+  private async fetchVersionCenterRelease(): Promise<GithubRelease | null | undefined> {
     const base = this.releaseFeedConfig.releasesApiBase?.replace(/\/$/, '')
     const platform = getVersionCenterPlatform()
-    if (base == null || base.length === 0 || platform == null) return null
+    if (base == null || base.length === 0 || platform == null) return undefined
 
-    const url = new URL('/api/v1/desktop/releases/latest', base)
-    url.searchParams.set('channel', this.preferences.channel)
-    url.searchParams.set('platform', platform)
-    url.searchParams.set('arch', getVersionCenterArch())
+    const target = {
+      product: CANVAS_UPDATE_PRODUCT,
+      appId: CANVAS_UPDATE_APP_ID,
+      channel: this.preferences.channel,
+      platform,
+      arch: getVersionCenterArch(),
+      allowedDownloadHosts: this.releaseFeedConfig.versionCenterDownloadHosts ?? [],
+    } as const
+    const url = buildCanvasVersionCenterLatestUrl(base, target)
 
-    const response = await fetch(url.toString(), {
-      headers: {
-        accept: 'application/json',
-        'user-agent': RELEASE_REQUEST_USER_AGENT,
-      },
-    })
+    let response: Response
+    try {
+      response = await fetch(url.toString(), {
+        headers: {
+          accept: 'application/json',
+          'user-agent': RELEASE_REQUEST_USER_AGENT,
+        },
+      })
+    } catch (error) {
+      throw new VersionCenterTransportError('version center request failed', { cause: error })
+    }
     if (!response.ok) {
-      throw new Error(`version center returned ${response.status}`)
+      if (response.status >= 500) {
+        throw new VersionCenterTransportError(`version center returned ${response.status}`)
+      }
+      throw new CanvasUpdateBoundaryError(
+        `Spark Canvas v2 update rejected: version center returned ${response.status}`,
+      )
     }
 
-    const json = (await response.json()) as {
-      code: number
-      message?: string
-      data?: VersionCenterRelease | null
+    let json: unknown
+    try {
+      json = await response.json()
+    } catch (error) {
+      throw new CanvasUpdateBoundaryError(
+        `Spark Canvas v2 update rejected: response is not valid JSON (${String(error)})`,
+      )
     }
-    if (json.code !== 0) {
-      throw new Error(json.message || 'version center returned non-zero code')
-    }
-    return json.data == null ? null : toGithubLikeRelease(json.data)
+    const release = parseCanvasVersionCenterResponse(json, target)
+    return release == null ? null : toGithubLikeRelease(release)
   }
 
   private async fetchGithubJson<T>(url: string): Promise<T> {
@@ -945,15 +1052,58 @@ export class UpdateService {
     throw new Error(`检查更新失败：GitHub 返回 ${response.status}${suffix}`)
   }
 
-  private async resolveCachedDownloadPath(version: string, assetName: string): Promise<string | null> {
-    const candidate = join(app.getPath('userData'), this.releaseFeedConfig.updaterCacheDirName, version, assetName)
+  private async resolveCachedDownloadPath(
+    version: string,
+    releaseAsset: ResolvedReleaseAsset,
+  ): Promise<string | null> {
+    const candidate = join(
+      this.resolveUpdateTargetDir(version, releaseAsset),
+      releaseAsset.asset.name,
+    )
     if (!existsSync(candidate)) return null
     try {
       const info = await stat(candidate)
-      return info.isFile() ? candidate : null
-    } catch {
+      if (!info.isFile()) return null
+      if (releaseAsset.source !== 'version-center') return candidate
+      const integrity = releaseAsset.asset.canvasIntegrity
+      if (integrity == null || releaseAsset.asset.size == null) return null
+      await verifyCanvasUpdateArtifact(candidate, {
+        fileSize: releaseAsset.asset.size,
+        sha256: integrity.sha256,
+        sha512: integrity.sha512,
+      })
+      return candidate
+    } catch (error) {
+      log.warn(`Ignoring invalid cached update artifact: ${String(error)}`)
+      await rm(candidate, { force: true }).catch(() => undefined)
       return null
     }
+  }
+
+  private resolveUpdateTargetDir(version: string, releaseAsset: ResolvedReleaseAsset): string {
+    const cacheRoot = join(app.getPath('userData'), this.releaseFeedConfig.updaterCacheDirName)
+    const safeVersion = encodeURIComponent(version)
+    if (releaseAsset.source !== 'version-center') {
+      return join(cacheRoot, safeVersion)
+    }
+
+    const identity = releaseAsset.asset.canvasIdentity
+    if (
+      identity == null ||
+      identity.product !== CANVAS_UPDATE_PRODUCT ||
+      identity.appId !== CANVAS_UPDATE_APP_ID
+    ) {
+      throw new CanvasUpdateBoundaryError(
+        'Spark Canvas v2 update rejected: cache identity metadata is missing',
+      )
+    }
+    return join(
+      cacheRoot,
+      identity.product,
+      identity.channel,
+      `${identity.platform}-${identity.arch}`,
+      safeVersion,
+    )
   }
 
   private clearResolvedRelease(): void {

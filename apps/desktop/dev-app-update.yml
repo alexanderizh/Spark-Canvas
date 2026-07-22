@@ -1,6 +1,5 @@
 provider: github
 owner: alexanderizh
-repo: spark-agent
+repo: Spark-Canvas
 releaseType: release
-updaterCacheDirName: spark-agent-dev-updater
-releasesApiBase: https://spark.yiqibyte.com
+updaterCacheDirName: spark-canvas-dev-updater

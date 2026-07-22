@@ -15,10 +15,11 @@ describe('canvas UI/UX V4 integration', () => {
       'nodes.less',
       'panels.less',
       'workbenches.less',
+      'form-controls.less',
     ]
 
     expect(workspace).toContain("import './uiux-v4/index.less'")
-    expect(workspace).toContain('className="canvas-workspace canvas-uiux-v4"')
+    expect(workspace).toContain('canvas-workspace canvas-uiux-v4')
     for (const moduleName of scopedModules) {
       expect(stylesheetEntry).toContain(`@import './${moduleName}';`)
       expect(readCanvasSource(`./uiux-v4/${moduleName}`)).toContain(
@@ -51,8 +52,21 @@ describe('canvas UI/UX V4 integration', () => {
     expect(panelStyles).toContain('.canvas-agent-side-panel-collapse-toggle.is-collapsed')
     expect(panelStyles).toContain('display: none')
     expect(addMenu).toContain('canvas-dock-labeled-action')
-    expect(dock).toContain('shortLabel="资源"')
-    expect(dock).toContain('shortLabel="任务"')
+    expect(dock).toContain('aria-label="全部节点类型"')
+    expect(dock).not.toContain('shortLabel="资源"')
+    expect(dock).not.toContain('shortLabel="任务"')
+  })
+
+  it('uses full-bleed overlays only for image nodes with loaded content', () => {
+    const node = readCanvasSource('./CanvasNode.tsx')
+    const nodeStyles = readCanvasSource('./uiux-v4/nodes.less')
+
+    expect(node).toContain('isFullBleedCanvasImageNode(node)')
+    expect(node).toContain('canvas-node-image-full-bleed')
+    expect(node).toContain('canvas-node-image-overlay-footer')
+    expect(nodeStyles).toContain('.canvas-node-image-full-bleed')
+    expect(nodeStyles).toContain('.canvas-node-image-overlay-footer')
+    expect(nodeStyles).toContain('backdrop-filter: blur(10px)')
   })
 
   it('keeps portal modal styling isolated to canvas business classes', () => {
@@ -63,6 +77,17 @@ describe('canvas UI/UX V4 integration', () => {
     expect(modals).not.toMatch(/(^|\n)\s*\.ant-modal\s*\{/)
   })
 
+  it('gives composite form controls a single visual surface owner', () => {
+    const controls = readCanvasSource('./uiux-v4/form-controls.less')
+    const storyboard = readCanvasSource('./CanvasShotScriptEditor.less')
+
+    expect(controls).toContain('.ant-input-affix-wrapper > input.ant-input')
+    expect(controls).toContain('.ant-input-number input.ant-input-number-input')
+    expect(controls).toContain('background: transparent !important')
+    expect(controls).toContain('box-shadow: none !important')
+    expect(storyboard).not.toContain('.ant-input-affix-wrapper-focused')
+  })
+
   it('uses real media elements in asset preview and supports Escape close', () => {
     const assetManager = readCanvasSource('./CanvasAssetManagerPanel.tsx')
 
@@ -70,5 +95,27 @@ describe('canvas UI/UX V4 integration', () => {
     expect(assetManager).toContain('<video src={source} controls')
     expect(assetManager).toContain('<audio src={source} controls')
     expect(assetManager).toContain("event.key !== 'Escape'")
+  })
+
+  it('keeps only the 3D director stage and gives its forms an isolated dark theme', () => {
+    const workspace = readCanvasSource('./CanvasWorkspaceView.tsx')
+    const stage = readCanvasSource('./CanvasStage.tsx')
+    const node = readCanvasSource('./CanvasNode.tsx')
+    const stage3dModal = readCanvasSource('./stage3d/CanvasDirectorStage3DModal.tsx')
+
+    expect(workspace).not.toContain('CanvasDirectorStageModal')
+    expect(workspace).not.toContain("subtype: 'director_stage'")
+    expect(stage).not.toContain('onAddDirectorStageAtPosition')
+    expect(node).not.toContain('DirectorStageMini')
+    expect(stage3dModal).toContain('<ConfigProvider theme={STAGE3D_FORM_THEME}>')
+    expect(stage3dModal).toContain('algorithm: antdTheme.darkAlgorithm')
+    expect(stage3dModal).toContain("colorText: '#e4e4e7'")
+  })
+
+  it('keeps selected values readable in the 3D director stage side forms', () => {
+    const workbenchStyles = readCanvasSource('./uiux-v4/workbenches.less')
+
+    expect(workbenchStyles).toContain('input:not(.ant-select-input)')
+    expect(workbenchStyles).not.toMatch(/\.stage3d-field\s*\{[\s\S]*?\n\s+input,/)
   })
 })

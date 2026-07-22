@@ -7283,9 +7283,6 @@ body.inspector-resizing {
 .workflow-home > .mac-window-drag-header {
   margin: -20px -20px 0;
 }
-.scheduled-tasks-view > .mac-window-drag-header {
-  margin: 0 -20px;
-}
 .settings-section {
   max-width: 980px;
   margin: 0 auto var(--pad-xl);
@@ -15767,12 +15764,6 @@ body.inspector-resizing {
 .chat-main-active > .chat-stream {
   flex: 1 1 auto;
   min-height: 0;
-}
-.chat-main-active > .builtin-terminal-panel {
-  /* 由组件 .less 设置 flex:0 0 auto；这里保留占位以便后续微调 */
-}
-.xterm-scrollable-element {
-  background-color: transparent !important;
 }
 
 /* ============================================================

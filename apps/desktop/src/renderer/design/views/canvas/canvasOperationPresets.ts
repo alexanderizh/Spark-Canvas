@@ -1,4 +1,9 @@
 import type { CanvasOperationType } from './canvas.types'
+import {
+  canvasTaskDefaultKindForOperation,
+  readCanvasTaskDefault,
+  type CanvasTaskDefaultContext,
+} from './canvasTaskDefaults'
 
 const STORAGE_KEY = 'spark-canvas:operation-presets:v1'
 const LAST_USED_STORAGE_KEY = 'spark-canvas:operation-last-used:v1'
@@ -46,6 +51,24 @@ export const CANVAS_PIPELINE_PRESET_TARGETS = [
     label: '提取场景',
     description: '从剧本中提取场景信息',
   },
+  {
+    id: 'screenplay.extract_props',
+    operation: 'text_generate',
+    label: '提取道具',
+    description: '从剧本中提取道具信息',
+  },
+  {
+    id: 'screenplay.extract_effects',
+    operation: 'text_generate',
+    label: '提取特效',
+    description: '从剧本中提取特效信息',
+  },
+  {
+    id: 'screenplay.split_episodes',
+    operation: 'text_generate',
+    label: '按剧情分集',
+    description: '把长剧本拆分为结构化分集剧本',
+  },
 ] as const satisfies readonly {
   id: string
   operation: CanvasOperationType
@@ -55,6 +78,23 @@ export const CANVAS_PIPELINE_PRESET_TARGETS = [
 
 export type CanvasPipelinePresetTargetId = (typeof CANVAS_PIPELINE_PRESET_TARGETS)[number]['id']
 export type CanvasPresetTargetId = CanvasOperationType | CanvasPipelinePresetTargetId
+
+const CANVAS_PIPELINE_MODEL_PARAM_DEFAULTS: Partial<
+  Record<CanvasPipelinePresetTargetId, Record<string, unknown>>
+> = {
+  'screenplay.to_shot_script': { workflow: 'shot_script', responseFormat: 'json' },
+  'screenplay.extract_characters': { workflow: 'extract_character', responseFormat: 'json' },
+  'screenplay.extract_scenes': { workflow: 'extract_scene', responseFormat: 'json' },
+  'screenplay.extract_props': { workflow: 'extract_prop', responseFormat: 'json' },
+  'screenplay.extract_effects': { workflow: 'extract_effect', responseFormat: 'json' },
+  'screenplay.split_episodes': { workflow: 'split_episodes' },
+}
+
+const CANVAS_PIPELINE_CONTROL_PARAM_NAMES = new Set([
+  'workflow',
+  'responseFormat',
+  'response_format',
+])
 export type CanvasPresetTargetDefinition = {
   id: CanvasPresetTargetId
   operation: CanvasOperationType
@@ -296,22 +336,48 @@ export function resolveCanvasPresetTarget(input: {
   if (input.operation === 'text_rewrite' && input.outputPipelineRole === 'screenplay') {
     return 'chapter.to_screenplay'
   }
-  if (input.operation === 'text_generate' && input.taskPipelineRole === 'shot') {
+  if (
+    input.operation === 'text_generate' &&
+    (input.taskPipelineRole === 'shot' ||
+      input.outputPipelineRole === 'shot' ||
+      workflow === 'shot_script')
+  ) {
     return 'screenplay.to_shot_script'
   }
   if (
     input.operation === 'text_generate' &&
-    input.taskPipelineRole === 'character' &&
+    (input.taskPipelineRole === 'character' || input.outputPipelineRole === 'character') &&
     workflow === 'extract_character'
   ) {
     return 'screenplay.extract_characters'
   }
   if (
     input.operation === 'text_generate' &&
-    input.taskPipelineRole === 'scene' &&
+    (input.taskPipelineRole === 'scene' || input.outputPipelineRole === 'scene') &&
     workflow === 'extract_scene'
   ) {
     return 'screenplay.extract_scenes'
+  }
+  if (
+    input.operation === 'text_generate' &&
+    (input.taskPipelineRole === 'prop' || input.outputPipelineRole === 'prop') &&
+    workflow === 'extract_prop'
+  ) {
+    return 'screenplay.extract_props'
+  }
+  if (
+    input.operation === 'text_generate' &&
+    (input.taskPipelineRole === 'effect' || input.outputPipelineRole === 'effect') &&
+    workflow === 'extract_effect'
+  ) {
+    return 'screenplay.extract_effects'
+  }
+  if (
+    input.operation === 'text_generate' &&
+    (input.taskPipelineRole === 'screenplay' || input.outputPipelineRole === 'screenplay') &&
+    workflow === 'split_episodes'
+  ) {
+    return 'screenplay.split_episodes'
   }
   return input.operation
 }
@@ -402,14 +468,64 @@ export function readCanvasPresetTargetOverrides(): CanvasPresetStore {
   return readPresetStore()
 }
 
-export function readCanvasPresetTarget(targetId: CanvasPresetTargetId): CanvasOperationPreset {
+export type CanvasPresetResolutionContext = CanvasTaskDefaultContext
+
+export function readCanvasInheritedPresetTarget(
+  targetId: CanvasPresetTargetId,
+  context: CanvasPresetResolutionContext = {},
+): CanvasOperationPreset {
   const target = getCanvasPresetTargetDefinition(targetId)
   if (!target) {
-    return readCanvasOperationPreset(targetId as CanvasOperationType)
+    return readBuiltinCanvasOperationPreset(targetId as CanvasOperationType)
   }
-  const base = readCanvasOperationPreset(target.operation)
-  const overrides = readPresetStore()[targetId] ?? {}
+  const builtin = readBuiltinCanvasOperationPreset(target.operation)
+  const operationOverrides =
+    target.id === target.operation ? {} : (readStore()[target.operation] ?? {})
+  const inheritedModelParams = {
+    ...builtin.modelParams,
+    ...(operationOverrides.modelParams ?? {}),
+  }
+  if (target.id !== target.operation) {
+    for (const name of CANVAS_PIPELINE_CONTROL_PARAM_NAMES) delete inheritedModelParams[name]
+  }
+  const taskDefaultKind = canvasTaskDefaultKindForOperation(target.operation, context)
+  const taskDefault = taskDefaultKind ? readCanvasTaskDefault(taskDefaultKind) : { skillIds: [] }
   return {
+    // A dedicated pipeline contract owns its task identity and output schema.
+    // Reuse runtime/model defaults from the generic operation, but never inherit
+    // its authored prompt (for example a character extractor into a shot task).
+    prompt:
+      target.id === target.operation ? (operationOverrides.prompt ?? builtin.prompt) : '',
+    negativePrompt: operationOverrides.negativePrompt ?? builtin.negativePrompt,
+    ...((operationOverrides.providerProfileId ?? taskDefault.providerProfileId)
+      ? {
+          providerProfileId: operationOverrides.providerProfileId ?? taskDefault.providerProfileId,
+        }
+      : {}),
+    ...((operationOverrides.manifestId ?? taskDefault.manifestId)
+      ? { manifestId: operationOverrides.manifestId ?? taskDefault.manifestId }
+      : {}),
+    ...((operationOverrides.modelId ?? taskDefault.modelId)
+      ? { modelId: operationOverrides.modelId ?? taskDefault.modelId }
+      : {}),
+    ...((operationOverrides.agentId ?? taskDefault.agentId)
+      ? { agentId: operationOverrides.agentId ?? taskDefault.agentId }
+      : {}),
+    skillIds: [...(operationOverrides.skillIds ?? taskDefault.skillIds)],
+    modelParams: {
+      ...inheritedModelParams,
+      ...(CANVAS_PIPELINE_MODEL_PARAM_DEFAULTS[target.id as CanvasPipelinePresetTargetId] ?? {}),
+    },
+  }
+}
+
+export function readCanvasPresetTarget(
+  targetId: CanvasPresetTargetId,
+  context: CanvasPresetResolutionContext = {},
+): CanvasOperationPreset {
+  const base = readCanvasInheritedPresetTarget(targetId, context)
+  const overrides = readPresetStore()[targetId] ?? {}
+  const resolved = {
     prompt: overrides.prompt ?? base.prompt,
     negativePrompt: overrides.negativePrompt ?? base.negativePrompt,
     ...((overrides.providerProfileId ?? base.providerProfileId)
@@ -418,18 +534,16 @@ export function readCanvasPresetTarget(targetId: CanvasPresetTargetId): CanvasOp
     ...((overrides.manifestId ?? base.manifestId)
       ? { manifestId: overrides.manifestId ?? base.manifestId }
       : {}),
-    ...((overrides.modelId ?? base.modelId)
-      ? { modelId: overrides.modelId ?? base.modelId }
-      : {}),
-    ...((overrides.agentId ?? base.agentId)
-      ? { agentId: overrides.agentId ?? base.agentId }
-      : {}),
+    ...((overrides.modelId ?? base.modelId) ? { modelId: overrides.modelId ?? base.modelId } : {}),
+    ...((overrides.agentId ?? base.agentId) ? { agentId: overrides.agentId ?? base.agentId } : {}),
     skillIds: [...(overrides.skillIds ?? base.skillIds)],
     modelParams: {
       ...base.modelParams,
       ...(overrides.modelParams ?? {}),
     },
   }
+  resolved.modelParams = enforceCanvasPresetTargetModelParams(targetId, resolved.modelParams)
+  return resolved
 }
 
 export function writeCanvasOperationPreset(
@@ -500,10 +614,13 @@ export function writeCanvasLastUsedPresetTarget(
   writeLastUsedStore(store)
 }
 
-export function readCanvasResolvedPresetTarget(targetId: CanvasPresetTargetId): CanvasOperationPreset {
-  const targetPreset = readCanvasPresetTarget(targetId)
+export function readCanvasResolvedPresetTarget(
+  targetId: CanvasPresetTargetId,
+  context: CanvasPresetResolutionContext = {},
+): CanvasOperationPreset {
+  const targetPreset = readCanvasPresetTarget(targetId, context)
   const lastUsed = readLastUsedStore()[targetId] ?? {}
-  return {
+  const resolved = {
     // 用户在任务面板中输入的内容不能反向覆盖功能节点的内置指令。
     // 历史版本曾把 prompt 写进 last-used，这里固定以显式 preset 为准，
     // 同时继续沿用上次选择的模型、Agent 与参数。
@@ -527,6 +644,8 @@ export function readCanvasResolvedPresetTarget(targetId: CanvasPresetTargetId): 
       ...(lastUsed.modelParams ?? {}),
     },
   }
+  resolved.modelParams = enforceCanvasPresetTargetModelParams(targetId, resolved.modelParams)
+  return resolved
 }
 
 export function hasCanvasPresetTargetOverride(targetId: CanvasPresetTargetId): boolean {
@@ -557,21 +676,56 @@ export function mergeCanvasOperationPresetModelParams(
   operation: CanvasOperationType,
   modelParams?: Record<string, unknown>,
 ): Record<string, unknown> {
-  return {
-    ...(BUILTIN_MODEL_PARAMS[operation] ?? {}),
-    ...readCanvasOperationPreset(operation).modelParams,
-    ...(modelParams ?? {}),
-  }
+  return mergeModelParamAliases(
+    {
+      ...(BUILTIN_MODEL_PARAMS[operation] ?? {}),
+      ...readCanvasOperationPreset(operation).modelParams,
+    },
+    modelParams,
+  )
 }
 
 export function mergeCanvasPresetTargetModelParams(
   targetId: CanvasPresetTargetId,
   modelParams?: Record<string, unknown>,
 ): Record<string, unknown> {
-  return {
-    ...readCanvasPresetTarget(targetId).modelParams,
-    ...(modelParams ?? {}),
+  return enforceCanvasPresetTargetModelParams(
+    targetId,
+    mergeModelParamAliases(readCanvasPresetTarget(targetId).modelParams, modelParams),
+  )
+}
+
+/** Keep a functional node's routing identity separate from provider parameter inheritance. */
+export function enforceCanvasPresetTargetModelParams(
+  targetId: CanvasPresetTargetId,
+  modelParams: Record<string, unknown>,
+): Record<string, unknown> {
+  const workflow = CANVAS_PIPELINE_MODEL_PARAM_DEFAULTS[
+    targetId as CanvasPipelinePresetTargetId
+  ]?.workflow
+  return typeof workflow === 'string' ? { ...modelParams, workflow } : { ...modelParams }
+}
+
+function mergeModelParamAliases(
+  base: Record<string, unknown>,
+  overrides: Record<string, unknown> | undefined,
+): Record<string, unknown> {
+  const nextBase = { ...base }
+  const nextOverrides = { ...(overrides ?? {}) }
+  let selectedDuration: { name: 'duration' | 'durationSeconds'; value: unknown } | undefined
+  for (const [name, value] of Object.entries(nextOverrides)) {
+    if (name === 'duration' || name === 'durationSeconds') {
+      selectedDuration = { name, value }
+    }
   }
+  if (selectedDuration) {
+    delete nextBase.duration
+    delete nextBase.durationSeconds
+    delete nextOverrides.duration
+    delete nextOverrides.durationSeconds
+    nextOverrides[selectedDuration.name] = selectedDuration.value
+  }
+  return { ...nextBase, ...nextOverrides }
 }
 
 export function formatCanvasOperationPresetModelParams(

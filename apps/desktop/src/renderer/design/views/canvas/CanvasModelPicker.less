@@ -6,7 +6,7 @@
   border-color: color-mix(in srgb, var(--border) 80%, transparent);
   background: color-mix(in srgb, var(--canvas-field-bg) 88%, transparent);
 
-  > span:nth-last-child(2) {
+  .canvas-model-picker-trigger-label {
     min-width: 0;
     flex: 1;
     overflow: hidden;
@@ -17,8 +17,10 @@
 }
 
 .canvas-model-picker-trigger.is-compact {
+  // 与同行的其它参数按钮保持一致：不收缩、按内容宽度，避免被挤压到只剩图标。
+  flex: 0 0 auto;
   width: auto;
-  max-width: min(300px, 34vw);
+  max-width: min(280px, 50vw);
   height: 30px;
   padding-inline: 8px;
   border-color: color-mix(in srgb, var(--border-strong) 72%, transparent);
@@ -88,6 +90,40 @@
   min-height: 0;
   overflow-y: auto;
   padding: 7px;
+}
+
+// 画布弹层细圆头滚动条：局部覆盖全局 *::-webkit-scrollbar{width:0!important} 隐藏规则。
+// 手法同 chat-stream（global-overrides.css），8mm 轨道 + content-box 让 thumb 视觉约 4mm、两头圆。
+.canvas-model-picker-providers,
+.canvas-model-picker-models {
+  scrollbar-width: auto !important;
+  scrollbar-color: var(--border-strong) transparent !important;
+
+  &::-webkit-scrollbar {
+    width: 8px !important;
+    height: 8px !important;
+  }
+  &::-webkit-scrollbar-track,
+  &::-webkit-scrollbar-track-piece {
+    background: transparent !important;
+  }
+  &::-webkit-scrollbar-thumb {
+    min-height: 24px;
+    border: 2px solid transparent !important;
+    border-radius: 999px !important;
+    background: var(--border-strong) !important;
+    background-clip: content-box !important;
+  }
+  &::-webkit-scrollbar-thumb:hover {
+    background: var(--text-faint) !important;
+    background-clip: content-box !important;
+  }
+  &::-webkit-scrollbar-button,
+  &::-webkit-scrollbar-corner {
+    display: none !important;
+    width: 0 !important;
+    height: 0 !important;
+  }
 }
 
 .canvas-model-picker-providers {

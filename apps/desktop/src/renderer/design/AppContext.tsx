@@ -23,7 +23,21 @@ export type SidebarState = 'collapsed' | 'expanded'
  *  Independent of the actual OS — both styles are available on every platform.
  *  Defaults to flat on macOS/Windows unless the user has switched. */
 export type SidebarStyle = 'floating' | 'flat'
-export type ViewId = 'chat' | 'workflows' | 'agents' | 'board' | 'canvas' | 'scheduled-tasks' | 'skills' | 'skill-store' | 'mcp' | 'providers' | 'memory' | 'settings' | 'lobe-preview' | 'account-center' | 'onboarding'
+export type ViewId =
+  | 'chat'
+  | 'workflows'
+  | 'agents'
+  | 'board'
+  | 'canvas'
+  | 'skills'
+  | 'skill-store'
+  | 'mcp'
+  | 'providers'
+  | 'memory'
+  | 'settings'
+  | 'lobe-preview'
+  | 'account-center'
+  | 'onboarding'
 /**
  * 会话模式。workspace 仅为历史状态保留，已废弃；新入口必须使用 vibe。
  * @deprecated workspace 不再是当前工作台页面，不要用于新的导航或交互。
@@ -78,7 +92,7 @@ export const DEFAULT_TWEAKS: Tweaks = {
   primary: '#6366f1',
   density: 'regular',
   sidebar: 'collapsed',
-  view: 'chat',
+  view: 'canvas',
   chatMode: 'vibe',
   settingsSection: 'general',
   showPalette: false,
@@ -97,17 +111,17 @@ export const DEFAULT_TWEAKS: Tweaks = {
 export const FLOATING_SIDEBAR_WIDTH_MIN = 187
 export const FLOATING_SIDEBAR_WIDTH_MAX = 420
 
-const THEME_STORAGE_KEY = 'spark-agent:theme'
-const APPEARANCE_SETTINGS_STORAGE_KEY = 'spark-settings-appearance'
-const SETTINGS_UPDATED_EVENT = 'spark-settings-updated'
+const THEME_STORAGE_KEY = 'spark-canvas:theme'
+const APPEARANCE_SETTINGS_STORAGE_KEY = 'spark-canvas:appearance'
+const SETTINGS_UPDATED_EVENT = 'spark-canvas:settings-updated'
 const APPEARANCE_SETTINGS_CATEGORY = 'appearance'
 const APPEARANCE_SETTINGS_KEY = 'data'
-const SIDEBAR_STORAGE_KEY = 'spark-agent:sidebar'
-const BROWSER_PANEL_OPEN_KEY = 'spark-agent:browser-panel-open'
-const BROWSER_PANEL_WIDTH_KEY = 'spark-agent:browser-panel-width'
-const FLOATING_SIDEBAR_WIDTH_KEY = 'spark-agent:floating-sidebar-width'
-const SIDEBAR_HIDDEN_KEY = 'spark-agent:sidebar-hidden'
-const SIDEBAR_STYLE_KEY = 'spark-agent:sidebar-style'
+const SIDEBAR_STORAGE_KEY = 'spark-canvas:sidebar'
+const BROWSER_PANEL_OPEN_KEY = 'spark-canvas:browser-panel-open'
+const BROWSER_PANEL_WIDTH_KEY = 'spark-canvas:browser-panel-width'
+const FLOATING_SIDEBAR_WIDTH_KEY = 'spark-canvas:floating-sidebar-width'
+const SIDEBAR_HIDDEN_KEY = 'spark-canvas:sidebar-hidden'
+const SIDEBAR_STYLE_KEY = 'spark-canvas:sidebar-style'
 
 /** Min/max bounds for the browser panel width (px). */
 export const BROWSER_PANEL_WIDTH_MIN = 280
@@ -200,7 +214,10 @@ function readInitialTweaks(): Tweaks {
   tweaks = { ...tweaks, ...savedAppearanceTweaks }
 
   const savedTheme = window.localStorage.getItem(THEME_STORAGE_KEY)
-  if (savedAppearanceTweaks.theme == null && (savedTheme === 'light' || savedTheme === 'dark' || savedTheme === 'system')) {
+  if (
+    savedAppearanceTweaks.theme == null &&
+    (savedTheme === 'light' || savedTheme === 'dark' || savedTheme === 'system')
+  ) {
     tweaks = { ...tweaks, theme: savedTheme }
   }
 
@@ -290,8 +307,12 @@ const Ctx = createContext<AppCtx | null>(null)
 
 export function AppProvider({ children }: { children: ReactNode }) {
   const [t, setT] = useState<Tweaks>(readInitialTweaks)
-  const [confirmRequest, setConfirmRequest] = useState<(ConfirmOptions & { resolve: (value: boolean) => void }) | null>(null)
-  const [promptRequest, setPromptRequest] = useState<(PromptOptions & { resolve: (value: string | null) => void }) | null>(null)
+  const [confirmRequest, setConfirmRequest] = useState<
+    (ConfirmOptions & { resolve: (value: boolean) => void }) | null
+  >(null)
+  const [promptRequest, setPromptRequest] = useState<
+    (PromptOptions & { resolve: (value: string | null) => void }) | null
+  >(null)
   const navGuardRef = useRef<NavGuard | null>(null)
   const confirmHandledRef = useRef(false)
   const promptHandledRef = useRef(false)
@@ -306,16 +327,20 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const setHasUnsavedChanges = useCallback<AppCtx['setHasUnsavedChanges']>((value) => {
     hasUnsavedChangesRef.current = value
   }, [])
-  const requestConfirm = useCallback<AppCtx['requestConfirm']>((options) => (
-    new Promise<boolean>((resolve) => {
-      setConfirmRequest({ ...options, resolve })
-    })
-  ), [])
-  const requestPrompt = useCallback<AppCtx['requestPrompt']>((options) => (
-    new Promise<string | null>((resolve) => {
-      setPromptRequest({ ...options, resolve })
-    })
-  ), [])
+  const requestConfirm = useCallback<AppCtx['requestConfirm']>(
+    (options) =>
+      new Promise<boolean>((resolve) => {
+        setConfirmRequest({ ...options, resolve })
+      }),
+    [],
+  )
+  const requestPrompt = useCallback<AppCtx['requestPrompt']>(
+    (options) =>
+      new Promise<string | null>((resolve) => {
+        setPromptRequest({ ...options, resolve })
+      }),
+    [],
+  )
   const applyTweak = useCallback<AppCtx['setTweak']>((key, val) => {
     if (key === 'theme') {
       window.localStorage.setItem(THEME_STORAGE_KEY, val as ThemeMode)
@@ -346,19 +371,25 @@ export function AppProvider({ children }: { children: ReactNode }) {
     })
   }, [])
 
-  const setTweak = useCallback<AppCtx['setTweak']>((key, val) => {
-    if (key === 'view' && navGuardRef.current && val !== t.view) {
-      void (async () => {
-        if (await navGuardRef.current?.()) applyTweak(key, val)
-      })()
-      return
-    }
-    applyTweak(key, val)
-  }, [applyTweak, t.view])
+  const setTweak = useCallback<AppCtx['setTweak']>(
+    (key, val) => {
+      if (key === 'view' && navGuardRef.current && val !== t.view) {
+        void (async () => {
+          if (await navGuardRef.current?.()) applyTweak(key, val)
+        })()
+        return
+      }
+      applyTweak(key, val)
+    },
+    [applyTweak, t.view],
+  )
   useEffect(() => {
     let cancelled = false
     window.spark
-      ?.invoke('settings:get', { category: APPEARANCE_SETTINGS_CATEGORY, key: APPEARANCE_SETTINGS_KEY })
+      ?.invoke('settings:get', {
+        category: APPEARANCE_SETTINGS_CATEGORY,
+        key: APPEARANCE_SETTINGS_KEY,
+      })
       .then((res) => {
         if (cancelled || hasUserVisualChangeRef.current) return
         const remote = isRecord(res?.value) ? res.value : {}
@@ -470,11 +501,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       promptRequest,
     ],
   )
-  return (
-    <Ctx.Provider value={value}>
-      {children}
-    </Ctx.Provider>
-  )
+  return <Ctx.Provider value={value}>{children}</Ctx.Provider>
 }
 
 type ConfirmRequest = ConfirmOptions & { resolve: (value: boolean) => void }

@@ -26,11 +26,14 @@ vi.mock('./canvas.api', () => ({
 }))
 vi.mock('./canvas.capabilities', () => ({
   getCanvasCapability: () => ({ inputTypes: [] }),
+  isOperationNode: () => false,
   nodeOperation: () => 'text_to_image',
 }))
 vi.mock('./canvasOperationPresets', () => ({
   mergeCanvasOperationPresetNegativePrompt: (base: string, preset: string) =>
     [base, preset].filter(Boolean).join('\n'),
+  mergeCanvasPresetTargetModelParams: (_targetId: string, params: Record<string, unknown>) =>
+    params,
   readCanvasOperationPreset: () => ({
     prompt: '',
     negativePrompt: '',
@@ -49,6 +52,8 @@ vi.mock('./canvasOperationPresets', () => ({
 import {
   buildOperationPanelEnumOptions,
   buildOperationPanelEditablePromptDocument,
+  buildOperationPanelPromptOwnerNodeIds,
+  expandOperationPanelPromptNodeIds,
   isCommonOperationModelParam,
   isGeneratedCanvasFunctionalPrompt,
   buildOperationPanelRunInputNodeIds,
@@ -57,11 +62,13 @@ import {
   mergeOperationPanelPromptWithInputContext,
   readCanvasOperationPanelTextInputContent,
   readActiveOperationPromptNodeIds,
+  resolveOperationPanelActualInputNodes,
   resolveOperationPanelEditablePrompt,
   resolveCanvasOperationPanelNegativePrompt,
   stripGeneratedCanvasFunctionalPromptInput,
 } from './CanvasOperationPanel'
 import { mergeSeededModelParamDraft } from './canvasModelParamDraftState'
+import type { CanvasNode, CanvasSnapshot } from './canvas.types'
 
 describe('CanvasOperationPanel negative prompt inheritance', () => {
   it('merges project-level and operation preset negative prompts', () => {
@@ -81,6 +88,16 @@ describe('CanvasOperationPanel negative prompt inheritance', () => {
         operationPresetNegativePrompt: '不要字幕',
       }),
     ).toBe('不要人物\n不要字幕')
+  })
+
+  it('prefers the editable node snapshot over its immutable historical task', () => {
+    expect(
+      resolveCanvasOperationPanelNegativePrompt({
+        nodeNegativePrompt: '当前节点配置',
+        taskNegativePrompt: '历史任务配置',
+        operationPresetNegativePrompt: '预设约束',
+      }),
+    ).toBe('当前节点配置\n预设约束')
   })
 
   it('preserves user-selected param values when async defaults arrive later', () => {
@@ -172,7 +189,9 @@ describe('CanvasOperationPanel negative prompt inheritance', () => {
       '【场次剧本】',
       '这段上级正文只能通过 Tag 注入',
     ].join('\n')
-    expect(isGeneratedCanvasFunctionalPrompt(generatedPrompt, 'screenplay.to_shot_script')).toBe(true)
+    expect(isGeneratedCanvasFunctionalPrompt(generatedPrompt, 'screenplay.to_shot_script')).toBe(
+      true,
+    )
     expect(
       resolveOperationPanelEditablePrompt({
         nodePrompt: generatedPrompt,
@@ -186,11 +205,26 @@ describe('CanvasOperationPanel negative prompt inheritance', () => {
     )
 
     const upstreamNode = {
-      id: 'scene-1', projectId: 'project-1', boardId: 'board-1', userId: 1,
-      type: 'text' as const, title: '分片 1 copy', assetId: null, taskId: null,
-      parentNodeId: null, x: 0, y: 0, width: 100, height: 100, rotation: 0, zIndex: 0,
-      locked: false, hidden: false, data: { text: '上级正文', pipelineRole: 'screenplay' as const },
-      createdAt: '', updatedAt: '',
+      id: 'scene-1',
+      projectId: 'project-1',
+      boardId: 'board-1',
+      userId: 1,
+      type: 'text' as const,
+      title: '分片 1 copy',
+      assetId: null,
+      taskId: null,
+      parentNodeId: null,
+      x: 0,
+      y: 0,
+      width: 100,
+      height: 100,
+      rotation: 0,
+      zIndex: 0,
+      locked: false,
+      hidden: false,
+      data: { text: '上级正文', pipelineRole: 'screenplay' as const },
+      createdAt: '',
+      updatedAt: '',
     }
     const mediaNode = {
       ...upstreamNode,
@@ -204,7 +238,15 @@ describe('CanvasOperationPanel negative prompt inheritance', () => {
         version: 2,
         blocks: [
           { kind: 'text', id: 'builtin', text: generatedPrompt },
-          { kind: 'reference', id: 'legacy-image', source: 'connection', sourceNodeId: 'image-1', relation: 'reference_image', label: '角色参考图', order: 0 },
+          {
+            kind: 'reference',
+            id: 'legacy-image',
+            source: 'connection',
+            sourceNodeId: 'image-1',
+            relation: 'reference_image',
+            label: '角色参考图',
+            order: 0,
+          },
         ],
       },
       editablePrompt: '',
@@ -214,7 +256,9 @@ describe('CanvasOperationPanel negative prompt inheritance', () => {
       assets: [],
     })
 
-    expect(document.blocks.some((block) => block.kind === 'text' && block.text.length > 0)).toBe(false)
+    expect(document.blocks.some((block) => block.kind === 'text' && block.text.length > 0)).toBe(
+      false,
+    )
     expect(document.blocks).toContainEqual(
       expect.objectContaining({
         kind: 'reference',
@@ -229,7 +273,7 @@ describe('CanvasOperationPanel negative prompt inheritance', () => {
       document.blocks.some(
         (block) => block.kind === 'reference' && block.sourceNodeId === 'image-1',
       ),
-    ).toBe(false)
+    ).toBe(true)
   })
 
   it('excludes suppressed tags from active task inputs', () => {
@@ -237,11 +281,133 @@ describe('CanvasOperationPanel negative prompt inheritance', () => {
       readActiveOperationPromptNodeIds({
         version: 2,
         blocks: [
-          { kind: 'reference', id: 'active', source: 'manual', sourceNodeId: 'scene-1', relation: 'scene', label: '场景', order: 0 },
-          { kind: 'reference', id: 'suppressed', source: 'connection', sourceNodeId: 'text-2', relation: 'generic', suppressed: true, label: '已移除输入', order: 1 },
+          {
+            kind: 'reference',
+            id: 'active',
+            source: 'manual',
+            sourceNodeId: 'scene-1',
+            relation: 'scene',
+            label: '场景',
+            order: 0,
+          },
+          {
+            kind: 'reference',
+            id: 'suppressed',
+            source: 'connection',
+            sourceNodeId: 'text-2',
+            relation: 'generic',
+            suppressed: true,
+            label: '已移除输入',
+            order: 1,
+          },
         ],
       }),
     ).toEqual(['scene-1'])
+  })
+
+  it('projects unique actual inputs from active bindings, including @ text references', () => {
+    const baseNode = {
+      projectId: 'project-1',
+      boardId: 'board-1',
+      userId: 1,
+      assetId: null,
+      taskId: null,
+      parentNodeId: null,
+      x: 0,
+      y: 0,
+      width: 100,
+      height: 100,
+      rotation: 0,
+      zIndex: 0,
+      locked: false,
+      hidden: false,
+      createdAt: '',
+      updatedAt: '',
+    }
+    const nodes: CanvasNode[] = [
+      {
+        ...baseNode,
+        id: 'image-1',
+        type: 'image' as const,
+        title: '角色参考图',
+        data: { url: 'https://example.com/hero.png' },
+      },
+      {
+        ...baseNode,
+        id: 'text-1',
+        type: 'text' as const,
+        title: '补充资料',
+        data: { text: '雨夜氛围' },
+      },
+      {
+        ...baseNode,
+        id: 'hidden-text',
+        type: 'text' as const,
+        title: '隐藏资料',
+        hidden: true,
+        data: { text: '仍会发送' },
+      },
+    ]
+
+    expect(
+      resolveOperationPanelActualInputNodes(
+        [
+          {
+            id: 'image-ref',
+            sourceNodeId: 'image-1',
+            origin: 'connection',
+            kind: 'image',
+            relation: 'reference_image',
+            role: 'reference',
+            enabled: true,
+            order: 0,
+          },
+          {
+            id: 'image-first',
+            sourceNodeId: 'image-1',
+            origin: 'picker',
+            kind: 'image',
+            relation: 'first_frame',
+            role: 'first_frame',
+            enabled: true,
+            order: 1,
+          },
+          {
+            id: 'text-manual',
+            sourceNodeId: 'text-1',
+            origin: 'manual',
+            kind: 'text',
+            relation: 'generic',
+            role: 'input',
+            enabled: true,
+            order: 2,
+            promptBlockId: 'text-block',
+          },
+          {
+            id: 'hidden-manual',
+            sourceNodeId: 'hidden-text',
+            origin: 'manual',
+            kind: 'text',
+            relation: 'generic',
+            role: 'input',
+            enabled: true,
+            order: 3,
+            promptBlockId: 'hidden-block',
+          },
+          {
+            id: 'text-disabled',
+            sourceNodeId: 'missing',
+            origin: 'connection',
+            kind: 'text',
+            relation: 'generic',
+            role: 'input',
+            enabled: false,
+            order: 4,
+          },
+        ],
+        nodes,
+      ).map((node) => node.id),
+    ).toEqual(['image-1', 'text-1', 'hidden-text'])
   })
 
   it('frame-role submit keeps only assigned image frames plus non-image inputs', () => {
@@ -310,6 +476,53 @@ describe('CanvasOperationPanel negative prompt inheritance', () => {
         ],
       }),
     ).toEqual(['img-a', 'img-b'])
+  })
+
+  it('expands a visible group tag into child image options and binding ownership', () => {
+    const baseNode: Omit<CanvasNode, 'id' | 'type' | 'title' | 'parentNodeId' | 'data'> = {
+      projectId: 'project-1',
+      boardId: 'board-1',
+      userId: 1,
+      assetId: null,
+      taskId: null,
+      x: 0,
+      y: 0,
+      width: 100,
+      height: 100,
+      rotation: 0,
+      zIndex: 0,
+      locked: false,
+      hidden: false,
+      createdAt: '',
+      updatedAt: '',
+    }
+    const group: CanvasNode = {
+      ...baseNode,
+      id: 'group-1',
+      type: 'group',
+      title: '图片组',
+      parentNodeId: null,
+      data: {},
+    }
+    const image: CanvasNode = {
+      ...baseNode,
+      id: 'image-1',
+      type: 'image',
+      title: '首帧候选',
+      parentNodeId: group.id,
+      data: { url: 'https://example.com/image-1.png' },
+    }
+    const snapshot: CanvasSnapshot = {
+      project: {} as CanvasSnapshot['project'],
+      board: {} as CanvasSnapshot['board'],
+      nodes: [group, image],
+      edges: [],
+      assets: [],
+      tasks: [],
+    }
+
+    expect(expandOperationPanelPromptNodeIds([group.id], snapshot)).toEqual(['group-1', 'image-1'])
+    expect(buildOperationPanelPromptOwnerNodeIds(snapshot).get(image.id)).toEqual([group.id])
   })
 
   it('keeps unsupported enum draft values visible as disabled options after model switch', () => {

@@ -1662,9 +1662,7 @@ html[data-theme="dark"][data-backdrop-blur="1"] .spark-lobe-toast-host {
        「方头 thumb 残留」，与「thin 仍显示方头」有本质区别）。
      双管齐下，无论 Chromium 走哪条路径都隐藏；!important 压制所有局部覆盖。
    【滚动能力】不受影响 —— 滚轮 / 触控板 / 键盘（PgUp/PgDn/方向键）照常工作。
-   【平台】macOS 本就是 overlay 滚动条，隐藏后无差异且更统一，故不区分 OS 全局生效。
-   【终端例外】xterm 自带 `.xterm-scrollable-element > .scrollbar` 是 DOM 模拟滚动条
-   （非原生 ::-webkit-scrollbar），不受本规则影响，终端仍保留其 styled 滚动条。 */
+   【平台】macOS 本就是 overlay 滚动条，隐藏后无差异且更统一，故不区分 OS 全局生效。 */
 *::-webkit-scrollbar,
 *::-webkit-scrollbar-track,
 *::-webkit-scrollbar-track-piece,

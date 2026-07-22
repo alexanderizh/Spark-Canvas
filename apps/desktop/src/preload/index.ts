@@ -12,7 +12,7 @@
  *   - 这样渲染进程可以使用标准的 try/catch 处理错误
  */
 
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { IpcRendererEvent } from 'electron'
 import type {
   IpcChannel,
@@ -21,6 +21,10 @@ import type {
   IpcStreamChannel,
   IpcStreamPayload,
 } from '@spark/protocol'
+import {
+  isCanvasInvokeChannelAllowed,
+  isCanvasStreamChannelAllowed,
+} from '../shared/canvasIpcPolicy.js'
 
 /**
  * IPC 调用结果格式（与主进程 typed-ipc.ts 中的 IpcResult 匹配）
@@ -78,6 +82,9 @@ export interface SparkApi {
     callback: (payload: IpcStreamPayload<C>) => void,
   ) => () => void
 
+  /** Resolve user-dropped native Files and bind their paths to this renderer sender. */
+  grantDroppedFiles: (files: readonly File[]) => Promise<Array<string | null>>
+
   /**
    * 当前运行平台（同步常量，渲染进程不需要 IPC 即可读取）
    */
@@ -118,6 +125,12 @@ contextBridge.exposeInMainWorld('spark', {
     channel: C,
     request: IpcRequest<C>,
   ): Promise<IpcResponse<C>> => {
+    if (!isCanvasInvokeChannelAllowed(channel)) {
+      throw new SparkIpcError(
+        'IPC_CHANNEL_NOT_ALLOWED',
+        `IPC channel is outside the Spark Canvas product boundary: ${channel}`,
+      )
+    }
     const result = (await ipcRenderer.invoke(channel, request)) as IpcResult<IpcResponse<C>>
     return unwrapIpcResult(result)
   },
@@ -126,6 +139,12 @@ contextBridge.exposeInMainWorld('spark', {
     channel: C,
     callback: (payload: IpcStreamPayload<C>) => void,
   ): (() => void) => {
+    if (!isCanvasStreamChannelAllowed(channel)) {
+      throw new SparkIpcError(
+        'IPC_CHANNEL_NOT_ALLOWED',
+        `IPC stream is outside the Spark Canvas product boundary: ${channel}`,
+      )
+    }
     const listener = (_event: IpcRendererEvent, payload: IpcStreamPayload<C>): void =>
       callback(payload)
     ipcRenderer.on(channel, listener)
@@ -133,6 +152,25 @@ contextBridge.exposeInMainWorld('spark', {
     return () => {
       ipcRenderer.off(channel, listener)
     }
+  },
+
+  grantDroppedFiles: async (files: readonly File[]): Promise<Array<string | null>> => {
+    const extracted = files.map((file) => {
+      try {
+        return webUtils.getPathForFile(file).trim() || null
+      } catch {
+        return null
+      }
+    })
+    const nativePaths = extracted.filter((path): path is string => path != null)
+    if (nativePaths.length === 0) return extracted
+
+    const result = (await ipcRenderer.invoke('canvas:file:grant-dropped-paths', {
+      paths: nativePaths,
+    })) as IpcResult<IpcResponse<'canvas:file:grant-dropped-paths'>>
+    const granted = unwrapIpcResult(result).paths
+    let grantedIndex = 0
+    return extracted.map((path) => (path == null ? null : (granted[grantedIndex++] ?? null)))
   },
 
   // 同步暴露平台标识，用于渲染进程在首次渲染时决定 UI（无需 IPC 等待）

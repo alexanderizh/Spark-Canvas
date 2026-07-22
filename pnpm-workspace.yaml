@@ -6,7 +6,7 @@
 # pnpm v11 从本文件读 nodeLinker（不读 .npmrc）。
 nodeLinker: hoisted
 packages:
-  - 'apps/*'
+  - 'apps/desktop'
   - 'packages/*'
 # @playwright/mcp@0.0.30 imports `playwright-core/lib/server` directly but only
 # declares `playwright` as a dependency — it relies on playwright-core being a
@@ -22,13 +22,13 @@ packageExtensions:
 allowBuilds:
   '@file-viewer/web': true
   better-sqlite3: true
+  canvas: false
   core-js: true
   electron: true
   es5-ext: true
   esbuild: true
   keytar: true
   lzma-native: true
-  node-pty: true
   protobufjs: true
 minimumReleaseAgeExclude:
   - '@anthropic-ai/claude-agent-sdk'

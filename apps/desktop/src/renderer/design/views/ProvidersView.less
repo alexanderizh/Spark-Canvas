@@ -1,7 +1,7 @@
 /**
  * ProvidersView — 模型供应商管理页面样式
  *
- * 设计语言：参考 ScheduledTasksView，Arco Design Token + 项目 CSS 变量混用。
+ * 设计语言：Arco Design Token + 项目 CSS 变量混用。
  * 类名前缀：`pv-` (providers view) — 避免污染 views.css 的旧全局类。
  *
  * Tailwind 优先处理布局/间距；此处只写状态、动画、复杂选择器。
@@ -449,6 +449,32 @@
   text-overflow: ellipsis;
 }
 
+.pv_vendor_purchase {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  border-radius: var(--r-sm, 6px);
+  color: var(--text-muted);
+  text-decoration: none;
+  background: transparent;
+  transition:
+    color 0.15s ease,
+    background 0.15s ease;
+
+  &:hover {
+    color: var(--text-strong, var(--text));
+    background: var(--bg-soft, rgba(255, 255, 255, 0.06));
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary, #5b8cff);
+    outline-offset: 1px;
+  }
+}
+
 /* ─── Provider card (configured entry) ──────────────────────────────────── */
 
 .pv_card {
@@ -811,6 +837,27 @@
   display: flex;
   align-items: center;
   justify-content: flex-start;
+}
+
+.pv_template_media_summary {
+  display: flex;
+  min-width: 0;
+  min-height: 38px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 4px 6px 4px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--bg-soft);
+}
+
+.pv_template_media_value {
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .pv_field_stack {

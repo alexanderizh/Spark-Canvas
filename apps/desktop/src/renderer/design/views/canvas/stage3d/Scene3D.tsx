@@ -35,6 +35,7 @@ import { MixamoActorRig } from './MixamoActorRig'
 import { UE4ActorRig } from './UE4ActorRig'
 import { getStage3DActorModel } from './actorModelRegistry'
 import { PoseGizmo } from './PoseGizmo'
+import { PanoramaBackground } from './PanoramaBackground'
 import { BODY_METRICS, poseGroundOffset, type JointId, type Vec3 } from './mannequin'
 
 /**
@@ -304,39 +305,6 @@ function useStageTexture(url: string | undefined, equirect: boolean): THREE.Text
   return texture
 }
 
-function PanoramaSceneBackground({
-  texture,
-  rotationY,
-}: {
-  texture: THREE.Texture | null
-  rotationY: number
-}) {
-  const { gl, scene } = useThree()
-
-  useEffect(() => {
-    if (!texture) {
-      scene.background = new THREE.Color('#0b1220')
-      scene.backgroundRotation.set(0, 0, 0)
-      gl.setClearColor('#0b1220', 1)
-      return
-    }
-
-    scene.background = texture
-    scene.backgroundBlurriness = 0
-    scene.backgroundIntensity = 1
-    scene.backgroundRotation.set(0, rotationY, 0)
-    gl.setClearColor('#0b1220', 1)
-
-    return () => {
-      scene.background = new THREE.Color('#0b1220')
-      scene.backgroundRotation.set(0, 0, 0)
-      gl.setClearColor('#0b1220', 1)
-    }
-  }, [gl, rotationY, scene, texture])
-
-  return null
-}
-
 function Backdrop({ data }: { data: Stage3DData }) {
   const { backdrop } = data
   const backdropTexture = useStageTexture(
@@ -347,7 +315,13 @@ function Backdrop({ data }: { data: Stage3DData }) {
   if (backdrop.mode === 'panorama') {
     return (
       <group>
-        <PanoramaSceneBackground texture={backdropTexture} rotationY={backdrop.rotationY ?? 0} />
+        {backdropTexture && (
+          <PanoramaBackground
+            texture={backdropTexture}
+            rotationY={backdrop.rotationY ?? 0}
+            zoom={backdrop.panoramaZoom ?? 1}
+          />
+        )}
         <Grid
           args={[40, 40]}
           cellSize={0.5}
@@ -423,6 +397,7 @@ class ActorRigErrorBoundary extends Component<
 
 function ActorObject({
   actor,
+  sceneScale,
   selected,
   poseMode,
   onSelect,
@@ -433,6 +408,7 @@ function ActorObject({
   onPoseDragBegin,
 }: {
   actor: Stage3DActor
+  sceneScale: number
   selected: boolean
   /** 该 actor 处于摆姿势模式（选中 + 全局 poseMode） */
   poseMode: boolean
@@ -477,6 +453,7 @@ function ActorObject({
       <group
         position={pos}
         rotation={[0, actor.rotationY, 0]}
+        scale={[sceneScale, sceneScale, sceneScale]}
         onClick={(e) => {
           e.stopPropagation()
           onSelect()
@@ -798,10 +775,12 @@ function PrimitivePropContent({ prop, selected }: { prop: Stage3DProp; selected:
 
 function PropObject({
   prop,
+  sceneScale,
   selected,
   onSelect,
 }: {
   prop: Stage3DProp
+  sceneScale: number
   selected: boolean
   onSelect: () => void
 }) {
@@ -810,7 +789,7 @@ function PropObject({
     <group
       position={prop.position}
       rotation={[0, prop.rotationY, 0]}
-      scale={[prop.scale, prop.scale, prop.scale]}
+      scale={[prop.scale * sceneScale, prop.scale * sceneScale, prop.scale * sceneScale]}
       onClick={(e) => {
         e.stopPropagation()
         onSelect()
@@ -1371,6 +1350,7 @@ export const Scene3D = forwardRef<Scene3DHandle, Scene3DProps>(function Scene3D(
   ref,
 ) {
   const orbitRef = useRef<OrbitRefValue | null>(null)
+  const sceneScale = data.sceneScale ?? 1
   const orbitMouseButtons = useMemo(
     () => ({
       LEFT: viewNavigationMode === 'pan' ? THREE.MOUSE.PAN : THREE.MOUSE.ROTATE,
@@ -1416,6 +1396,7 @@ export const Scene3D = forwardRef<Scene3DHandle, Scene3DProps>(function Scene3D(
             <ActorObject
               key={actor.id}
               actor={actor}
+              sceneScale={sceneScale}
               selected={data.activeId === actor.id}
               poseMode={isActorPosing}
               onSelect={() => onSelect(actor.id)}
@@ -1441,6 +1422,7 @@ export const Scene3D = forwardRef<Scene3DHandle, Scene3DProps>(function Scene3D(
           <PropObject
             key={prop.id}
             prop={prop}
+            sceneScale={sceneScale}
             selected={data.activeId === prop.id}
             onSelect={() => onSelect(prop.id)}
           />

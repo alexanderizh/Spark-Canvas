@@ -1,7 +1,7 @@
 /**
  * IPC Handler 注册完整性测试
  *
- * 验证 IpcChannelMap 中定义的每个 channel 都在 main 进程某处有对应 handler。
+ * 验证 Canvas allowlist 中的每个 channel 都在 main 进程某处有对应 handler。
  * 不依赖 Electron 运行时，直接静态分析注册代码。
  *
  * 扫描范围：main/ipc/ + main/services/，排除 __tests__ 子目录和 *.test.ts。
@@ -10,8 +10,8 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync, readdirSync } from 'fs'
 import { join } from 'path'
+import { CANVAS_INVOKE_CHANNELS } from '../../../shared/canvasIpcPolicy.js'
 
-const PROTOCOL_IPC = join(__dirname, '../../../../../../packages/protocol/src/ipc/index.ts')
 const MAIN_IPC_DIR = join(__dirname, '..')
 const MAIN_SERVICES_DIR = join(__dirname, '../../services')
 
@@ -30,30 +30,23 @@ function readAllTsUnder(dir: string): string {
 }
 
 function extractChannels(src: string): string[] {
-  const matches = src.match(/'[a-z]+:[a-z-]+'/g) ?? []
+  const matches = src.match(/'[a-z][a-z-]*(?::[a-z][a-z-]*)+'/g) ?? []
   return [...new Set(matches.map((m) => m.slice(1, -1)))]
 }
 
 describe('IPC handler registration completeness', () => {
-  const protocolSrc = readFileSync(PROTOCOL_IPC, 'utf-8')
   // 拼接：main/ipc 与 main/services（很多 register*.ts 在 services 目录下）
   const handlerSrc = readAllTsUnder(MAIN_IPC_DIR) + '\n' + readAllTsUnder(MAIN_SERVICES_DIR)
-
-  // Extract channels defined in IpcChannelMap
-  const mapBlock = protocolSrc.slice(
-    protocolSrc.indexOf('export interface IpcChannelMap {'),
-    protocolSrc.indexOf('\n}', protocolSrc.indexOf('export interface IpcChannelMap {')),
-  )
-  const definedChannels = extractChannels(mapBlock)
+  const definedChannels = [...CANVAS_INVOKE_CHANNELS]
 
   // Extract channels registered via typedIpcHandle in handlers
   const registeredChannels = extractChannels(handlerSrc)
 
-  it('IpcChannelMap has at least 27 channels', () => {
-    expect(definedChannels.length).toBeGreaterThanOrEqual(27)
+  it('keeps the reviewed Canvas invoke inventory', () => {
+    expect(definedChannels).toHaveLength(118)
   })
 
-  it('every channel in IpcChannelMap has a registered handler', () => {
+  it('every Canvas invoke channel has a registered handler', () => {
     const missing = definedChannels.filter((ch) => !registeredChannels.includes(ch))
     expect(missing, `Missing handlers for: ${missing.join(', ')}`).toHaveLength(0)
   })
@@ -62,40 +55,20 @@ describe('IPC handler registration completeness', () => {
     const namespaces = [...new Set(definedChannels.map((ch) => ch.split(':')[0]))]
     expect(namespaces.sort()).toEqual(
       [
-        'agent',
         'app',
         'auth',
-        'board',
-        'browser',
         'canvas',
-        'clipboard',
-        'command',
-        'context',
         'dialog',
-        'env',
+        'ffmpeg',
         'file',
-        'hook',
-        'log',
-        'mcp',
-        'memory',
         'model',
-        'permission',
-        'playwright',
+        'platform-model',
         'provider',
-        'remote',
-        'rules',
-        'sdk',
-        'session',
         'settings',
-        'skill',
-        'team',
-        'terminal',
         'tool',
         'update',
-        'usage',
+        'video',
         'window',
-        'workflow',
-        'workspace',
       ].sort(),
     )
   })

@@ -19,6 +19,7 @@ import type {
 import { Icons } from '../../Icons'
 import { AssetThumbnail } from './CanvasAssetThumbnail'
 import { CanvasPromptHoverCard } from './CanvasPromptHoverCard'
+import { canvasNodeSecondaryLabel } from './canvasNodeSecondaryLabel'
 import { readCanvasTextInputContent } from './canvasTextInputPresentation'
 import type { CanvasAsset, CanvasNode } from './canvas.types'
 
@@ -67,7 +68,9 @@ export class CanvasPromptAtomicNode extends DecoratorNode<ReactNode> {
     return new CanvasPromptAtomicNode(cloneBlock(node.__block), node.__key)
   }
 
-  static override importJSON(serializedNode: SerializedCanvasPromptAtomicNode): CanvasPromptAtomicNode {
+  static override importJSON(
+    serializedNode: SerializedCanvasPromptAtomicNode,
+  ): CanvasPromptAtomicNode {
     return $createCanvasPromptAtomicNode(serializedNode.block)
   }
 
@@ -206,6 +209,7 @@ function CanvasPromptAtomicDecorator({
   }
 
   const node = context.nodeById.get(block.sourceNodeId)
+  const asset = node?.assetId ? context.assetById.get(node.assetId) : undefined
   const label = block.kind === 'reference' ? block.label : block.summary
   const disconnected = block.kind === 'reference' && block.disconnected === true
   const invalid = !node || disconnected
@@ -215,6 +219,7 @@ function CanvasPromptAtomicDecorator({
     <span className="canvas-prompt-chip-icon">!</span>
   )
   const relation = block.kind === 'reference' ? block.relation : block.schema
+  const secondaryLabel = node ? canvasNodeSecondaryLabel(node, asset) : relation
   const media =
     !disconnected && node ? renderCanvasPromptNodeHoverMedia(node, context.assetById) : null
   const content = media
@@ -222,7 +227,7 @@ function CanvasPromptAtomicDecorator({
     : disconnected
       ? '引用连接已断开，请重新绑定后再提交。'
       : node
-        ? previewNodeContent(node, context.assetById)
+        ? previewCanvasPromptNodeContent(node, context.assetById)
         : '引用节点已删除，请重新绑定后再提交。'
 
   return (
@@ -242,7 +247,7 @@ function CanvasPromptAtomicDecorator({
           <span className="canvas-prompt-chip-thumb">{thumbnail}</span>
           <span className="canvas-prompt-chip-copy">
             <strong>{label}</strong>
-            <small>{relation}</small>
+            <small title={secondaryLabel}>{secondaryLabel}</small>
           </span>
         </button>
       </CanvasPromptHoverCard>
@@ -290,7 +295,10 @@ export function renderCanvasPromptNodeThumbnail(
   return <Icons.File size={15} />
 }
 
-function renderCanvasPromptNodeHoverMedia(node: CanvasNode, assetById: Map<string, CanvasAsset>) {
+export function renderCanvasPromptNodeHoverMedia(
+  node: CanvasNode,
+  assetById: Map<string, CanvasAsset>,
+) {
   const asset = node.assetId ? assetById.get(node.assetId) : undefined
   const mediaType =
     node.type === 'image' || asset?.type === 'image'
@@ -350,11 +358,15 @@ function parameterIcon(parameter: CanvasPromptParameterBlock['parameter']) {
   return <Icons.Crosshair size={15} />
 }
 
-function previewNodeContent(node: CanvasNode, assetById: Map<string, CanvasAsset>): string {
+export function previewCanvasPromptNodeContent(
+  node: CanvasNode,
+  assetById: Map<string, CanvasAsset>,
+): string {
   const asset = node.assetId ? assetById.get(node.assetId) : undefined
   const text = readCanvasTextInputContent(node, asset ? [asset] : [])
   if (text) return text
-  if (typeof node.data.prompt === 'string' && node.data.prompt.trim()) return node.data.prompt.trim()
+  if (typeof node.data.prompt === 'string' && node.data.prompt.trim())
+    return node.data.prompt.trim()
   return '暂无可预览内容'
 }
 

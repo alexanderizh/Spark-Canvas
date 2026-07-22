@@ -3,9 +3,16 @@ name: Publish Desktop Release
 on:
   push:
     branches:
-      - master
+      - main
     paths:
+      - apps/desktop/electron-builder.yml
       - apps/desktop/package.json
+      - apps/desktop/scripts/build-win-release.sh
+      - apps/desktop/scripts/register-release.mjs
+      - apps/desktop/scripts/register-release.test.mjs
+      - apps/desktop/scripts/verify-win-release-gate.test.mjs
+      - apps/desktop/scripts/verify-windows-signature.ps1
+      - apps/desktop/scripts/windows-signature-policy.mjs
       - package.json
       - .nvmrc
       - .node-version
@@ -50,13 +57,14 @@ jobs:
       tag: ${{ steps.release.outputs.tag }}
       should_publish: ${{ steps.release.outputs.should_publish }}
       ref: ${{ steps.release.outputs.ref }}
+      commit: ${{ steps.release.outputs.commit }}
       build_matrix: ${{ steps.matrix.outputs.build_matrix }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 2
-          # 手动触发时支持指定 ref，否则用默认（push 时是 master）
+          # 手动触发时支持指定 ref，否则用默认（push 时是 main）
           ref: ${{ github.event.inputs.ref || github.ref }}
 
       - name: Setup Node.js
@@ -65,6 +73,12 @@ jobs:
           # Keep release jobs aligned with the repo-level Node pin that is known
           # to install better-sqlite3 cleanly on Windows runners.
           node-version-file: .nvmrc
+
+      - name: Verify Spark Canvas v2 release contract
+        run: node --test apps/desktop/scripts/register-release.test.mjs
+
+      - name: Verify Windows stable signing gate
+        run: node --test apps/desktop/scripts/verify-win-release-gate.test.mjs
 
       - name: Detect version change and ensure release tag exists
         id: release
@@ -78,9 +92,11 @@ jobs:
           git fetch --force --tags
           VERSION=$(node -p "require('./apps/desktop/package.json').version")
           TAG="v${VERSION}"
+          COMMIT=$(git rev-parse HEAD)
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "ref=${{ github.event.inputs.ref || github.ref }}" >> "$GITHUB_OUTPUT"
+          echo "commit=${COMMIT}" >> "$GITHUB_OUTPUT"
 
           # 手动触发：直接允许发布，跳过版本变化检测
           if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
@@ -126,7 +142,7 @@ jobs:
           # Windows pin 到 windows-2022 (VS 2022): electron-rebuild@3 依赖一个
           # 旧版 @electron/node-gyp，无法识别 Visual Studio 2026 (v18)——后者
           # 在 2026 年 5 月成为 windows-latest 默认（见 actions/runner-images#14017）。
-          # node-pty 重建时会报 "Could not find any Visual Studio installation"。
+          # better-sqlite3/keytar 重建时会报 "Could not find any Visual Studio installation"。
           TARGETS='{"os":"macos-latest","name":"mac-arm64","arch":"arm64","platform":"mac"},{"os":"macos-15-intel","name":"mac-x64","arch":"x64","platform":"mac"},{"os":"windows-2022","name":"win-x64","arch":"x64","platform":"win"}'
 
           case "${PLATFORMS}" in
@@ -173,6 +189,37 @@ jobs:
           # push 时用 tag；workflow_dispatch 时用输入的 ref（或当前分支）
           ref: ${{ needs.prepare.outputs.ref }}
 
+      # Public GitHub publication is gated on the complete Spark Canvas v2
+      # candidate path. Private workflow artifacts do not require these values.
+      - name: Validate public release configuration
+        if: >-
+          (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_to_release == 'true')
+          || github.event_name == 'push'
+        shell: bash
+        env:
+          PRODUCT: spark-canvas
+          RELEASE_STATE: candidate
+          RELEASE_API_BASE: ${{ secrets.RELEASE_API_BASE }}
+          RELEASE_CI_TOKEN: ${{ secrets.RELEASE_CI_TOKEN }}
+          RELEASE_MINIO_ENDPOINT: ${{ secrets.RELEASE_MINIO_ENDPOINT }}
+          RELEASE_MINIO_BUCKET: ${{ secrets.RELEASE_MINIO_BUCKET }}
+          RELEASE_MINIO_ACCESS_KEY: ${{ secrets.RELEASE_MINIO_ACCESS_KEY }}
+          RELEASE_MINIO_SECRET_KEY: ${{ secrets.RELEASE_MINIO_SECRET_KEY }}
+          RELEASE_MANIFEST_SHA256: ${{ secrets.RELEASE_MANIFEST_SHA256 }}
+          SIGNATURE_EVIDENCE_DIGEST: ${{ secrets.SIGNATURE_EVIDENCE_DIGEST }}
+        run: |
+          missing=()
+          for name in RELEASE_API_BASE RELEASE_CI_TOKEN \
+                      RELEASE_MINIO_ENDPOINT RELEASE_MINIO_BUCKET \
+                      RELEASE_MINIO_ACCESS_KEY RELEASE_MINIO_SECRET_KEY \
+                      RELEASE_MANIFEST_SHA256 SIGNATURE_EVIDENCE_DIGEST; do
+            if [ -z "${!name}" ]; then missing+=("$name"); fi
+          done
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error title=Spark Canvas v2 release gate::Missing required configuration: ${missing[*]}"
+            exit 1
+          fi
+
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
@@ -218,8 +265,11 @@ jobs:
           # Windows 签名
           WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
           WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
-          # 官网发布以可下载安装为优先：签名不可用时降级为未签名安装包。
-          ALLOW_UNSIGNED_WINDOWS_RELEASE: '1'
+          # Public releases must be signed. Private workflow artifacts may be
+          # unsigned when no certificate is configured, but never retry from a
+          # failed signed build as an unsigned package.
+          ALLOW_UNSIGNED_WINDOWS_RELEASE: '0'
+          REQUIRE_WINDOWS_SIGNING: ${{ ((github.event_name == 'workflow_dispatch' && github.event.inputs.publish_to_release == 'true') || github.event_name == 'push') && '1' || '0' }}
           # 手动触发时由 workflow_dispatch 输入决定是否发布；push 时默认发布
           PUBLISH_FLAG: ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_to_release == 'true') || github.event_name == 'push' }}
         shell: bash
@@ -301,42 +351,12 @@ jobs:
             run_mac_build_with_retry
           fi
 
-      # ─── 自建版本中心双写：MinIO 公网桶 + edu-server 元数据 ──────────────
-      # 与 GitHub Release 平行，作为永久镜像，给国内/官网下载使用。
-      # 任一 RELEASE_* 缺失则整段跳过（仍保留 GitHub Release 主链路）。
-      - name: Check self-hosted release config
+      # The shared version-center infrastructure is product-partitioned at the
+      # object key and v2 registration boundary. This creates a candidate only.
+      - name: Upload Spark Canvas candidate artifacts to MinIO
         if: >-
-          needs.prepare.outputs.should_publish == 'true'
-          && ((github.event_name == 'workflow_dispatch' && github.event.inputs.publish_to_release == 'true')
-              || github.event_name == 'push')
-        id: release_config
-        shell: bash
-        env:
-          RELEASE_API_BASE: ${{ secrets.RELEASE_API_BASE }}
-          RELEASE_CI_TOKEN: ${{ secrets.RELEASE_CI_TOKEN }}
-          RELEASE_MINIO_ENDPOINT: ${{ secrets.RELEASE_MINIO_ENDPOINT }}
-          RELEASE_MINIO_BUCKET: ${{ secrets.RELEASE_MINIO_BUCKET }}
-          RELEASE_MINIO_ACCESS_KEY: ${{ secrets.RELEASE_MINIO_ACCESS_KEY }}
-          RELEASE_MINIO_SECRET_KEY: ${{ secrets.RELEASE_MINIO_SECRET_KEY }}
-        run: |
-          missing=()
-          for v in RELEASE_API_BASE RELEASE_CI_TOKEN \
-                   RELEASE_MINIO_ENDPOINT RELEASE_MINIO_BUCKET \
-                   RELEASE_MINIO_ACCESS_KEY RELEASE_MINIO_SECRET_KEY; do
-            if [ -z "${!v}" ]; then missing+=("$v"); fi
-          done
-          if [ ${#missing[@]} -gt 0 ]; then
-            echo "[self-hosted] 缺少 secrets: ${missing[*]} — 跳过 MinIO/edu-server 双写"
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "[self-hosted] 配置齐全，将上传至 MinIO 并注册到 edu-server"
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Upload artifacts to MinIO
-        id: upload_minio
-        if: steps.release_config.outputs.enabled == 'true'
-        continue-on-error: true
+          (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_to_release == 'true')
+          || github.event_name == 'push'
         shell: bash
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_MINIO_ACCESS_KEY }}
@@ -345,14 +365,15 @@ jobs:
           AWS_EC2_METADATA_DISABLED: 'true'
           ENDPOINT_URL: ${{ secrets.RELEASE_MINIO_ENDPOINT }}
           BUCKET: ${{ secrets.RELEASE_MINIO_BUCKET }}
+          PRODUCT: spark-canvas
+          RELEASE_STATE: candidate
           CHANNEL: stable
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
-          DEST="s3://${BUCKET}/${CHANNEL}/${VERSION}/"
-          echo "[mc] uploading apps/desktop/dist/* → ${DEST}"
+          DEST="s3://${BUCKET}/spark-canvas/candidate/${CHANNEL}/${VERSION}/"
+          echo "[minio] uploading Spark Canvas candidate artifacts to ${DEST}"
           # MinIO 兼容 S3：aws-cli 已预装在 GitHub Actions 各 runner 上
           # 只上传安装包 + blockmap，不传 electron-builder 生成的 yml
-          # （server 端按 DB 视图重生 latest*.yml 并 PUT 回桶）
           aws s3 cp apps/desktop/dist/ "${DEST}" \
             --endpoint-url "${ENDPOINT_URL}" \
             --recursive \
@@ -366,21 +387,23 @@ jobs:
             --include "*.blockmap"
           aws s3 ls "${DEST}" --endpoint-url "${ENDPOINT_URL}"
 
-      - name: Warn when MinIO upload fails
-        if: steps.release_config.outputs.enabled == 'true' && steps.upload_minio.outcome != 'success'
-        shell: bash
-        run: |
-          echo "::warning title=MinIO upload skipped::Upload to MinIO failed for version ${{ needs.prepare.outputs.version }} on ${{ matrix.name }}. The workflow will continue, but edu-server registration is skipped for this matrix job."
-      - name: Register release in edu-server
-        if: steps.release_config.outputs.enabled == 'true' && steps.upload_minio.outcome == 'success'
+      - name: Register Spark Canvas v2 candidate
+        if: >-
+          (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_to_release == 'true')
+          || github.event_name == 'push'
         shell: bash
         env:
+          PRODUCT: spark-canvas
+          RELEASE_STATE: candidate
           RELEASE_API_BASE: ${{ secrets.RELEASE_API_BASE }}
           RELEASE_CI_TOKEN: ${{ secrets.RELEASE_CI_TOKEN }}
+          RELEASE_MANIFEST_SHA256: ${{ secrets.RELEASE_MANIFEST_SHA256 }}
+          SIGNATURE_EVIDENCE_DIGEST: ${{ secrets.SIGNATURE_EVIDENCE_DIGEST }}
           VERSION: ${{ needs.prepare.outputs.version }}
           PLATFORM: ${{ matrix.platform }}
           ARCH: ${{ matrix.arch }}
           CHANNEL: stable
+          COMMIT: ${{ needs.prepare.outputs.commit }}
         run: node apps/desktop/scripts/register-release.mjs
 
       # 上传安装包为「工作流构件」（私有，非公开 Release），供调试/测试下载。

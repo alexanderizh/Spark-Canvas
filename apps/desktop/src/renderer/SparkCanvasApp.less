@@ -1,0 +1,215 @@
+.window.spark-canvas-app {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  flex-direction: row;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+.spark-canvas-sidebar {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  width: 196px;
+  flex: 0 0 196px;
+  min-height: 0;
+  flex-direction: column;
+  border-right: 1px solid var(--border);
+  background: var(--bg-sunken);
+}
+
+.spark-canvas-drag-region {
+  height: 28px;
+  flex: 0 0 28px;
+  -webkit-app-region: drag;
+}
+
+.platform-darwin .spark-canvas-drag-region {
+  height: 38px;
+  flex-basis: 38px;
+}
+
+.spark-canvas-brand {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+  padding: 2px 16px 18px;
+  color: var(--text-strong);
+}
+
+.spark-canvas-brand-mark {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 34px;
+  place-items: center;
+  border-radius: 7px;
+  background: var(--primary);
+  color: white;
+}
+
+.spark-canvas-brand > span:last-child {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.spark-canvas-brand strong {
+  overflow: hidden;
+  font-size: 14px;
+  line-height: 18px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.spark-canvas-brand small {
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.spark-canvas-navigation {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  gap: 3px;
+  padding: 0 10px;
+}
+
+.spark-canvas-navigation button {
+  display: flex;
+  width: 100%;
+  height: 38px;
+  align-items: center;
+  gap: 10px;
+  border: 0;
+  border-radius: 6px;
+  padding: 0 11px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  -webkit-app-region: no-drag;
+}
+
+.spark-canvas-navigation button:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.spark-canvas-navigation button.active {
+  background: var(--primary-soft);
+  color: var(--primary);
+  font-weight: 600;
+}
+
+.spark-canvas-sidebar-status {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: auto;
+  padding: 16px 20px 18px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.spark-canvas-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #22c55e;
+  box-shadow: 0 0 0 3px color-mix(in srgb, #22c55e 18%, transparent);
+}
+
+.spark-canvas-main {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  background: var(--bg-soft);
+}
+
+.spark-canvas-window-bar {
+  display: flex;
+  height: 34px;
+  flex: 0 0 34px;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--border);
+  padding-left: 18px;
+  color: var(--text-muted);
+  font-size: 11px;
+  -webkit-app-region: drag;
+}
+
+.spark-canvas-window-controls {
+  display: flex;
+  height: 100%;
+  align-items: stretch;
+  margin-left: auto;
+  -webkit-app-region: no-drag;
+}
+
+.spark-canvas-window-controls .window-controls {
+  width: auto;
+  height: 100%;
+  align-items: stretch;
+  justify-content: flex-end;
+  padding: 0;
+  -webkit-app-region: no-drag;
+}
+
+.spark-canvas-window-controls .win-ctrl-btn {
+  width: 42px;
+  height: 100%;
+  border-radius: 0;
+}
+
+.platform-darwin .spark-canvas-window-controls {
+  display: none;
+}
+
+.spark-canvas-content {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+}
+
+.spark-canvas-view {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+@media (max-width: 1080px) {
+  .spark-canvas-sidebar {
+    width: 72px;
+    flex-basis: 72px;
+  }
+
+  .spark-canvas-brand {
+    justify-content: center;
+    padding-inline: 10px;
+  }
+
+  .spark-canvas-brand > span:last-child,
+  .spark-canvas-navigation button span,
+  .spark-canvas-sidebar-status {
+    display: none;
+  }
+
+  .spark-canvas-navigation button {
+    justify-content: center;
+    padding: 0;
+  }
+}

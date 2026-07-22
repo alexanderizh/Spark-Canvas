@@ -4,16 +4,8 @@
 #
 # This must run before electron-builder packages node_modules. If these modules
 # are left compiled for the developer/CI Node.js ABI, the installed app exits
-# during startup when Electron tries to load better-sqlite3/keytar/node-pty.
+# during startup when Electron tries to load better-sqlite3/keytar.
 set -euo pipefail
-
-# Windows hardened environments may export NoDefaultCurrentDirectoryInExePath,
-# which makes cmd.exe refuse to run executables from the current directory.
-# node-pty's winpty.gyp runs `cmd /c "cd shared && GetCommitHash.bat"` and fails
-# with "'GetCommitHash.bat' is not recognized as a command" when this is set.
-# Clear it for this process tree so gyp actions resolve local .bat files.
-# Harmless no-op on macOS/Linux.
-unset NoDefaultCurrentDirectoryInExePath
 
 GREEN='\033[0;32m'
 RED='\033[0;31m'
@@ -36,7 +28,7 @@ fi
 
 TARGET_ARCH="${1:-${npm_config_arch:-$(node -p 'process.arch')}}"
 HOST_ARCH="$(node -p 'process.arch')"
-NATIVE_MODULES="${NATIVE_MODULES:-node-pty,better-sqlite3,keytar}"
+NATIVE_MODULES="${NATIVE_MODULES:-better-sqlite3,keytar}"
 
 case "$TARGET_ARCH" in
   arm64|x64)

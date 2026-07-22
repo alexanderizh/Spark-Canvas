@@ -32,6 +32,8 @@ export default defineConfig({
       // 避免 Node 原生 ESM 在解析这些包时撞上目录 import 或 CJS/ESM 混用问题。
       deps: {
         inline: [
+          '@lobehub/ui',
+          '@lobehub/fluent-emoji',
           /^@lobehub\//,
           /^antd($|\/)/,
           /^antd-style($|\/)/,

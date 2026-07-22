@@ -65,9 +65,10 @@ export class TemplateMediaAdapter {
         })),
       },
       mode: 'adapter',
+      ...(ctx.skipParameterValidation ? { skipParameterValidation: true } : {}),
     })
     const blockingIssue = compiled.validationIssues.find((issue) => issue.severity === 'error')
-    if (blockingIssue) {
+    if (blockingIssue && !ctx.skipParameterValidation) {
       throw new MediaProviderError('invalid_input', blockingIssue.message)
     }
 
@@ -116,6 +117,7 @@ export class TemplateMediaAdapter {
         }
         requestId = taskId
         mode = 'async'
+        ctx.onTaskSubmitted?.({ requestId: taskId, response: raw })
         raw = await this.pollManifestTask(manifest, taskId, ctx, headers)
       }
     }
@@ -150,7 +152,10 @@ export class TemplateMediaAdapter {
     return pollTask(pollUrl, headers, {
       fetchImpl: ctx.fetch,
       intervalMs: ctx.mediaDefaults?.polling?.intervalMs ?? polling?.intervalMs ?? 5_000,
-      timeoutMs: ctx.mediaDefaults?.polling?.timeoutMs ?? polling?.timeoutMs ?? 600_000,
+      timeoutMs:
+        ctx.mediaDefaults?.polling?.timeoutMs ??
+        polling?.timeoutMs ??
+        (manifest.domains.includes('video') ? 1_800_000 : 600_000),
       inspect: (data) => {
         if (firstStringAtPaths(data, response.resultPaths)) return 'done'
         const rawStatus = extractStatus(data).toLowerCase()
@@ -264,8 +269,6 @@ export function buildVariables(
   const referenceFiles = imageFiles.some((file) => file.role === 'reference')
     ? imageFiles.filter((file) => file.role === 'reference')
     : imageFiles.filter((file) => file !== (firstFrame ?? imageFiles[0]) && file !== lastFrame)
-  void capability
-
   // 百炼视频系列（HappyHorse 全系列 + Wan 2.7 全系列）共用 input.media: [{type, url}]
   // 数组结构。元素 type 覆盖：video / first_frame / last_frame / reference_image /
   // driving_audio（Wan i2v/t2v 驱动音频）。
@@ -300,8 +303,12 @@ export function buildVariables(
     inputImages: imageRefs,
     inputImageUrls: imageRefs,
     imageUrls: imageRefs,
-    firstFrame: resolveRef(firstFrame) || imageRefs[0] || '',
-    firstFrameImage: resolveRef(firstFrame) || imageRefs[0] || '',
+    firstFrame:
+      resolveRef(firstFrame) ||
+      (capability.id === 'video.image_to_video' ? (imageRefs[0] ?? '') : ''),
+    firstFrameImage:
+      resolveRef(firstFrame) ||
+      (capability.id === 'video.image_to_video' ? (imageRefs[0] ?? '') : ''),
     lastFrame: resolveRef(lastFrame) || '',
     lastFrameImage: resolveRef(lastFrame) || '',
     referenceImages: referenceFiles.map(resolveRef).filter(Boolean),
@@ -314,6 +321,12 @@ export function buildVariables(
     firstClip: videoRefs[0] || '',
     audio: audioRefs[0] || '',
     audioUrl: audioRefs[0] || '',
+    audios: audioRefs,
+    audioUrls: audioRefs,
+    inputAudios: audioRefs,
+    inputAudioUrls: audioRefs,
+    referenceAudios: audioRefs,
+    referenceAudioUrls: audioRefs,
     media: bailianMedia,
     params: canonicalParams,
     providerParams,
@@ -342,14 +355,19 @@ function mergeProviderParams(body: unknown, providerParams: unknown): unknown {
 
 function renderTemplate(value: unknown, variables: Record<string, unknown>): unknown {
   if (typeof value === 'string') return renderTemplateStringOrValue(value, variables)
-  if (Array.isArray(value)) return value.map((item) => renderTemplate(item, variables)).filter((item) => item !== undefined)
+  if (Array.isArray(value)) {
+    const rendered = value
+      .map((item) => renderTemplate(item, variables))
+      .filter((item) => item !== undefined)
+    return rendered.length > 0 ? rendered : undefined
+  }
   if (isPlainRecord(value)) {
     const rendered: Record<string, unknown> = {}
     for (const [key, child] of Object.entries(value)) {
       const next = renderTemplate(child, variables)
       if (next !== undefined && next !== '') rendered[key] = next
     }
-    return rendered
+    return Object.keys(rendered).length > 0 ? rendered : undefined
   }
   return value
 }

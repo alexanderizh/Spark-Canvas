@@ -38,8 +38,16 @@ export interface MediaResponseTrace {
   body?: unknown
 }
 
+export interface MediaInputMetadata {
+  sizeBytes?: number | undefined
+  width?: number | undefined
+  height?: number | undefined
+  durationMs?: number | undefined
+}
+
 /**
- * 一次 provider HTTP 调用的摘要，用于在任务详情里展示「真实请求 + HTTP 响应」。
+ * 一次实际模型调用的摘要。HTTP 路径记录真实请求与响应元数据；SDK/CLI 路径记录
+ * 解析后的模型地址和最终 SDK 调用参数，method 会明确标注 SDK/CLI 而不伪装成 HTTP。
  *
  * body 已经过脱敏/摘要处理（base64 / data: URI 压缩成 MIME、大小估算、
  * sha256 和短 preview），既避免一张图刷屏，也避免把大体积 base64 落进画布快照。
@@ -91,6 +99,9 @@ export const MEDIA_PROVIDER_KINDS = [
 ] as const satisfies readonly MediaProviderKind[]
 
 export const MEDIA_API_TYPES = ['sync', 'async', 'auto'] as const satisfies readonly MediaApiType[]
+
+/** 视频异步任务的统一默认轮询超时：30 分钟。Provider 可显式配置更长时间。 */
+export const DEFAULT_VIDEO_POLL_TIMEOUT_MS = 30 * 60 * 1_000
 
 export const MEDIA_CAPABILITY_IDS = [
   'image.generate',
@@ -305,20 +316,35 @@ export function capabilityForOperation(operation: CanvasOperationType): MediaCap
  * 以及未手动指定 role 时的默认分配规则。UI 据此决定首尾帧/参考图选择器是否显示、
  * hint 文案、图片用量上限提示；MCP/skill 据此告知用户角色规则。
  *
- * 不在 manifest 里显式声明，而是由 {@link inferRolePolicy} 根据 capability.id +
- * input.required + input.maxImages 集中推断，避免 61 个模型的大面积数据改动。
- * 未来若有特殊模型角色策略与推断不符，再在 manifest 加可选 rolePolicy 字段覆盖。
+ * 默认由 {@link inferRolePolicy} 根据 capability.id + input.required + input.maxImages
+ * 集中推断，保持旧 manifest 向后兼容；输入模式特殊的模型可通过可选 rolePolicy
+ * 显式覆盖，画布仍只消费通用角色，不感知 provider。
  */
 export type MediaInputRolePolicy = {
   /** 支持的图片角色 */
-  imageRoles?: Array<'first_frame' | 'last_frame' | 'reference_image'>
+  imageRoles?: Array<'first_frame' | 'last_frame' | 'reference_image'> | undefined
   /** 支持的视频角色（input_video = 被编辑/延长的输入视频；reference_video = 多模态参考视频） */
-  videoRoles?: Array<'input_video' | 'reference_video'>
+  videoRoles?: Array<'input_video' | 'reference_video'> | undefined
   /** 支持的音频角色（多模态参考音频） */
-  audioRoles?: Array<'reference_audio'>
+  audioRoles?: Array<'reference_audio'> | undefined
   /** 未手动指定 role 时的默认分配规则，用于 UI hint */
-  defaultRoleAssignment?: 'first_then_last_then_reference' | 'all_reference' | 'none'
+  defaultRoleAssignment?: 'first_then_last_then_reference' | 'all_reference' | 'none' | undefined
 }
+
+export const MediaInputRolePolicySchema = z.object({
+  imageRoles: z
+    .array(z.enum(['first_frame', 'last_frame', 'reference_image']))
+    .max(3)
+    .optional(),
+  videoRoles: z
+    .array(z.enum(['input_video', 'reference_video']))
+    .max(2)
+    .optional(),
+  audioRoles: z.array(z.literal('reference_audio')).max(1).optional(),
+  defaultRoleAssignment: z
+    .enum(['first_then_last_then_reference', 'all_reference', 'none'])
+    .optional(),
+})
 
 /**
  * 根据 capability 推断角色策略。
@@ -335,7 +361,9 @@ export type MediaInputRolePolicy = {
 export function inferRolePolicy(capability: {
   id: string
   input: { required?: string[]; maxImages?: number | undefined }
+  rolePolicy?: MediaInputRolePolicy | undefined
 }): MediaInputRolePolicy {
+  if (capability.rolePolicy) return capability.rolePolicy
   const req = capability.input.required ?? []
   const hasImage = req.includes('image') || req.includes('images')
   const maxImages = capability.input.maxImages ?? 0
@@ -403,6 +431,7 @@ export function inferRolePolicy(capability: {
 export function capabilitySupportsImageRoles(capability: {
   id: string
   input: { required?: string[]; maxImages?: number | undefined }
+  rolePolicy?: MediaInputRolePolicy | undefined
 }): boolean {
   const policy = inferRolePolicy(capability)
   return (policy.imageRoles?.length ?? 0) > 0
@@ -416,6 +445,7 @@ export function capabilitySupportsImageRoles(capability: {
 export function capabilitySupportsFrameRoles(capability: {
   id: string
   input: { required?: string[]; maxImages?: number | undefined }
+  rolePolicy?: MediaInputRolePolicy | undefined
 }): boolean {
   const policy = inferRolePolicy(capability)
   return (
@@ -434,7 +464,11 @@ export function capabilitySupportsFrameRoles(capability: {
  */
 export function videoImageLimitForCapability(
   operation: CanvasOperationType,
-  capability: { id: string; input: { required?: string[]; maxImages?: number | undefined } } | null,
+  capability: {
+    id: string
+    input: { required?: string[]; maxImages?: number | undefined }
+    rolePolicy?: MediaInputRolePolicy | undefined
+  } | null,
 ): number {
   if (capability && !capabilitySupportsImageRoles(capability)) return 0
   const maxImages = capability?.input?.maxImages

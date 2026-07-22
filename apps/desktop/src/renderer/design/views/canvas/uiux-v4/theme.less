@@ -22,7 +22,10 @@
   color: var(--text);
   background: var(--bg);
 
-  :where(button, [role='button'], input, textarea, select):focus-visible {
+  :where(button, [role='button'], select):focus-visible,
+  :where(input, textarea):not(.ant-input):not(.ant-input-number-input):not(
+      .ant-select-selection-search-input
+    ):focus-visible {
     outline: 2px solid color-mix(in srgb, var(--primary) 70%, transparent);
     outline-offset: 2px;
   }
@@ -129,9 +132,9 @@
   }
 
   .canvas-bottom-dock {
-    min-height: 46px;
+    min-height: 41px;
     gap: 3px;
-    padding: 5px 7px;
+    padding: 4px 6px;
     border-color: var(--canvas-v4-border);
     border-radius: var(--canvas-v4-radius-md);
     background: color-mix(in srgb, var(--panel) 98%, var(--bg));

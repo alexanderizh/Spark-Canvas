@@ -6,8 +6,14 @@
   flex: 1 1 auto;
   flex-direction: column;
   overflow: hidden;
-  border-radius: 14px;
+  // 工作台作为外层面板的内容区，不再重复绘制一层圆角；圆角由外层面板统一负责。
+  border-radius: 0;
   background: var(--canvas-edit-bg);
+}
+
+.canvas-operation-workbench:has(.canvas-storyboard-editor) {
+  min-height: min(82vh, 860px);
+  max-height: min(88vh, 920px);
 }
 
 .canvas-operation-workbench-head {
@@ -16,7 +22,7 @@
   flex: 0 0 auto;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 8px;
   padding: 7px 10px;
   border-bottom: 1px solid color-mix(in srgb, var(--divider) 76%, transparent);
   background: color-mix(in srgb, var(--panel) 92%, transparent);
@@ -24,6 +30,7 @@
 
 .canvas-operation-workbench-tabs,
 .canvas-operation-workbench-actions,
+.canvas-operation-workbench-context,
 .canvas-operation-workbench-nav,
 .canvas-operation-workbench-run-nav {
   display: flex;
@@ -31,15 +38,36 @@
   gap: 6px;
 }
 
+.canvas-operation-workbench-tabs {
+  // Tab 是头部的稳定导航区，不参与右侧产物操作增多时的宽度压缩。
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
 .canvas-operation-workbench-actions {
+  max-width: 44%;
+  flex: 0 1 auto;
   min-width: 0;
   justify-content: flex-end;
   overflow-x: auto;
 }
 
+.canvas-operation-workbench-context {
+  min-width: 160px;
+  flex: 1 1 auto;
+  overflow: hidden;
+  padding-left: 4px;
+  border-left: 1px solid color-mix(in srgb, var(--divider) 70%, transparent);
+}
+
+.canvas-operation-workbench-actions > * {
+  flex: 0 0 auto;
+}
+
 .canvas-operation-workbench-tab {
   display: inline-flex;
   height: 30px;
+  flex: 0 0 auto;
   align-items: center;
   gap: 6px;
   padding: 0 11px;
@@ -50,6 +78,12 @@
   cursor: pointer;
   font-size: 12px;
   font-weight: 650;
+  white-space: nowrap;
+}
+
+.canvas-operation-workbench-tab > svg,
+.canvas-operation-workbench-count {
+  flex: 0 0 auto;
 }
 
 .canvas-operation-workbench-tab:hover:not(:disabled),
@@ -87,6 +121,42 @@
   box-shadow: none;
 }
 
+.canvas-operation-node-settings {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: flex-start;
+  justify-content: center;
+  overflow-y: auto;
+  padding: 32px 20px;
+}
+
+.canvas-operation-node-settings-card {
+  display: grid;
+  width: min(520px, 100%);
+  gap: 10px;
+  padding: 20px;
+  border: 1px solid color-mix(in srgb, var(--divider) 76%, transparent);
+  // 节点设置卡片是面板内部的结构容器，保持直角以避免圆角嵌套。
+  border-radius: 0;
+  background: color-mix(in srgb, var(--panel) 94%, transparent);
+}
+
+.canvas-operation-node-settings-card label {
+  color: var(--text-strong);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.canvas-operation-node-settings-hint {
+  min-height: 18px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.canvas-operation-node-settings-hint.is-error {
+  color: var(--danger, #ef4444);
+}
+
 .canvas-operation-result-panel {
   display: flex;
   min-height: 0;
@@ -95,12 +165,7 @@
   overflow: hidden;
 }
 
-.canvas-operation-workbench-nav {
-  min-height: 42px;
-  flex: 0 0 auto;
-  justify-content: space-between;
-  padding: 6px 12px;
-  border-bottom: 1px solid color-mix(in srgb, var(--divider) 62%, transparent);
+.canvas-operation-workbench-context {
   color: var(--text-muted);
   font-size: 12px;
 }
@@ -154,6 +219,10 @@
   align-items: center;
   gap: 3px;
   overflow-x: auto;
+}
+
+.canvas-operation-workbench-context .canvas-operation-workbench-output-list {
+  flex: 1 1 auto;
 }
 
 .canvas-operation-workbench-output-list button {
@@ -363,10 +432,36 @@
   font-size: 13px;
 }
 
+// editing 包了一层，使内层面板不再是 content 的直接子项，content 那条
+// 「flex:1 + min-height:0 + max-height:100%」的高度链对它失效；原先这里又把面板
+// max-height 置为 none，导致内部 table-wrap 的 flex:1 + overflow:auto 没有受限基准，
+// 内容一多就被外层 overflow:hidden 裁切（任务节点编辑"无法滚动"）。
+// 这里给 editing 区一个受限高度并把内层面板同样钉成受限 flex 子项，打通滚动链。
 .canvas-operation-workbench-editing {
-  min-height: min(62vh, 620px);
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  max-height: 100%;
 }
 
 .canvas-operation-workbench-editing > .canvas-bottom-floating-panel.is-inline {
-  max-height: none;
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: 100%;
+}
+
+@media (max-width: 1180px) {
+  .canvas-operation-workbench-head {
+    flex-wrap: wrap;
+  }
+
+  .canvas-operation-workbench-context {
+    order: 3;
+    width: 100%;
+    min-height: 34px;
+    border-left: 0;
+    border-top: 1px solid color-mix(in srgb, var(--divider) 62%, transparent);
+    padding-top: 4px;
+  }
 }

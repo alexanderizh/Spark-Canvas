@@ -3,6 +3,7 @@ import {
   classifyDroppedFile,
   extractDroppedFiles,
   layoutDroppedFiles,
+  mapDroppedFilePaths,
   textFormatFromFileName,
 } from './canvasFileDrop'
 
@@ -114,6 +115,21 @@ describe('extractDroppedFiles', () => {
       files: [],
     } as unknown as DataTransfer
     expect(extractDroppedFiles(dt)).toEqual([])
+  })
+})
+
+describe('mapDroppedFilePaths', () => {
+  it('keeps canonical paths aligned with the original File objects', () => {
+    const video = makeFile('clip.mp4', 'video/mp4')
+    const memoryOnly = makeFile('memory.mp4', 'video/mp4')
+
+    const mapped = mapDroppedFilePaths(
+      [video, memoryOnly],
+      ['/canonical/clip.mp4', null],
+    )
+
+    expect(mapped.get(video)).toBe('/canonical/clip.mp4')
+    expect(mapped.has(memoryOnly)).toBe(false)
   })
 })
 

@@ -14,7 +14,17 @@
  *   - sandbox: true
  */
 
-import { app, BrowserWindow, Menu, Notification, Tray, dialog, nativeImage, nativeTheme, shell } from 'electron'
+import {
+  app,
+  BrowserWindow,
+  Menu,
+  Notification,
+  Tray,
+  dialog,
+  nativeImage,
+  nativeTheme,
+  shell,
+} from 'electron'
 import { join } from 'path'
 
 // ─── EPIPE guard ─────────────────────────────────────────────────────────────
@@ -40,30 +50,26 @@ process.stderr?.on('error', ignoreEpipe)
 // 必须用 disable-features 强制关闭它，Chromium 才会走经典 ::-webkit-scrollbar 路径，
 // 此时 styles.css 中的 width / border-radius:999px / hover 颜色 才全部生效（圆头、不变宽）。
 // 注意：这是主进程命令行开关，改后必须【完全退出应用】重启（不能只刷新窗口）。
-app.commandLine.appendSwitch('disable-features', 'OverlayScrollbar,OverlayScrollbarFlashAfterAnyScrollUpdate,OverlayScrollbarFlashWhenMouseEnter,OverlayScrollbarWinStyle')
+app.commandLine.appendSwitch(
+  'disable-features',
+  'OverlayScrollbar,OverlayScrollbarFlashAfterAnyScrollUpdate,OverlayScrollbarFlashWhenMouseEnter,OverlayScrollbarWinStyle',
+)
 
 import { is } from '@electron-toolkit/utils'
 import { getDatabasePath, setDatabaseInstance, closeDatabase } from './db.js'
 import { startBackgroundMaintenanceWorker } from './services/background-maintenance-worker.js'
 import { registerAllIpcHandlers, ensureNoProjectDirectoryExists } from './ipc/index.js'
 import { setMainWindow, sendToMainWindow } from './windows/index.js'
-import { getFileWatcherService } from './services/FileWatcherService.js'
-import { getTerminalService } from './services/TerminalService.js'
 import { getUpdateService } from './services/UpdateService.js'
 import { checkSdkIntegrity } from './services/SdkIntegrityService.js'
-import { initializeShellEnvironment, getShellEnvironmentStatus } from './services/ShellEnvironmentService.js'
-import { ensureRegistered as ensurePlaywrightRegistered, readRegistration as readPlaywrightRegistration } from './services/PlaywrightMcpRegistration.js'
-import { detectIntegrity as detectPlaywrightIntegrity, installBrowser as autoInstallBrowser, invalidateCache as invalidatePlaywrightCache } from './services/PlaywrightIntegrityService.js'
-import { getInternalBrowserService } from './services/InternalBrowserService.js'
-import { ensureBundledBrowserEnv, resetBundledBrowsersPathCache } from './services/PlaywrightEnvironment.js'
-import { detectFfmpegIntegrity } from './services/FfmpegIntegrityService.js'
 import {
-  registerSafeFileProtocol,
-  registerSafeFileSchemes,
-} from './services/SafeFileProtocol.js'
+  initializeShellEnvironment,
+  getShellEnvironmentStatus,
+} from './services/ShellEnvironmentService.js'
+import { detectFfmpegIntegrity } from './services/FfmpegIntegrityService.js'
+import { registerSafeFileProtocol, registerSafeFileSchemes } from './services/SafeFileProtocol.js'
 import { installSingleInstanceLock } from './single-instance.js'
 import { getDatabase } from './db.js'
-import { getRecentSessionsForTray } from './ipc/index.js'
 import { createLogger } from '@spark/shared'
 import type { UpdateInfo, UpdateStatus } from '@spark/protocol'
 import { SettingsService } from '@spark/agent-runtime'
@@ -80,6 +86,9 @@ import {
   runShutdownCleanupSteps,
 } from './app-shutdown.js'
 import { disposeSessionServiceForShutdown } from './session-service-shutdown.js'
+import { PRODUCT_IDENTITY, applyProductIdentity } from './productIdentity.js'
+import { initializeCanvasSkillsMetadata } from './services/CanvasSkillsBootstrapService.js'
+import { initializeCredentialVault } from './services/CredentialVaultStartup.js'
 
 const log = createLogger('main')
 let tray: Tray | null = null
@@ -89,6 +98,9 @@ const BROWSER_ZOOM_CHANGED_EVENT = 'spark:browser-zoom-changed'
 const UI_ZOOM_MIN = 80
 const UI_ZOOM_MAX = 150
 const UI_ZOOM_STEP = 5
+
+const e2eAppDataPath = app.isPackaged ? undefined : process.env['SPARK_CANVAS_E2E_APP_DATA']
+applyProductIdentity(app, undefined, e2eAppDataPath)
 
 registerEmergencySessionShutdown(process, disposeSessionServiceForShutdown)
 
@@ -160,9 +172,9 @@ async function processPendingPlatformRedeemCodes(): Promise<void> {
 }
 
 if (is.dev && process.argv[1]) {
-  app.setAsDefaultProtocolClient('spark-agent', process.execPath, [process.argv[1]])
+  app.setAsDefaultProtocolClient(PRODUCT_IDENTITY.protocol, process.execPath, [process.argv[1]])
 } else {
-  app.setAsDefaultProtocolClient('spark-agent')
+  app.setAsDefaultProtocolClient(PRODUCT_IDENTITY.protocol)
 }
 
 app.on('open-url', (event, value) => {
@@ -170,10 +182,19 @@ app.on('open-url', (event, value) => {
   queuePlatformRedeemDeepLink(value)
 })
 
-const ownsSingleInstanceLock = installSingleInstanceLock(app, showMainWindow, (commandLine) => {
-  const code = findPlatformModelRedeemCode(commandLine)
-  if (code) queuePlatformRedeemDeepLink(`spark-agent://redeem?code=${encodeURIComponent(code)}`)
-}, !is.dev)
+const ownsSingleInstanceLock = installSingleInstanceLock(
+  app,
+  showMainWindow,
+  (commandLine) => {
+    const code = findPlatformModelRedeemCode(commandLine)
+    if (code) {
+      queuePlatformRedeemDeepLink(
+        `${PRODUCT_IDENTITY.protocol}://redeem?code=${encodeURIComponent(code)}`,
+      )
+    }
+  },
+  !is.dev,
+)
 
 const initialRedeemCode = findPlatformModelRedeemCode(process.argv)
 if (initialRedeemCode) pendingRedeemCodes.add(initialRedeemCode)
@@ -192,9 +213,8 @@ function isAppZoomShortcut(input: Electron.Input): 'in' | 'out' | 'reset' | null
 
 function setBrowserZoom(win: BrowserWindow, action: 'in' | 'out' | 'reset'): void {
   const current = Math.round(win.webContents.getZoomFactor() * 100)
-  const requested = action === 'reset'
-    ? 100
-    : current + (action === 'in' ? UI_ZOOM_STEP : -UI_ZOOM_STEP)
+  const requested =
+    action === 'reset' ? 100 : current + (action === 'in' ? UI_ZOOM_STEP : -UI_ZOOM_STEP)
   const zoomPercent = Math.min(UI_ZOOM_MAX, Math.max(UI_ZOOM_MIN, requested))
   win.webContents.setZoomFactor(zoomPercent / 100)
 
@@ -293,19 +313,16 @@ async function promptForDownloadedUpdate(info: UpdateInfo, autoInstall: boolean)
   showUpdateNotification(
     '更新已下载完成',
     process.platform === 'darwin'
-      ? `SparkWork v${info.version} 安装镜像已下载完成`
+      ? `${PRODUCT_IDENTITY.name} v${info.version} 安装镜像已下载完成`
       : autoInstall
-        ? `SparkWork v${info.version} 已准备好，退出应用时会自动启动安装器`
-        : `SparkWork v${info.version} 安装包已下载完成`,
+        ? `${PRODUCT_IDENTITY.name} v${info.version} 已准备好，退出应用时会自动启动安装器`
+        : `${PRODUCT_IDENTITY.name} v${info.version} 安装包已下载完成`,
   )
 
   const mainWindow = BrowserWindow.getAllWindows()[0] ?? null
   if (mainWindow == null || mainWindow.isDestroyed()) return
 
-  const installButtonLabel =
-    process.platform === 'darwin'
-      ? '打开安装镜像'
-      : '安装更新'
+  const installButtonLabel = process.platform === 'darwin' ? '打开安装镜像' : '安装更新'
   const detail =
     process.platform === 'darwin'
       ? '现在打开 dmg 安装镜像，随后请将镜像中的应用拖到 Applications 并替换现有版本。'
@@ -316,7 +333,7 @@ async function promptForDownloadedUpdate(info: UpdateInfo, autoInstall: boolean)
   const result = await dialog.showMessageBox(mainWindow, {
     type: 'info',
     title: '更新已就绪',
-    message: `SparkWork v${info.version} 安装包已下载完成`,
+    message: `${PRODUCT_IDENTITY.name} v${info.version} 安装包已下载完成`,
     detail,
     buttons:
       process.platform === 'darwin'
@@ -335,7 +352,9 @@ async function promptForDownloadedUpdate(info: UpdateInfo, autoInstall: boolean)
 function createTray(): void {
   if (tray != null) return
 
-  const iconPath = getResourcePath(process.platform === 'darwin' ? 'trayTemplate.png' : 'trayIconWin.png')
+  const iconPath = getResourcePath(
+    process.platform === 'darwin' ? 'trayTemplate.png' : 'trayIconWin.png',
+  )
   let image = nativeImage.createFromPath(iconPath)
   if (process.platform === 'darwin') {
     image = image.resize({ width: 18, height: 18, quality: 'best' })
@@ -347,85 +366,35 @@ function createTray(): void {
   }
 
   tray = new Tray(image)
-  tray.setToolTip('SparkWork')
-  refreshTrayMenu().catch((err) => log.warn('Failed to refresh tray menu on init', err))
-  tray.on('click', () => {
-    // 每次点击前刷新菜单（最近会话变化），再展示主窗口
-    refreshTrayMenu().catch((err) => log.warn('Failed to refresh tray menu on click', err))
-    showMainWindow()
-  })
-}
-
-/**
- * 重新构建托盘右键菜单。
- *
- * 最近会话来自 SessionService（与 sidebar 共享同一实例）；点击时通过 stream 事件
- * 通知渲染端切换/新建会话，主进程仅负责显示主窗口。
- */
-async function refreshTrayMenu(): Promise<void> {
-  if (tray == null) return
-
-  let recentItems: Array<{ id: string; title: string; updatedAt: string; status: string; messageCount: number }> = []
-  try {
-    recentItems = await getRecentSessionsForTray(8)
-  } catch (err) {
-    log.warn('Failed to list recent sessions for tray menu', err)
-  }
-
-  const recentSubmenu = recentItems.length === 0
-    ? [{ label: '（暂无会话）', enabled: false }]
-    : recentItems.map((item) => ({
-        label: formatSessionLabel(item.title, item.status, item.messageCount),
+  tray.setToolTip(PRODUCT_IDENTITY.name)
+  tray.setContextMenu(
+    Menu.buildFromTemplate([
+      { label: `打开 ${PRODUCT_IDENTITY.name}`, click: showMainWindow },
+      { type: 'separator' },
+      {
+        label: '打开内部控制台',
         click: () => {
-          showMainWindow()
-          sendToMainWindow('stream:tray:open-session', { sessionId: item.id })
+          const win = BrowserWindow.getAllWindows()[0]
+          if (win == null) {
+            showMainWindow()
+            return
+          }
+          win.show()
+          win.focus()
+          win.webContents.openDevTools({ mode: 'detach' })
         },
-      }))
-
-  tray.setContextMenu(Menu.buildFromTemplate([
-    { label: '打开 SparkWork', click: showMainWindow },
-    { type: 'separator' },
-    {
-      label: '新建会话',
-      click: () => {
-        showMainWindow()
-        sendToMainWindow('stream:tray:new-session', {})
       },
-    },
-    {
-      label: '最近会话',
-      submenu: recentSubmenu,
-    },
-    { type: 'separator' },
-    {
-      label: '打开内部控制台',
-      click: () => {
-        const win = BrowserWindow.getAllWindows()[0]
-        if (win == null) {
-          showMainWindow()
-          return
-        }
-        win.show()
-        win.focus()
-        win.webContents.openDevTools({ mode: 'detach' })
+      { type: 'separator' },
+      {
+        label: '退出',
+        click: () => {
+          isQuitting = true
+          app.quit()
+        },
       },
-    },
-    { type: 'separator' },
-    {
-      label: '退出',
-      click: () => {
-        isQuitting = true
-        app.quit()
-      },
-    },
-  ]))
-}
-
-function formatSessionLabel(title: string, status: string, messageCount: number): string {
-  const safeTitle = (title?.trim() || '新会话').slice(0, 32)
-  const statusTag = status === 'running' ? ' ●' : status === 'error' ? ' ✕' : ''
-  const countTag = messageCount > 0 ? ` · ${messageCount}条` : ''
-  return `${safeTitle}${statusTag}${countTag}`
+    ]),
+  )
+  tray.on('click', showMainWindow)
 }
 
 /**
@@ -456,11 +425,23 @@ function pickWindowBg(): string {
 }
 
 /** 平台分流的 BrowserWindow 毛玻璃/底色选项。 */
-function buildNativeSplashOptions(
-  isDarwin: boolean,
-): {
+function buildNativeSplashOptions(isDarwin: boolean): {
   transparent?: boolean
-  vibrancy?: 'titlebar' | 'selection' | 'menu' | 'popover' | 'sidebar' | 'header' | 'sheet' | 'window' | 'hud' | 'fullscreen-ui' | 'tooltip' | 'content' | 'under-window' | 'under-page'
+  vibrancy?:
+    | 'titlebar'
+    | 'selection'
+    | 'menu'
+    | 'popover'
+    | 'sidebar'
+    | 'header'
+    | 'sheet'
+    | 'window'
+    | 'hud'
+    | 'fullscreen-ui'
+    | 'tooltip'
+    | 'content'
+    | 'under-window'
+    | 'under-page'
   visualEffectState?: 'followWindow' | 'active' | 'inactive'
   backgroundColor?: string
   backgroundMaterial?: 'auto' | 'none' | 'mica' | 'acrylic' | 'tabbed'
@@ -494,7 +475,7 @@ function createWindow(): BrowserWindow {
   const isDarwin = process.platform === 'darwin'
 
   const mainWindow = new BrowserWindow({
-    title: 'SparkWork',
+    title: PRODUCT_IDENTITY.name,
     width: 1310,
     height: 800,
     minWidth: 800,
@@ -566,32 +547,6 @@ function createWindow(): BrowserWindow {
 }
 
 /**
- * 推送 Playwright 完整性状态到渲染进程。
- * 抽取为独立函数避免重复代码。
- */
-function pushPlaywrightStatus(): void {
-  try {
-    const integrity = detectPlaywrightIntegrity()
-    const registration = readPlaywrightRegistration(getDatabase())
-    sendToMainWindow('stream:playwright:status', {
-      mcpInstalled: integrity.mcpInstalled,
-      mcpVersion: integrity.mcpVersion,
-      playwrightInstalled: integrity.playwrightInstalled,
-      browserReady: integrity.browserReady,
-      browserSource: integrity.browserSource,
-      mcpRegistered: registration.registered,
-      mcpEnabled: registration.enabled,
-      mode: registration.mode,
-      viewOpen: false,
-      cdpEndpoint: null,
-      lastError: integrity.lastError,
-    })
-  } catch (err) {
-    log.warn(`Failed to push Playwright status: ${String(err)}`)
-  }
-}
-
-/**
  * 初始化主进程核心服务
  *
  * 启动顺序：
@@ -600,14 +555,7 @@ function pushPlaywrightStatus(): void {
  *   3. 创建主窗口
  */
 async function initializeApp(): Promise<void> {
-  log.info('Initializing Spark Agent...')
-
-  // 0a. Configure bundled chromium env (must be BEFORE any playwright MCP subprocess starts)
-  try {
-    ensureBundledBrowserEnv()
-  } catch (err) {
-    log.warn(`Failed to set up bundled browser env (non-fatal): ${String(err)}`)
-  }
+  log.info(`Initializing ${PRODUCT_IDENTITY.name}...`)
 
   // 0. 修复 PATH（必须在所有子进程创建之前执行）
   // Electron 从桌面启动时继承的是 Explorer 环境，缺少 node/python 等 PATH 条目
@@ -626,6 +574,8 @@ async function initializeApp(): Promise<void> {
     const migrationsDir = is.dev ? undefined : join(process.resourcesPath, 'migrations')
     const db = createDatabase(dbPath, migrationsDir)
     setDatabaseInstance(db)
+    initializeCanvasSkillsMetadata(db)
+    await initializeCredentialVault()
     const backgroundMaintenanceWorker = startBackgroundMaintenanceWorker(dbPath)
     log.info('Database initialized successfully')
 
@@ -638,14 +588,6 @@ async function initializeApp(): Promise<void> {
         cleanup: () =>
           runShutdownCleanupSteps(
             [
-              {
-                name: 'terminals',
-                run: () => getTerminalService().disposeAll(),
-              },
-              {
-                name: 'file watchers',
-                run: () => getFileWatcherService().stopAll(),
-              },
               {
                 name: 'update service',
                 run: () => getUpdateService().destroy(),
@@ -682,9 +624,8 @@ async function initializeApp(): Promise<void> {
   // 环境变量 SPARK_EDUGEN_BASE_URL 覆盖。
   try {
     initAuthService({
-      defaultBaseUrl:
-        process.env.SPARK_EDUGEN_BASE_URL?.trim() || 'https://spark.yiqibyte.com/',
-      keytarService: 'SparkAgent.CloudAuth',
+      defaultBaseUrl: process.env.SPARK_EDUGEN_BASE_URL?.trim() || 'https://spark.yiqibyte.com/',
+      keytarService: PRODUCT_IDENTITY.cloudAuthService,
       requestTimeoutMs: 30_000,
     })
     await getAuthService().start()
@@ -698,60 +639,12 @@ async function initializeApp(): Promise<void> {
     log.error(`Cloud auth service init failed: ${String(err)}`)
   }
 
-  // 2.1 启动定时任务调度器（使用 IPC 层的同一个 ScheduledTaskService 实例）
-  try {
-    const { getScheduledTaskService } = await import('./ipc/index.js')
-    const taskService = getScheduledTaskService()
-    taskService.startScheduler()
-    log.info('Scheduled task scheduler started')
-    app.on('before-quit', () => {
-      taskService.stopScheduler()
-    })
-  } catch (err) {
-    log.warn(`Failed to start scheduled task scheduler: ${String(err)}`)
-  }
-
   // 2.5 确保无项目会话目录已初始化（避免首次启动时目录不存在导致错误）
   await ensureNoProjectDirectoryExists()
 
   // 3. 创建主窗口
   createWindow()
   createTray()
-
-  // 3.5 注册 Playwright MCP（不在启动时打开嵌入式视图 / 不复用 Electron CDP）
-  //
-  // 之前的设计是启动隐藏自动化窗口并把 Electron CDP 注入 Playwright MCP，
-  // 但 Electron 会同时暴露主窗口、侧边栏 webview、自动化窗口等多个 target，
-  // Playwright 经常挑错目标导致 agent 无法控制浏览器。现在 Playwright MCP
-  // 直接拉起自己的 Chromium；应用内可见窗口由 spark_browser 内置 MCP 提供。
-  try {
-    ensurePlaywrightRegistered(getDatabase(), {
-      force: true,
-      cdpEndpoint: null,
-    })
-    getInternalBrowserService().bindLifecycle()
-  } catch (err) {
-    log.warn(`Failed to register Playwright MCP: ${String(err)}`)
-  }
-
-  // 3.6 启动所有已启用的用户/项目级 MCP 服务器(Managed 域除外 — Playwright 走
-  // ensurePlaywrightRegistered 路径,启动后会被 startAllEnabled 一起拉起)。
-  // 必须放在 Playwright 注册之后,否则重启后已启用的 MCP 不会自动恢复连接。
-  try {
-    const { getMcpService } = await import('./ipc/index.js')
-    await getMcpService().startAllEnabled()
-  } catch (err) {
-    log.warn(`Failed to start enabled MCP servers: ${String(err)}`)
-  }
-
-  // 3.7 初始化技能系统：自动软链宿主机 Claude/Codex 技能、登记内置、
-  //     重建原生托管插件目录，并注入给 SessionService。
-  try {
-    const { initializeAppSkills } = await import('./ipc/index.js')
-    initializeAppSkills()
-  } catch (err) {
-    log.warn(`Failed to initialize app skills: ${String(err)}`)
-  }
 
   // 4. 初始化自动更新服务
   const updateService = getUpdateService()
@@ -795,73 +688,49 @@ async function initializeApp(): Promise<void> {
 
   // 5. SDK 完整性自检（延迟 5 秒，确保窗口已加载完成）
   setTimeout(() => {
-    void checkSdkIntegrity({ checkLatest: false }).then((result) => {
-      log.info(`SDK integrity check completed: ${result.sdks.map((s) => `${s.packageName}=${s.installed ? s.installedVersion : 'missing'}`).join(', ')}`)
-      sendToMainWindow('stream:sdk:integrity', result)
-    }).catch((err) => {
-      log.warn(`SDK integrity check failed: ${String(err)}`)
-    })
+    void checkSdkIntegrity({ checkLatest: false })
+      .then((result) => {
+        log.info(
+          `SDK integrity check completed: ${result.sdks.map((s) => `${s.packageName}=${s.installed ? s.installedVersion : 'missing'}`).join(', ')}`,
+        )
+        sendToMainWindow('stream:sdk:integrity', result)
+      })
+      .catch((err) => {
+        log.warn(`SDK integrity check failed: ${String(err)}`)
+      })
   }, 5_000)
 
   // 6. 推送运行时环境状态到渲染进程（延迟 3 秒）
   setTimeout(() => {
-    void getShellEnvironmentStatus().then((status) => {
-      sendToMainWindow('stream:env:status', status)
-    }).catch((err) => {
-      log.warn(`Failed to push shell environment status: ${String(err)}`)
-    })
+    void getShellEnvironmentStatus()
+      .then((status) => {
+        sendToMainWindow('stream:env:status', status)
+      })
+      .catch((err) => {
+        log.warn(`Failed to push shell environment status: ${String(err)}`)
+      })
   }, 3_000)
 
-  // 7. 检测 Playwright 完整性并推送状态（延迟 6 秒，与 SDK 自检错开）
-  setTimeout(() => {
-    pushPlaywrightStatus()
-
-    // 7.5 如果浏览器未就绪，自动在后台下载到内置目录
-    // 仅在 dev 模式下自动下载（打包模式下浏览器应已内置）
-    if (is.dev) {
-      const integrity = detectPlaywrightIntegrity()
-      if (integrity.browserSource !== 'bundled' && integrity.playwrightInstalled) {
-        log.info('Bundled chromium not ready — auto-downloading chromium to bundled directory...')
-        autoInstallBrowser((line) => {
-          log.info(`[auto-download] ${line.trim()}`)
-        }).then((result) => {
-          if (result.success) {
-            log.info('Auto-download completed successfully')
-            // Reset caches and update env
-            resetBundledBrowsersPathCache()
-            invalidatePlaywrightCache()
-            ensureBundledBrowserEnv()
-            pushPlaywrightStatus()
-          } else {
-            log.warn(`Auto-download failed: ${result.message}`)
-            pushPlaywrightStatus()
-          }
-        }).catch((err) => {
-          log.warn(`Auto-download error: ${String(err)}`)
-          pushPlaywrightStatus()
-        })
-      }
-    }
-  }, 6_000)
-
-  // 8. 检测 FFmpeg 完整性并推送状态（延迟 8 秒，排在 Playwright 之后）
+  // 7. 检测 FFmpeg 完整性并推送状态（仅检测，不自动下载）
   //    仅检测不自动下载——ffmpeg 按需安装（首次使用视频工作台时提示）
   setTimeout(() => {
-    void detectFfmpegIntegrity().then((state) => {
-      sendToMainWindow('stream:ffmpeg:status', {
-        ffmpegReady: state.ffmpegReady,
-        ffmpegSource: state.ffmpegSource,
-        ffmpegVersion: state.ffmpegVersion,
-        ffprobeReady: state.ffprobeReady,
-        binaryPath: state.binaryPath,
-        lastError: state.lastError,
+    void detectFfmpegIntegrity()
+      .then((state) => {
+        sendToMainWindow('stream:ffmpeg:status', {
+          ffmpegReady: state.ffmpegReady,
+          ffmpegSource: state.ffmpegSource,
+          ffmpegVersion: state.ffmpegVersion,
+          ffprobeReady: state.ffprobeReady,
+          binaryPath: state.binaryPath,
+          lastError: state.lastError,
+        })
       })
-    }).catch((err) => {
-      log.warn(`FFmpeg integrity check failed: ${String(err)}`)
-    })
+      .catch((err) => {
+        log.warn(`FFmpeg integrity check failed: ${String(err)}`)
+      })
   }, 8_000)
 
-  log.info('Spark Agent initialized')
+  log.info(`${PRODUCT_IDENTITY.name} initialized`)
 }
 
 /**
