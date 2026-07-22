@@ -23,10 +23,6 @@ import { MacWindowDragHeader } from '../components/MacWindowDragHeader'
 import {
   getVendorMeta,
   PROVIDER_PRESETS,
-  LOCAL_CLI_PROVIDER_ID,
-  LOCAL_CODEX_CLI_PROVIDER_ID,
-  isLocalClaudeCliProvider,
-  isLocalCodexCliProvider,
 } from '@spark/protocol'
 import type {
   ManagedAgent,
@@ -40,7 +36,6 @@ export type OnboardingStep =
   | 'model-source'
   | 'spark-account'
   | 'third-party-provider'
-  | 'local-cli'
   | 'connection-test'
   | 'agent-template'
   | 'first-session'
@@ -49,11 +44,9 @@ export type OnboardingStep =
   | 'workflows-guide'
   | 'media-guide'
   | 'done'
-type ModelSource = 'spark-account' | 'third-party-provider' | 'local-cli'
+type ModelSource = 'spark-account' | 'third-party-provider'
 type UseCaseId = 'daily' | 'document' | 'work' | 'developer' | 'unsure'
 type TemplateId = 'general' | 'document' | 'work' | 'developer'
-
-type LocalCliKind = 'claude' | 'codex'
 
 type OnboardingState = {
   step: OnboardingStep
@@ -64,10 +57,6 @@ type OnboardingState = {
   agentId: string | null
   templateId: TemplateId
   firstPrompt: string
-  /** 走「本机 AI 工具」分支时记录的目标 adapter / 权限；非空表示走本机 CLI 路径 */
-  localAdapter: SessionAgentAdapter | null
-  localPermissionMode: SessionPermissionMode | null
-  localCliKind: LocalCliKind | null
 }
 
 type Action =
@@ -76,7 +65,6 @@ type Action =
   | { type: 'set-use-case'; useCase: UseCaseId; templateId: TemplateId }
   | { type: 'set-model-source'; modelSource: ModelSource; step: OnboardingStep }
   | { type: 'set-provider'; providerProfileId: string; modelId: string }
-  | { type: 'set-local-cli'; kind: LocalCliKind; providerProfileId: string; modelId: string }
   | { type: 'set-agent'; agentId: string }
   | { type: 'set-template'; templateId: TemplateId }
   | { type: 'set-first-prompt'; firstPrompt: string }
@@ -176,9 +164,6 @@ const initialState: OnboardingState = {
   agentId: null,
   templateId: 'general',
   firstPrompt: '帮我写一段简短的工作总结，语气自然、清楚。',
-  localAdapter: null,
-  localPermissionMode: null,
-  localCliKind: null,
 }
 
 function reducer(state: OnboardingState, action: Action): OnboardingState {
@@ -198,20 +183,6 @@ function reducer(state: OnboardingState, action: Action): OnboardingState {
         modelId: action.modelId,
         step: 'connection-test',
       }
-    case 'set-local-cli': {
-      const adapter: SessionAgentAdapter = action.kind === 'codex' ? 'codex' : 'claude-sdk'
-      const permissionMode: SessionPermissionMode =
-        action.kind === 'codex' ? 'codex-default' : 'claude-auto-edits'
-      return {
-        ...state,
-        providerProfileId: action.providerProfileId,
-        modelId: action.modelId,
-        localAdapter: adapter,
-        localPermissionMode: permissionMode,
-        localCliKind: action.kind,
-        step: 'connection-test',
-      }
-    }
     case 'set-agent':
       return { ...state, agentId: action.agentId, step: 'first-session' }
     case 'set-template':
@@ -226,15 +197,9 @@ function reducer(state: OnboardingState, action: Action): OnboardingState {
 function previousStep(state: OnboardingState): OnboardingStep {
   if (state.step === 'welcome') return 'welcome'
   if (state.step === 'model-source') return 'welcome'
-  if (
-    state.step === 'spark-account' ||
-    state.step === 'third-party-provider' ||
-    state.step === 'local-cli'
-  )
+  if (state.step === 'spark-account' || state.step === 'third-party-provider')
     return 'model-source'
-  if (state.step === 'connection-test') {
-    return state.localCliKind != null ? 'local-cli' : 'third-party-provider'
-  }
+  if (state.step === 'connection-test') return 'third-party-provider'
   if (state.step === 'agent-template') return 'connection-test'
   if (state.step === 'first-session') return 'agent-template'
   if (state.step === 'canvas-guide') return 'first-session'
@@ -368,19 +333,12 @@ const visualByStep: Record<
     stat: 'API',
     points: ['优先选择常见 Anthropic 兼容服务', '密钥只保存在本机', '测试通过后再创建助手'],
   },
-  'local-cli': {
-    kicker: 'Local',
-    title: '连接本机 AI 工具',
-    caption: '适合已经配置 Claude Code 或 Codex 的用户。',
-    stat: 'CLI',
-    points: ['自动检测本机可用工具', '不需要重新填写 API Key', '适合项目代码和自动化任务'],
-  },
   'connection-test': {
     kicker: 'Check',
     title: '确认模型已响应',
     caption: '测试通过后再创建助手，避免后续第一条消息失败。',
     stat: 'OK',
-    points: ['失败时可返回修改模型', '本机 CLI 会检查可执行文件', '第三方模型会做一次健康检查'],
+    points: ['失败时可返回修改模型', '第三方模型会做一次健康检查'],
   },
   'agent-template': {
     kicker: 'Agent',
@@ -483,7 +441,6 @@ function getActiveStepIndex(step: OnboardingStep): number {
       'model-source',
       'spark-account',
       'third-party-provider',
-      'local-cli',
       'connection-test',
     ].includes(step)
   ) {
@@ -710,53 +667,6 @@ export function OnboardingView(): React.ReactElement {
     toast,
   ])
 
-  const handleSelectLocalCli = useCallback(
-    async (kind: LocalCliKind) => {
-      const providerId = kind === 'codex' ? LOCAL_CODEX_CLI_PROVIDER_ID : LOCAL_CLI_PROVIDER_ID
-      const label = kind === 'codex' ? 'Codex' : 'Claude Code'
-      setBusy(true)
-      setError('')
-      setConnectionTestOutput(`正在检测本机 ${label} …`)
-      try {
-        // listProviders 已会过滤掉不可用的本地 CLI provider；
-        // 若返回结果里能看到对应 id，说明宿主机真的装了该 CLI。
-        const res = await listProviders({})
-        const profiles = res.profiles as ProviderProfile[]
-        const profile = profiles.find((p) => p.id === providerId)
-        if (!profile) {
-          throw new Error(
-            `未检测到本机 ${label}。请先安装${kind === 'codex' ? ' Codex CLI' : ' Claude Code'}（${
-              kind === 'codex' ? 'npm i -g @openai/codex' : 'npm i -g @anthropic-ai/claude-code'
-            }）并完成一次登录。`,
-          )
-        }
-        // 二次确认：本地 CLI 的 healthCheck 就是检查可执行文件存在，无副作用。
-        const test = await healthCheck({ id: profile.id })
-        if (!test.healthy) {
-          throw new Error(test.errorMessage || `本机 ${label} 不可用`)
-        }
-        dispatch({
-          type: 'set-local-cli',
-          kind,
-          providerProfileId: profile.id,
-          modelId: profile.defaultModel,
-        })
-        setConnectionTestOutput(
-          `已检测到本机 ${label}，可直接复用你已登录的凭证，无需填写 API Key。`,
-        )
-        toast.success(`已连接本机 ${label}。`)
-        void sessionCtx.refreshData()
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err)
-        setError(message)
-        setConnectionTestOutput('')
-      } finally {
-        setBusy(false)
-      }
-    },
-    [healthCheck, listProviders, sessionCtx, setError, toast],
-  )
-
   const handleCreateAgent = useCallback(async () => {
     const template = templates[state.templateId]
     setBusy(true)
@@ -777,16 +687,13 @@ export function OnboardingView(): React.ReactElement {
         isDefault: true,
         providerProfileId: providerId,
         modelId,
-        // 本机 CLI 路径必须按 CLI 种类覆盖 adapter / 权限：Codex 走 codex adapter +
-        // codex-default；Claude Code 走 claude-sdk。模板默认值只适用于第三方 API 路径。
-        agentAdapter: state.localAdapter ?? template.adapter,
-        permissionMode: state.localPermissionMode ?? template.permissionMode,
+        agentAdapter: template.adapter,
+        permissionMode: template.permissionMode,
         reasoningEffort: 'medium',
         prompt: template.prompt,
         metadata: {
           source: 'onboarding',
           templateId: state.templateId,
-          ...(state.localCliKind != null ? { localCliKind: state.localCliKind } : {}),
         },
       })
       const agent = (res as { agent: ManagedAgent }).agent
@@ -803,9 +710,6 @@ export function OnboardingView(): React.ReactElement {
     createAgent,
     listProviders,
     sessionCtx,
-    state.localAdapter,
-    state.localCliKind,
-    state.localPermissionMode,
     state.modelId,
     state.providerProfileId,
     state.templateId,
@@ -926,9 +830,6 @@ export function OnboardingView(): React.ReactElement {
                     account={auth.user?.account ?? auth.user?.nickname ?? ''}
                     dispatch={dispatch}
                   />
-                )}
-                {state.step === 'local-cli' && (
-                  <LocalCliStep dispatch={dispatch} onSelect={handleSelectLocalCli} busy={busy} />
                 )}
                 {state.step === 'third-party-provider' && (
                   <ProviderStep
@@ -1091,22 +992,6 @@ function ModelSourceStep({ dispatch }: { dispatch: React.Dispatch<Action> }) {
             ›
           </span>
         </button>
-        <button
-          type="button"
-          className="source-card source-row"
-          onClick={() =>
-            dispatch({ type: 'set-model-source', modelSource: 'local-cli', step: 'local-cli' })
-          }
-        >
-          <Icons.Terminal size={22} />
-          <div>
-            <strong>本机 AI 工具</strong>
-            <span>连接 Claude Code 或 Codex</span>
-          </div>
-          <span className="source-row-arrow" aria-hidden="true">
-            ›
-          </span>
-        </button>
       </div>
       <button
         type="button"
@@ -1156,143 +1041,6 @@ function SparkAccountStep({
           <SkipStepButton dispatch={dispatch} target="agent-template" />
         </div>
       ) : null}
-    </>
-  )
-}
-
-type LocalCliStatus = 'checking' | 'available' | 'unavailable'
-
-type LocalCliOption = {
-  kind: LocalCliKind
-  title: string
-  desc: string
-  installHint: string
-}
-
-const LOCAL_CLI_OPTIONS: Array<LocalCliOption> = [
-  {
-    kind: 'claude',
-    title: 'Claude Code（本机）',
-    desc: '复用宿主机已登录的 Claude Code。',
-    installHint: '未检测到，可运行 npm i -g @anthropic-ai/claude-code 安装。',
-  },
-  {
-    kind: 'codex',
-    title: 'Codex（本机）',
-    desc: '复用宿主机已登录的 Codex CLI。',
-    installHint: '未检测到，可运行 npm i -g @openai/codex 安装。',
-  },
-]
-
-function LocalCliStep({
-  dispatch,
-  onSelect,
-  busy,
-}: {
-  dispatch: React.Dispatch<Action>
-  onSelect: (kind: LocalCliKind) => void | Promise<void>
-  busy: boolean
-}) {
-  const { invoke: listProviders } = useIpcInvoke('provider:list')
-  const [status, setStatus] = useState<Record<LocalCliKind, LocalCliStatus>>({
-    claude: 'checking',
-    codex: 'checking',
-  })
-
-  const detect = useCallback(async () => {
-    try {
-      const res = await listProviders({})
-      const profiles = res.profiles as ProviderProfile[]
-      setStatus({
-        claude: profiles.some(isLocalClaudeCliProvider) ? 'available' : 'unavailable',
-        codex: profiles.some(isLocalCodexCliProvider) ? 'available' : 'unavailable',
-      })
-    } catch {
-      setStatus({ claude: 'unavailable', codex: 'unavailable' })
-    }
-  }, [listProviders])
-
-  const handleRedetect = useCallback(() => {
-    // 点击「重新检测」时先把状态重置回 checking，再发起探测。
-    setStatus({ claude: 'checking', codex: 'checking' })
-    void detect()
-  }, [detect])
-
-  useEffect(() => {
-    // 挂载时探测本机 CLI 可用性；detect 内部 setState，沿用仓库内同类 mount-time fetch 的约定。
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    void detect()
-  }, [detect])
-
-  const anyAvailable = status.claude === 'available' || status.codex === 'available'
-
-  return (
-    <>
-      <button
-        type="button"
-        className="model-source-back"
-        onClick={() => dispatch({ type: 'set-step', step: 'model-source' })}
-      >
-        <Icons.ArrowLeft size={14} /> 切换模型方式
-      </button>
-      <h1>连接本机的 Claude Code 或 Codex</h1>
-      <p className="lead">
-        选中后会直接复用你本机已登录的 Claude Code / Codex 配置，不需要再填写 API Key。
-        如果两个都还没装，可以改用第三方模型路径。
-      </p>
-      <div className="source-list">
-        {LOCAL_CLI_OPTIONS.map((option) => {
-          const current = status[option.kind]
-          return (
-            <button
-              key={option.kind}
-              type="button"
-              className="source-card local-cli-card"
-              disabled={busy || current !== 'available'}
-              onClick={() => onSelect(option.kind)}
-            >
-              <Icons.Terminal size={22} />
-              <div>
-                <strong>{option.title}</strong>
-                <span>
-                  {current === 'checking'
-                    ? '正在检测本机是否已安装…'
-                    : current === 'available'
-                      ? option.desc
-                      : option.installHint}
-                </span>
-              </div>
-              {current === 'checking' ? (
-                <em className="local-cli-badge checking">检测中</em>
-              ) : current === 'available' ? (
-                <em className="local-cli-badge ok">可用</em>
-              ) : (
-                <em className="local-cli-badge no">未安装</em>
-              )}
-            </button>
-          )
-        })}
-      </div>
-      <div className="button-row">
-        <Button onClick={handleRedetect} disabled={busy}>
-          重新检测
-        </Button>
-        <SkipStepButton dispatch={dispatch} target="agent-template" />
-        {!anyAvailable && (
-          <Button
-            type="primary"
-            onClick={() =>
-              dispatch({
-                type: 'set-model-source',
-                modelSource: 'third-party-provider',
-                step: 'third-party-provider',
-              })
-            }
-          >
-            改用第三方模型
-          </Button>
-        )}
-      </div>
     </>
   )
 }

@@ -146,6 +146,22 @@ describe('OnboardingView', () => {
     })
   })
 
+  it('does not offer local Claude or Codex CLI as a model source', async () => {
+    act(() => {
+      root = createRoot(container)
+      root.render(<OnboardingView />)
+    })
+
+    await act(async () => {
+      buttonByText('开始设置').click()
+      await new Promise((resolve) => window.setTimeout(resolve, 300))
+    })
+
+    expect(document.body.textContent).toContain('第三方模型')
+    expect(document.body.textContent).not.toContain('本机 AI 工具')
+    expect(document.body.textContent).not.toContain('Claude Code 或 Codex')
+  })
+
   it('shouldShowOnboardingAsync returns false when the main process marks onboarding completed', async () => {
     // 模拟主进程 SQLite 里已记录 completed=true（例如另一个 origin / 上次会话写过）
     mocks.invoke.mockImplementation((channel: string) => {

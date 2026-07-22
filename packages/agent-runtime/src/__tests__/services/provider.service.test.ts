@@ -1,11 +1,7 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 import {
-  LOCAL_CLI_DEFAULT_MODEL,
   LOCAL_CLI_PROVIDER_ID,
-  LOCAL_CLI_PROVIDER_NAME,
-  LOCAL_CODEX_CLI_DEFAULT_MODEL,
   LOCAL_CODEX_CLI_PROVIDER_ID,
-  LOCAL_CODEX_CLI_PROVIDER_NAME,
   CLAUDE_AUTO_ROUTER_PROVIDER_ID,
   CODEX_AUTO_ROUTER_PROVIDER_ID,
   createBasicCustomMediaManifest,
@@ -25,25 +21,6 @@ vi.mock('@spark/shared/keystore', () => ({
 vi.mock('@spark/shared', () => ({
   createLogger: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }),
 }))
-
-// Hoisted mock for node:util promisify — 让 isLocalCliAvailable 平台测试可控。
-// 用 hoisted 可变 map，避免 vi.doMock + resetModules 的时序竞态（原 flaky 根因）。
-const cliExecMock = vi.hoisted(() => ({
-  /** 返回 true 表示该命令"存在"（--version 成功） */
-  resolve: (_cmd: string): boolean => false,
-}))
-vi.mock('node:util', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('node:util')>()
-  return {
-    ...actual,
-    promisify: () => async (cmd: string) => {
-      if (cliExecMock.resolve(cmd)) return { stdout: 'claude x.y.z\n', stderr: '' }
-      const err = new Error(`ENOENT: ${cmd}`) as NodeJS.ErrnoException
-      err.code = 'ENOENT'
-      throw err
-    },
-  }
-})
 
 import * as keystore from '@spark/shared/keystore'
 
@@ -821,7 +798,7 @@ describe('ProviderService', () => {
     expect(codexRouter).toBeUndefined()
   })
 
-  it('normalizes the built-in local CLI provider model display config', async () => {
+  it('hides legacy built-in local CLI providers', async () => {
     repo.rows.set(LOCAL_CLI_PROVIDER_ID, {
       id: LOCAL_CLI_PROVIDER_ID,
       provider_type: 'anthropic',
@@ -833,29 +810,6 @@ describe('ProviderService', () => {
       created_at: '2026-06-01',
       updated_at: '2026-06-01',
     })
-    vi.spyOn(service, 'isLocalCliAvailable').mockResolvedValue(true)
-    vi.spyOn(service, 'isLocalCodexCliAvailable').mockResolvedValue(false)
-
-    const profiles = await service.listProviders()
-    const ensured = await service.ensureLocalCliProvider()
-
-    expect(profiles[0]).toMatchObject({
-      id: LOCAL_CLI_PROVIDER_ID,
-      name: LOCAL_CLI_PROVIDER_NAME,
-      defaultModel: LOCAL_CLI_DEFAULT_MODEL,
-      modelIds: [LOCAL_CLI_DEFAULT_MODEL],
-    })
-    expect(ensured.defaultModel).toBe(LOCAL_CLI_DEFAULT_MODEL)
-    expect(repo.update).toHaveBeenCalledWith(LOCAL_CLI_PROVIDER_ID, {
-      name: LOCAL_CLI_PROVIDER_NAME,
-      config: expect.objectContaining({
-        defaultModel: LOCAL_CLI_DEFAULT_MODEL,
-        modelIds: [LOCAL_CLI_DEFAULT_MODEL],
-      }),
-    })
-  })
-
-  it('normalizes the built-in local Codex CLI provider model display config', async () => {
     repo.rows.set(LOCAL_CODEX_CLI_PROVIDER_ID, {
       id: LOCAL_CODEX_CLI_PROVIDER_ID,
       provider_type: 'openai',
@@ -867,29 +821,11 @@ describe('ProviderService', () => {
       created_at: '2026-06-01',
       updated_at: '2026-06-01',
     })
-    vi.spyOn(service, 'isLocalCliAvailable').mockResolvedValue(false)
-    vi.spyOn(service, 'isLocalCodexCliAvailable').mockResolvedValue(true)
 
     const profiles = await service.listProviders()
-    const ensured = await service.ensureLocalCodexCliProvider()
 
-    expect(profiles[0]).toMatchObject({
-      id: LOCAL_CODEX_CLI_PROVIDER_ID,
-      name: LOCAL_CODEX_CLI_PROVIDER_NAME,
-      provider: 'openai',
-      defaultModel: LOCAL_CODEX_CLI_DEFAULT_MODEL,
-      modelIds: [LOCAL_CODEX_CLI_DEFAULT_MODEL],
-      codexApiKind: 'responses',
-    })
-    expect(ensured.defaultModel).toBe(LOCAL_CODEX_CLI_DEFAULT_MODEL)
-    expect(repo.update).toHaveBeenCalledWith(LOCAL_CODEX_CLI_PROVIDER_ID, {
-      name: LOCAL_CODEX_CLI_PROVIDER_NAME,
-      config: expect.objectContaining({
-        defaultModel: LOCAL_CODEX_CLI_DEFAULT_MODEL,
-        modelIds: [LOCAL_CODEX_CLI_DEFAULT_MODEL],
-        codexApiKind: 'responses',
-      }),
-    })
+    expect(profiles.map((profile) => profile.id)).not.toContain(LOCAL_CLI_PROVIDER_ID)
+    expect(profiles.map((profile) => profile.id)).not.toContain(LOCAL_CODEX_CLI_PROVIDER_ID)
   })
 
   it('listProviders exposes stored codexApiKind', async () => {
@@ -1164,168 +1100,6 @@ describe('ProviderService', () => {
       'https://api.deepseek.com/v1/models',
       expect.any(Object),
     )
-  })
-
-  describe('isLocalCliAvailable platform behavior', () => {
-    const realPlatform = process.platform
-
-    function setPlatform(platform: string): void {
-      Object.defineProperty(process, 'platform', { value: platform, configurable: true })
-    }
-
-    afterEach(() => {
-      setPlatform(realPlatform)
-      cliExecMock.resolve = () => false
-      vi.resetModules()
-    })
-
-    it('windows: tries claude.cmd shim when bare claude is not in PATH', async () => {
-      setPlatform('win32')
-      // win32 下 tryCliVersion 走 execAsync(`${cmd} --version`)，命令是带参数的整串；
-      // 用 includes 兼容 execFileAsync('claude.cmd') 和 execAsync('claude.cmd --version')
-      cliExecMock.resolve = (cmd) => cmd.includes('claude.cmd')
-      vi.resetModules()
-      const { ProviderService: FreshProviderService } =
-        await import('../../services/provider.service.js')
-      const fresh = new FreshProviderService(repo as never)
-
-      const available = await fresh.isLocalCliAvailable()
-
-      expect(available).toBe(true)
-    })
-
-    it('windows: returns false when no claude shim variant is resolvable', async () => {
-      setPlatform('win32')
-      cliExecMock.resolve = () => false
-      vi.resetModules()
-      const { ProviderService: FreshProviderService } =
-        await import('../../services/provider.service.js')
-      const fresh = new FreshProviderService(repo as never)
-
-      const available = await fresh.isLocalCliAvailable()
-
-      expect(available).toBe(false)
-    })
-
-    it('unix: tries bare claude only', async () => {
-      setPlatform('darwin')
-      const seen: string[] = []
-      cliExecMock.resolve = (cmd) => {
-        seen.push(cmd)
-        return cmd === 'claude'
-      }
-      vi.resetModules()
-      const { ProviderService: FreshProviderService } =
-        await import('../../services/provider.service.js')
-      const fresh = new FreshProviderService(repo as never)
-
-      const available = await fresh.isLocalCliAvailable()
-
-      expect(available).toBe(true)
-      expect(seen).toContain('claude')
-      expect(seen).not.toContain('claude.cmd')
-    })
-
-    it('coalesces concurrent claude CLI availability checks and reuses the cached result', async () => {
-      setPlatform('darwin')
-      const seen: string[] = []
-      cliExecMock.resolve = (cmd) => {
-        seen.push(cmd)
-        return cmd === 'claude'
-      }
-      vi.resetModules()
-      const { ProviderService: FreshProviderService } =
-        await import('../../services/provider.service.js')
-      const fresh = new FreshProviderService(repo as never)
-
-      await expect(
-        Promise.all([fresh.isLocalCliAvailable(), fresh.isLocalCliAvailable()]),
-      ).resolves.toEqual([true, true])
-      await expect(fresh.isLocalCliAvailable()).resolves.toBe(true)
-
-      expect(seen.filter((cmd) => cmd === 'claude')).toHaveLength(1)
-    })
-
-    it('force refresh bypasses the cached CLI availability result', async () => {
-      setPlatform('win32')
-      cliExecMock.resolve = (cmd) => cmd.includes('claude.cmd')
-      vi.resetModules()
-      const { ProviderService: FreshProviderService } =
-        await import('../../services/provider.service.js')
-      const fresh = new FreshProviderService(repo as never)
-
-      await expect(fresh.isLocalCliAvailable()).resolves.toBe(true)
-      cliExecMock.resolve = () => false
-      await expect(fresh.isLocalCliAvailable()).resolves.toBe(true)
-      await expect(fresh.isLocalCliAvailable({ forceRefresh: true })).resolves.toBe(false)
-    })
-
-    it('unix: falls back to login shell when bare claude and which both miss', async () => {
-      // 复现最常见的现场：用户把 claude 装在 nvm/Volta/Hoembrew 等用户级目录，
-      // 这些目录不在 GUI 进程的 PATH 里，所以 'claude' 和 `which claude` 都失败。
-      // 新增的 login shell 兜底（/bin/zsh -lc 'command -v claude'）能解析到，
-      // 之后还会对解析到的路径再跑一次 --version 验证。
-      setPlatform('darwin')
-      const seen: string[] = []
-      cliExecMock.resolve = (cmd) => {
-        seen.push(cmd)
-        // bare 'claude' 失败（PATH 没这个命令）
-        // 'which' 失败（which claude 找不到）
-        // '/bin/zsh' 是 login shell 调用 → mock promisify 返回固定 stdout 'claude x.y.z\n'
-        //   resolveCliFromLoginShell 取第一行 → 'claude x.y.z' 作为 loginResolved
-        // 然后 tryCliVersion(loginResolved) 再次调用 execFile → cmd='claude x.y.z' → 验证通过
-        if (cmd === 'claude') return false
-        if (cmd === 'which') return false
-        if (cmd === '/bin/zsh' || cmd === '/bin/bash') return true
-        if (cmd === 'claude x.y.z') return true
-        return false
-      }
-      vi.resetModules()
-      const { ProviderService: FreshProviderService } =
-        await import('../../services/provider.service.js')
-      const fresh = new FreshProviderService(repo as never)
-
-      const available = await fresh.isLocalCliAvailable()
-
-      expect(available).toBe(true)
-      // 验证确实走到了 login shell 分支
-      expect(seen).toContain('/bin/zsh')
-    })
-
-    it('unix: returns false when all detection paths miss', async () => {
-      setPlatform('darwin')
-      cliExecMock.resolve = () => false
-      vi.resetModules()
-      const { ProviderService: FreshProviderService } =
-        await import('../../services/provider.service.js')
-      const fresh = new FreshProviderService(repo as never)
-
-      const available = await fresh.isLocalCliAvailable()
-
-      expect(available).toBe(false)
-    })
-
-    it('unix: codex CLI detection mirrors claude detection', async () => {
-      setPlatform('darwin')
-      const seen: string[] = []
-      cliExecMock.resolve = (cmd) => {
-        seen.push(cmd)
-        if (cmd === 'codex') return false
-        if (cmd === 'which') return false
-        if (cmd === '/bin/zsh' || cmd === '/bin/bash') return true
-        if (cmd === 'claude x.y.z') return true // mock promisify 固定返回这个
-        return false
-      }
-      vi.resetModules()
-      const { ProviderService: FreshProviderService } =
-        await import('../../services/provider.service.js')
-      const fresh = new FreshProviderService(repo as never)
-
-      const available = await fresh.isLocalCodexCliAvailable()
-
-      expect(available).toBe(true)
-      expect(seen).toContain('/bin/zsh')
-    })
   })
 
   it('creates an official managed provider without making it the default', async () => {

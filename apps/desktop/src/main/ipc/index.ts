@@ -1815,8 +1815,8 @@ function getSessionService(): SessionService {
 
 /**
  * 按来源解析导入会话使用的 Provider / adapter：
- *   claude-code → 本地 Claude CLI provider（不可用则任一 anthropic / 默认 provider）
- *   codex       → 本地 Codex CLI provider（不可用则任一 openai / 默认 provider）
+ *   claude-code → 任一 anthropic / 默认 provider
+ *   codex       → 任一 openai / 默认 provider
  */
 async function resolveImportProvider(
   source: HistoryImportSource,
@@ -1829,12 +1829,7 @@ async function resolveImportProvider(
     profiles[0]
 
   if (source === 'claude-code') {
-    let profileId: string | undefined
-    if (await svc.isLocalCliAvailable()) {
-      profileId = (await svc.ensureLocalCliProvider()).id
-    } else {
-      profileId = pickFallback('anthropic')?.id
-    }
+    const profileId = pickFallback('anthropic')?.id
     if (profileId == null) throw new Error('没有可用的 Provider，请先在「Providers」中添加')
     return {
       providerProfileId: profileId,
@@ -1843,12 +1838,7 @@ async function resolveImportProvider(
     }
   }
 
-  let profileId: string | undefined
-  if (await svc.isLocalCodexCliAvailable()) {
-    profileId = (await svc.ensureLocalCodexCliProvider()).id
-  } else {
-    profileId = pickFallback('openai')?.id
-  }
+  const profileId = pickFallback('openai')?.id
   if (profileId == null) throw new Error('没有可用的 Provider，请先在「Providers」中添加')
   return { providerProfileId: profileId, agentAdapter: 'codex', permissionMode: 'codex-default' }
 }
@@ -2567,22 +2557,6 @@ export function registerAllIpcHandlers(): void {
   }
   applyTelemetrySettings(getSettingsService().get('telemetry', 'data'))
 
-  // 启动时仅在宿主机存在对应 CLI 时补种内置本地 provider。
-  // 失败仅记日志，不阻塞后续注册。
-  void (async () => {
-    const svc = getProviderService()
-    if (await svc.isLocalCliAvailable()) {
-      await svc.ensureLocalCliProvider()
-    }
-    if (await svc.isLocalCodexCliAvailable()) {
-      await svc.ensureLocalCodexCliProvider()
-    }
-  })().catch((err) =>
-    log.warn(
-      `Failed to seed local CLI provider: ${err instanceof Error ? err.message : String(err)}`,
-    ),
-  )
-
   // ─── Canvas Agent Bridge ───────────────────────────────────────────────
 
   const canvasSenderAuthority = {
@@ -2935,14 +2909,7 @@ export function registerAllIpcHandlers(): void {
   // P1-09 完整实现，当前为骨架
 
   typedIpcHandle('provider:list', async (_req) => {
-    const svc = getProviderService()
-    if (await svc.isLocalCliAvailable()) {
-      await svc.ensureLocalCliProvider()
-    }
-    if (await svc.isLocalCodexCliAvailable()) {
-      await svc.ensureLocalCodexCliProvider()
-    }
-    const profiles = await svc.listProviders()
+    const profiles = await getProviderService().listProviders()
     return { profiles }
   })
 
