@@ -403,6 +403,49 @@ describe('ClaudeSDKExecutor', () => {
     })
   })
 
+  it('lets local Claude CLI choose its default model when none is configured', async () => {
+    queryMock.mockReturnValue(
+      messages([
+        {
+          type: 'result',
+          subtype: 'success',
+          result: 'ok',
+          usage: { input_tokens: 1, output_tokens: 1 },
+          total_cost_usd: 0,
+        },
+      ]),
+    )
+
+    const previousHome = process.env.HOME
+    const previousModel = process.env.ANTHROPIC_MODEL
+    const previousSonnetModel = process.env.ANTHROPIC_DEFAULT_SONNET_MODEL
+    process.env.HOME = `/tmp/spark-claude-sdk-no-settings-${process.pid}`
+    delete process.env.ANTHROPIC_MODEL
+    delete process.env.ANTHROPIC_DEFAULT_SONNET_MODEL
+
+    try {
+      await new ClaudeSDKExecutor().executeTurn('spark-session', 'turn-1', 'hello', {
+        ...baseConfig(),
+        apiKey: '',
+        model: 'claude cli',
+        useLocalConfig: true,
+      })
+    } finally {
+      if (previousHome == null) delete process.env.HOME
+      else process.env.HOME = previousHome
+      if (previousModel == null) delete process.env.ANTHROPIC_MODEL
+      else process.env.ANTHROPIC_MODEL = previousModel
+      if (previousSonnetModel == null) delete process.env.ANTHROPIC_DEFAULT_SONNET_MODEL
+      else process.env.ANTHROPIC_DEFAULT_SONNET_MODEL = previousSonnetModel
+    }
+
+    const options = queryMock.mock.calls[0]?.[0]?.options as SDKQueryOptions
+
+    expect(options).not.toHaveProperty('model')
+    expect(options.settings).not.toHaveProperty('model')
+    expect(JSON.stringify(options)).not.toContain('claude cli')
+  })
+
   it('preserves Spark xhigh reasoning as Claude xhigh effort', async () => {
     queryMock.mockReturnValue(
       messages([

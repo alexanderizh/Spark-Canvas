@@ -641,13 +641,13 @@ export class ClaudeSDKExecutor {
     )
     // 本地 CLI 模式下 config.model 是占位符 "claude cli"（仅 UI 显示用），不能透传给 SDK
     // —— 真正的模型由宿主 ~/.claude/settings.json 里的 ANTHROPIC_MODEL 决定，
-    // 已在 runtimeEnv 里合并好。优先读 env，回落到 config.model。
+    // 已在 runtimeEnv 里合并好。没有显式配置时省略 model，让 Claude CLI 使用账号默认值。
     const effectiveModel =
       config.useLocalConfig === true
-        ? (runtimeEnv.ANTHROPIC_MODEL ?? runtimeEnv.ANTHROPIC_DEFAULT_SONNET_MODEL ?? config.model)
+        ? (runtimeEnv.ANTHROPIC_MODEL ?? runtimeEnv.ANTHROPIC_DEFAULT_SONNET_MODEL)
         : config.model
     const settings: SDKSettings = {
-      model: effectiveModel,
+      ...(effectiveModel != null ? { model: effectiveModel } : {}),
       env: runtimeEnv,
       permissions: {
         defaultMode: mergedPerms.permissionMode,
@@ -679,7 +679,7 @@ export class ClaudeSDKExecutor {
       let interactivePrompt: InteractivePrompt | undefined
       const options: SDKQueryOptions = {
         abortController,
-        model: effectiveModel,
+        ...(effectiveModel != null ? { model: effectiveModel } : {}),
         cwd: config.workspaceRootPath,
         ...(claudeCodeExecutable != null
           ? { pathToClaudeCodeExecutable: claudeCodeExecutable }
