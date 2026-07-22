@@ -332,6 +332,14 @@ export function ChatPanel({
     const unsubscribe = window.spark.on('stream:session:agent-event', (event: AgentEvent) => {
       const evt = event as { sessionId?: string; type?: string }
       if (evt.sessionId !== sessionId) return
+      // /clear 等清空历史：后端已硬删除该会话事件并把 seq 重新播种回 0。前端两个事件缓存
+      // 必须同步丢弃 reset 之前累积的旧事件，否则历史重载 / 上滑加载时 mergeAgentEvents 会把
+      // 这些已删除的旧事件按 seq 混回来，导致旧消息「复活」且顺序错乱（builder 已由下方
+      // processEvent → clearAll 清空显示，但缓存不清就会在下次 merge 时把它们带回来）。
+      if (event.type === 'session_history_reset') {
+        liveEventsRef.current = []
+        loadedEventsRef.current = []
+      }
       liveEventsRef.current = mergeAgentEvents(liveEventsRef.current, [event])
       builderRef.current.processEvent(event)
       if (historyLoadedRef.current) {
