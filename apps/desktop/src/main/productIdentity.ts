@@ -36,12 +36,13 @@ export function applyProductIdentity(
   app: ProductIdentityApp,
   ensureDirectory: typeof mkdirSync = mkdirSync,
   appDataPathOverride?: string,
+  userDataDirectoryName: string = PRODUCT_IDENTITY.userDataDirectoryName,
 ): void {
   if (appDataPathOverride != null && !isAbsolute(appDataPathOverride)) {
     throw new Error('Spark Canvas appData override must be an absolute path')
   }
   const appDataPath = appDataPathOverride ?? app.getPath('appData')
-  const userDataPath = resolveProductUserDataPath(appDataPath)
+  const userDataPath = join(appDataPath, userDataDirectoryName)
   const sessionDataPath = join(userDataPath, PRODUCT_IDENTITY.sessionDataDirectoryName)
   ensureDirectory(userDataPath, { recursive: true })
   ensureDirectory(sessionDataPath, { recursive: true })

@@ -8,11 +8,13 @@ import { CodexCliExecutor } from '../../sdk/codex-cli-executor.js'
 import type { SDKExecutorConfig } from '../../sdk/types.js'
 
 const spawnMock = vi.hoisted(() => vi.fn())
+const execFileMock = vi.hoisted(() => vi.fn())
 let codexHome: string
 let previousCodexHome: string | undefined
 let lastProfileConfig = ''
 
 vi.mock('node:child_process', () => ({
+  execFile: execFileMock,
   spawn: spawnMock,
 }))
 
@@ -174,6 +176,15 @@ describe('CodexCliExecutor', () => {
     codexHome = mkdtempSync(path.join(tmpdir(), 'spark-codex-test-'))
     process.env.CODEX_HOME = codexHome
     lastProfileConfig = ''
+    execFileMock.mockReset()
+    execFileMock.mockImplementation(
+      (
+        _command: string,
+        _args: string[],
+        _options: unknown,
+        callback: (error: Error | null, stdout: string, stderr: string) => void,
+      ) => callback(new Error('not found'), '', ''),
+    )
     spawnMock.mockReset()
   })
 
@@ -231,6 +242,34 @@ describe('CodexCliExecutor', () => {
     expect(lastProfileConfig).toContain('sandbox_workspace_write.network_access=false')
     expect(lastProfileConfig).toContain("web_search='disabled'")
   })
+
+  it.skipIf(process.platform === 'win32')(
+    'runs the Codex CLI resolved from the user login shell',
+    async () => {
+      execFileMock.mockImplementation(
+        (
+          _command: string,
+          _args: string[],
+          _options: unknown,
+          callback: (error: Error | null, stdout: string, stderr: string) => void,
+        ) => callback(null, '/Users/test/.nvm/current/bin/codex\n', ''),
+      )
+      spawnMock.mockImplementation((_command: string, args: string[]) => new MockChildProcess(args))
+
+      await new CodexCliExecutor().executeTurn(
+        'session-1',
+        'turn-1',
+        'hello',
+        makeConfig(),
+      )
+
+      expect(spawnMock).toHaveBeenCalledWith(
+        '/Users/test/.nvm/current/bin/codex',
+        expect.any(Array),
+        expect.objectContaining({ shell: false }),
+      )
+    },
+  )
 
   it('does not spawn Codex when cancelled during async preparation', async () => {
     spawnMock.mockImplementation((_command: string, args: string[]) => new MockChildProcess(args))

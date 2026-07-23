@@ -11,6 +11,7 @@ export const CANVAS_INVOKE_CHANNELS = [
   'canvas:agent:session:answer-question',
   'canvas:agent:session:cancel',
   'canvas:agent:session:create',
+  'canvas:agent:session:execute-command',
   'canvas:agent:session:get-history',
   'canvas:agent:session:list',
   'canvas:agent:session:submit-turn',

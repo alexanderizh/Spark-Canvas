@@ -55,8 +55,64 @@
 }
 
 .canvas-settings-section:first-child {
-  display: block;
   padding-top: 0;
+}
+
+.canvas-settings-appearance {
+  align-items: flex-start;
+}
+
+.canvas-settings-environment {
+  display: block;
+}
+
+.canvas-theme-options {
+  display: grid;
+  min-width: 330px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.canvas-theme-options > button {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 9px 10px;
+  background: var(--bg);
+  color: var(--text-muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  transition:
+    border-color 0.15s ease,
+    background 0.15s ease,
+    color 0.15s ease;
+}
+
+.canvas-theme-options > button:hover {
+  border-color: color-mix(in srgb, var(--primary) 55%, var(--border));
+  color: var(--text);
+}
+
+.canvas-theme-options > button.active {
+  border-color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 10%, var(--bg));
+  color: var(--primary);
+}
+
+@media (max-width: 720px) {
+  .canvas-settings-appearance {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .canvas-theme-options {
+    min-width: 0;
+  }
 }
 
 .canvas-settings-section .settings-section {

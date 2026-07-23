@@ -59,7 +59,7 @@ import { is } from '@electron-toolkit/utils'
 import { getDatabasePath, setDatabaseInstance, closeDatabase } from './db.js'
 import { startBackgroundMaintenanceWorker } from './services/background-maintenance-worker.js'
 import { registerAllIpcHandlers, ensureNoProjectDirectoryExists } from './ipc/index.js'
-import { setMainWindow, sendToMainWindow } from './windows/index.js'
+import { getMainWindow, setMainWindow, sendToMainWindow } from './windows/index.js'
 import { getUpdateService } from './services/UpdateService.js'
 import { checkSdkIntegrity } from './services/SdkIntegrityService.js'
 import {
@@ -69,6 +69,7 @@ import {
 import { detectFfmpegIntegrity } from './services/FfmpegIntegrityService.js'
 import { registerSafeFileProtocol, registerSafeFileSchemes } from './services/SafeFileProtocol.js'
 import { installSingleInstanceLock } from './single-instance.js'
+import { installDevAutoQuit } from './dev-auto-quit.js'
 import { getDatabase } from './db.js'
 import { createLogger } from '@spark/shared'
 import type { UpdateInfo, UpdateStatus } from '@spark/protocol'
@@ -99,8 +100,16 @@ const UI_ZOOM_MIN = 80
 const UI_ZOOM_MAX = 150
 const UI_ZOOM_STEP = 5
 
-const e2eAppDataPath = app.isPackaged ? undefined : process.env['SPARK_CANVAS_E2E_APP_DATA']
-applyProductIdentity(app, undefined, e2eAppDataPath)
+// 开发与打包后统一使用同一 userData 目录（USER_DATA_DIRECTORY_NAME = 'Spark Canvas'）。
+// 此前 dev 会追加 ' Dev' 后缀写入独立目录，导致 pnpm dev 打开的是另一个空库，
+// 表现为「新建的画布项目 / 模型配置一启动就不见了」。统一后 dev 与正式版共用同一份数据。
+// 仍保留按需隔离的环境变量入口：
+//   - SPARK_CANVAS_E2E_APP_DATA：E2E 指定独立 appData 根做隔离；
+//   - SPARK_CANVAS_DEV_APP_DATA：本地确需独立 dev 数据时手动指定。
+const developmentAppDataPath = app.isPackaged
+  ? undefined
+  : process.env['SPARK_CANVAS_E2E_APP_DATA'] ?? process.env['SPARK_CANVAS_DEV_APP_DATA']
+applyProductIdentity(app, undefined, developmentAppDataPath)
 
 registerEmergencySessionShutdown(process, disposeSessionServiceForShutdown)
 
@@ -118,6 +127,18 @@ app.on('before-quit', () => {
   isQuitting = true
 })
 
+// ─── Dev：随父进程退出 ────────────────────────────────────────────────────────
+// pnpm dev 由 electron-vite 以子进程拉起 Electron。停止 dev（Ctrl+C / 关终端 /
+// IDE 停止任务）时让主进程自动退出，避免残留后台常驻实例。仅开发环境启用。
+if (is.dev) {
+  installDevAutoQuit({
+    app,
+    onBeforeQuit: () => {
+      isQuitting = true
+    },
+  })
+}
+
 // ─── Custom protocol registration ───────────────────────────────────────────
 // `safe-file://` 让渲染进程能读取 userData 下的本地图片（生成的图、附件等），
 // 必须在 app.whenReady() 之前调用，否则特权声明会失效。
@@ -130,8 +151,8 @@ function getResourcePath(fileName: string): string {
 }
 
 function showMainWindow(): void {
-  const existing = BrowserWindow.getAllWindows()[0]
-  if (existing != null) {
+  const existing = getMainWindow()
+  if (existing != null && !existing.isDestroyed()) {
     if (existing.isMinimized()) existing.restore()
     existing.show()
     existing.focus()
@@ -466,6 +487,11 @@ function buildNativeSplashOptions(isDarwin: boolean): {
 }
 
 function createWindow(): BrowserWindow {
+  // macOS 的 activate 可能在异步启动尚未结束时先触发；复用已登记窗口，
+  // 避免后创建的窗口覆盖 IPC 权限层所信任的主窗口 sender。
+  const existing = getMainWindow()
+  if (existing != null && !existing.isDestroyed()) return existing
+
   const iconPath = getResourcePath(process.platform === 'win32' ? 'taskbarIcon.png' : 'icon.png')
 
   // macOS: hiddenInset + trafficLightPosition places native traffic lights
@@ -521,7 +547,10 @@ function createWindow(): BrowserWindow {
   })
 
   mainWindow.on('close', (event) => {
-    if (!isQuitting) {
+    // 生产环境：关闭窗口 = 隐藏到托盘，保持后台常驻（配合托盘菜单再次唤起）。
+    // 开发环境：关闭窗口 = 真正退出。否则 electron-vite dev --watch 主进程会随窗口
+    // 隐藏而残留在后台（dev 无单实例锁），下次 pnpm dev 时旧实例仍挂在托盘里。
+    if (!isQuitting && !is.dev) {
       event.preventDefault()
       mainWindow.hide()
     }
@@ -796,7 +825,8 @@ if (ownsSingleInstanceLock) {
   // Windows / Linux：所有窗口关闭时退出应用
   // macOS：由 'activate' 事件处理，不在此退出
   app.on('window-all-closed', () => {
-    if (process.platform !== 'darwin' && isQuitting) {
+    // 开发环境：所有窗口关闭即退出（含 macOS），避免 dev 进程后台常驻残留。
+    if (is.dev || (process.platform !== 'darwin' && isQuitting)) {
       app.quit()
     }
   })

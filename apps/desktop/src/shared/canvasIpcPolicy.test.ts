@@ -22,8 +22,8 @@ describe('Spark Canvas IPC policy', () => {
   })
 
   it('keeps the reviewed channel inventory explicit and duplicate-free', () => {
-    expect(CANVAS_INVOKE_CHANNELS).toHaveLength(118)
-    expect(new Set(CANVAS_INVOKE_CHANNELS).size).toBe(118)
+    expect(CANVAS_INVOKE_CHANNELS).toHaveLength(119)
+    expect(new Set(CANVAS_INVOKE_CHANNELS).size).toBe(119)
     expect(CANVAS_STREAM_CHANNELS).toHaveLength(13)
     expect(new Set(CANVAS_STREAM_CHANNELS).size).toBe(13)
   })

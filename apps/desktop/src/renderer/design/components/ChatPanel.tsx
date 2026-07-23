@@ -98,6 +98,14 @@ export interface ChatPanelProps {
   fallbackAssistant?: { agentId: string; agentName: string }
   /** Product-owned session facade used by restricted embedded surfaces. */
   sessionApi?: ChatPanelSessionApi
+  /** 可选：输入 `/` 时展示的斜杠命令建议（如画布助手的 /clear、/compact）。 */
+  slashCommands?: ChatPanelSlashCommand[]
+}
+
+/** 输入框 `/` 命令建议项 */
+export interface ChatPanelSlashCommand {
+  name: string
+  description: string
 }
 
 export interface ChatPanelSessionApi {
@@ -167,6 +175,7 @@ export function ChatPanel({
   fallbackAssistant,
   persistedSessionStatus,
   sessionApi,
+  slashCommands,
 }: ChatPanelProps): React.ReactElement {
   const resolvedToolCallDisplay =
     toolCallDisplay ?? (hideToolCalls ? 'hidden' : hideToolInputOutput ? 'summary' : 'full')
@@ -199,6 +208,8 @@ export function ChatPanel({
   const [historyReloadKey, setHistoryReloadKey] = useState(0)
   const [showScrollToBottom, setShowScrollToBottom] = useState(false)
   const [unseenMessageCount, setUnseenMessageCount] = useState(0)
+  const [slashDismissed, setSlashDismissed] = useState(false)
+  const [slashActiveIndex, setSlashActiveIndex] = useState(0)
 
   const builderRef = useRef<MessageBuilder>(new MessageBuilder())
   const messagesEndRef = useRef<HTMLDivElement>(null)
@@ -606,6 +617,34 @@ export function ChatPanel({
     await submitTurn(rawText, turnAttachments, text)
   }, [attachments, input, submitTurn])
 
+  // 斜杠命令建议：输入以 `/` 开头且尚未输入空格（还在敲命令名）时展示匹配项
+  const slashMatches = useMemo<ChatPanelSlashCommand[]>(() => {
+    if (slashCommands == null || slashCommands.length === 0) return []
+    if (!input.startsWith('/') || /\s/.test(input)) return []
+    const query = input.slice(1).toLowerCase()
+    return slashCommands.filter((cmd) => cmd.name.toLowerCase().includes(query))
+  }, [slashCommands, input])
+  const slashMenuOpen = !slashDismissed && slashMatches.length > 0
+  // 高亮索引在输入变化时（onChange）重置为 0，方向键用取模保持有效，这里再兜底一次
+  const slashActiveSafeIndex = slashActiveIndex < slashMatches.length ? slashActiveIndex : 0
+
+  // 选中一条斜杠命令：填入 `/name ` 供用户继续补充参数（如 /compact 指令），并聚焦输入框
+  const applySlashCommand = useCallback(
+    (name: string) => {
+      applyInput(`/${name} `)
+      setSlashDismissed(true)
+      window.requestAnimationFrame(() => {
+        const el = textareaRef.current
+        if (el != null) {
+          el.focus()
+          const end = el.value.length
+          el.setSelectionRange(end, end)
+        }
+      })
+    },
+    [applyInput],
+  )
+
   const handleRetryTurn = useCallback(
     async (userMessage: UIMessage) => {
       const text = getChatPanelUserText(userMessage).trim()
@@ -835,6 +874,28 @@ export function ChatPanel({
             <span>{sendError}</span>
           </div>
         )}
+        {slashMenuOpen && (
+          <div className="chat-panel-slash-menu" role="listbox">
+            {slashMatches.map((cmd, idx) => (
+              <button
+                key={cmd.name}
+                type="button"
+                role="option"
+                aria-selected={idx === slashActiveSafeIndex}
+                className={`chat-panel-slash-item${idx === slashActiveSafeIndex ? ' is-active' : ''}`}
+                onMouseEnter={() => setSlashActiveIndex(idx)}
+                onMouseDown={(e) => {
+                  // mousedown 而非 click：避免 textarea 先 blur 丢失焦点
+                  e.preventDefault()
+                  applySlashCommand(cmd.name)
+                }}
+              >
+                <span className="chat-panel-slash-name">/{cmd.name}</span>
+                <span className="chat-panel-slash-desc">{cmd.description}</span>
+              </button>
+            ))}
+          </div>
+        )}
         {/* 圆角浮岛输入框：chip 区 + textarea + 内嵌发送按钮 */}
         <div className="chat-panel-input-box">
           {nodeReferences && nodeReferences.length > 0 && (
@@ -855,10 +916,37 @@ export function ChatPanel({
               value={input}
               placeholder={inputPlaceholder}
               disabled={disabled}
-              onChange={(e) => applyInput(e.target.value)}
+              onChange={(e) => {
+                applyInput(e.target.value)
+                setSlashDismissed(false)
+                setSlashActiveIndex(0)
+              }}
               onKeyDown={(e) => {
                 const nativeEvent = e.nativeEvent as KeyboardEvent & { isComposing?: boolean }
                 if (nativeEvent.isComposing || e.keyCode === 229) return
+                if (slashMenuOpen) {
+                  if (e.key === 'ArrowDown') {
+                    e.preventDefault()
+                    setSlashActiveIndex((prev) => (prev + 1) % slashMatches.length)
+                    return
+                  }
+                  if (e.key === 'ArrowUp') {
+                    e.preventDefault()
+                    setSlashActiveIndex((prev) => (prev - 1 + slashMatches.length) % slashMatches.length)
+                    return
+                  }
+                  if (e.key === 'Enter' || e.key === 'Tab') {
+                    e.preventDefault()
+                    const picked = slashMatches[slashActiveSafeIndex] ?? slashMatches[0]
+                    if (picked != null) applySlashCommand(picked.name)
+                    return
+                  }
+                  if (e.key === 'Escape') {
+                    e.preventDefault()
+                    setSlashDismissed(true)
+                    return
+                  }
+                }
                 if (e.key === 'Enter' && !e.shiftKey) {
                   e.preventDefault()
                   void handleSend()

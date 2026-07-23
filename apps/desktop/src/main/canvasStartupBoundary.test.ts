@@ -22,6 +22,19 @@ function ipcHandlerBody(channel: string, nextChannel: string): string {
 }
 
 describe('Spark Canvas startup boundary', () => {
+  it('keeps a single registered main window as the trusted Canvas shell', () => {
+    const showMainWindow = functionBody('function showMainWindow()', 'const pendingRedeemCodes')
+    const createWindow = functionBody(
+      'function createWindow()',
+      '/**\n * 初始化主进程核心服务',
+    )
+
+    expect(showMainWindow).toContain('getMainWindow()')
+    expect(showMainWindow).not.toContain('BrowserWindow.getAllWindows()[0]')
+    expect(createWindow).toContain('const existing = getMainWindow()')
+    expect(createWindow).toContain('if (existing != null && !existing.isDestroyed()) return existing')
+  })
+
   it('does not start old platform background runtimes during application boot', () => {
     const initializeApp = functionBody(
       'async function initializeApp()',

@@ -100,6 +100,17 @@ export function RuntimeSignalCard({
   onRetry?: () => void
 }) {
   if (block.signal === 'background_tasks') return <BackgroundTasksCard block={block} />
+  // Older runtimes mislabeled disabled paid overage as exhausted subscription
+  // quota. New events carry an explicit primary status so genuine rejections
+  // remain visible while already-persisted false-positive cards disappear.
+  const isLegacyDisabledOverageFalsePositive =
+    block.signal === 'rate_limit' &&
+    block.code === 'CLAUDE_RATE_LIMIT_REJECTED' &&
+    block.details?.some(
+      (detail) => detail.label === '超额不可用' && detail.value === 'org_level_disabled',
+    ) === true &&
+    block.details.some((detail) => detail.label === '主额度状态') === false
+  if (isLegacyDisabledOverageFalsePositive) return null
 
   return (
     <StreamingErrorCard

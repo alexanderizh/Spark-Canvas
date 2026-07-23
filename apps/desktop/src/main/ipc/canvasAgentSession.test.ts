@@ -85,6 +85,7 @@ function makeHarness() {
     listSessions: vi.fn().mockResolvedValue({ sessions: [createdSession], total: 1 }),
     updateSession: vi.fn().mockResolvedValue({ session: createdSession }),
     submitTurn: vi.fn().mockResolvedValue({ turnId: 'turn-1', accepted: true, started: true }),
+    executeCommand: vi.fn().mockResolvedValue({ isCommand: true }),
     getHistory: vi.fn().mockResolvedValue({ events: [], hasMore: false }),
     cancelTurn: vi.fn().mockResolvedValue({ cancelled: true }),
     answerQuestion: vi.fn().mockResolvedValue(true),
@@ -368,5 +369,45 @@ describe('Canvas Agent session facade', () => {
 
     expect(mocks.prepareSessionWorkspace).not.toHaveBeenCalled()
     expect(mocks.submitTurn).not.toHaveBeenCalled()
+  })
+
+  it('runs an allowlisted /clear command after ownership validation', async () => {
+    const { facade, mocks } = makeHarness()
+
+    const result = await facade.executeCommand({ sessionId, message: '/clear' }, sender)
+
+    expect(mocks.executeCommand).toHaveBeenCalledWith({ sessionId, message: '/clear' })
+    expect(result).toEqual({ success: true })
+  })
+
+  it('flags /compact as forwardToAgent so the caller submits the follow-up turn', async () => {
+    const { facade, mocks } = makeHarness()
+    mocks.executeCommand.mockResolvedValue({ isCommand: true, forwardToAgent: true })
+
+    const result = await facade.executeCommand({ sessionId, message: '/compact tighten it' }, sender)
+
+    expect(result).toEqual({ success: true, forwardToAgent: true })
+  })
+
+  it('rejects commands outside the Canvas allowlist without touching the session service', async () => {
+    const { facade, mocks } = makeHarness()
+
+    await expect(
+      facade.executeCommand({ sessionId, message: '/git push' }, sender),
+    ).rejects.toMatchObject({ code: 'VALIDATION_FAILED' })
+    expect(mocks.executeCommand).not.toHaveBeenCalled()
+  })
+
+  it('rejects a command on a session the active Canvas project does not own', async () => {
+    const { facade, mocks } = makeHarness()
+    mocks.getSessionRecord.mockReturnValue({
+      ...canvasSession,
+      projectId: 'other-project',
+    })
+
+    await expect(
+      facade.executeCommand({ sessionId, message: '/clear' }, sender),
+    ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' })
+    expect(mocks.executeCommand).not.toHaveBeenCalled()
   })
 })

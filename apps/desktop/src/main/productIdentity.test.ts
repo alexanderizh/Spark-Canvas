@@ -72,4 +72,24 @@ describe('Spark Canvas product identity', () => {
     expect(app.getPath).not.toHaveBeenCalled()
     expect(app.setPath).toHaveBeenCalledWith('userData', '/tmp/spark-canvas-e2e/Spark Canvas')
   })
+
+  it('supports an isolated development userData directory', () => {
+    const app = {
+      getPath: vi.fn(() => '/Users/test/Library/Application Support'),
+      setName: vi.fn(),
+      setPath: vi.fn(),
+    }
+    const ensureDirectory = vi.fn()
+
+    applyProductIdentity(app, ensureDirectory, undefined, 'Spark Canvas Dev')
+
+    expect(app.setPath).toHaveBeenCalledWith(
+      'userData',
+      '/Users/test/Library/Application Support/Spark Canvas Dev',
+    )
+    expect(app.setPath).toHaveBeenCalledWith(
+      'sessionData',
+      '/Users/test/Library/Application Support/Spark Canvas Dev/session-data',
+    )
+  })
 })

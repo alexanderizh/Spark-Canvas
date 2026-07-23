@@ -43,3 +43,4 @@ minimumReleaseAgeExclude:
   - '@anthropic-ai/sdk'
   - '@openai/codex'
   - '@openai/codex-sdk'
+  - electron@41.10.3

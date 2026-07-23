@@ -36,6 +36,7 @@ import {
   ChatPanel,
   type ChatPanelNodeReference,
   type ChatPanelSessionApi,
+  type ChatPanelSlashCommand,
 } from '../../components/ChatPanel'
 import { SkillsPickerModal, type SkillItemForPicker } from '../../components/SkillsPickerModal'
 import { getAgentAvatarConfig, hasCustomAvatar, resolveAvatarSrc } from '../../avatar'
@@ -106,6 +107,12 @@ type CanvasAgentProjectCache = {
 }
 
 const REQUIRED_CANVAS_SKILL_ID = 'builtin:canvas-studio'
+/** 画布助手支持的斜杠命令（与主进程 CANVAS_ALLOWED_COMMAND_NAMES 保持一致）。 */
+const CANVAS_SLASH_COMMANDS: ChatPanelSlashCommand[] = [
+  { name: 'clear', description: '清空当前会话上下文' },
+  { name: 'compact', description: '压缩上下文（交给助手总结，不清空会话）' },
+]
+const CANVAS_SLASH_COMMAND_NAMES = new Set(CANVAS_SLASH_COMMANDS.map((cmd) => cmd.name))
 const DEFAULT_PANEL_WIDTH = 760
 const DEFAULT_PANEL_HEIGHT = 560
 const MIN_PANEL_WIDTH = 560
@@ -463,8 +470,7 @@ export function CanvasAgentModal({
 
   const chatSessionApi = useMemo<ChatPanelSessionApi>(
     () => ({
-      getHistory: (request) =>
-        window.spark.invoke('canvas:agent:session:get-history', request),
+      getHistory: (request) => window.spark.invoke('canvas:agent:session:get-history', request),
       cancelTurn: (request) => window.spark.invoke('canvas:agent:session:cancel', request),
       answerQuestion: (request) =>
         window.spark.invoke('canvas:agent:session:answer-question', request),
@@ -969,6 +975,41 @@ export function CanvasAgentModal({
         throw new Error('内置画布助手不可用，请重启 Spark Canvas 后重试。')
       }
 
+      // 斜杠命令（/clear、/compact）：走命令通道而非普通对话轮次
+      const trimmedText = text.trim()
+      if (trimmedText.startsWith('/')) {
+        const commandName = trimmedText.slice(1).split(/\s+/)[0]?.toLowerCase() ?? ''
+        if (!CANVAS_SLASH_COMMAND_NAMES.has(commandName)) {
+          throw new Error(`画布助手暂不支持 /${commandName || ''}，当前仅支持 /clear、/compact。`)
+        }
+        if (sessionId == null) {
+          throw new Error('请先与画布助手对话后，再使用画布指令。')
+        }
+        try {
+          setRunning(true)
+          const commandResult = await window.spark.invoke('canvas:agent:session:execute-command', {
+            sessionId,
+            message: trimmedText,
+          })
+          // /compact 需转发给 Agent 执行；/clear 的事件已由命令通道注入，直接结束
+          if (commandResult.forwardToAgent) {
+            await window.spark.invoke('canvas:agent:session:submit-turn', {
+              sessionId,
+              message: trimmedText,
+              providerProfileId: selectedProvider.id,
+              modelId: effectiveModelId,
+              agentAdapter: normalizeCanvasAdapter(adapter),
+            })
+          } else {
+            setRunning(false)
+          }
+        } catch (commandError) {
+          setRunning(false)
+          throw commandError
+        }
+        return
+      }
+
       try {
         setCreating(true)
         let sid = sessionId
@@ -1227,6 +1268,7 @@ export function CanvasAgentModal({
           fallbackAssistant={fallbackAssistant}
           persistedSessionStatus={selectedProjectSession?.status ?? null}
           sessionApi={chatSessionApi}
+          slashCommands={CANVAS_SLASH_COMMANDS}
           contextBadge={
             <>
               <Icons.Layers size={12} />

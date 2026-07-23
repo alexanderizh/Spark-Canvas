@@ -66,12 +66,12 @@ function SparkToastDescription({ type, message }: { type: ToastType; message: st
   const Icon = TOAST_ICONS[type]
 
   return (
-    <div className={`spark-toast-content spark-toast-${type}`}>
+    <span className={`spark-toast-content spark-toast-${type}`}>
       <span className="spark-toast-status-icon" aria-hidden="true">
         <Icon size={18} strokeWidth={2.2} />
       </span>
       <span className="spark-toast-message">{message}</span>
-    </div>
+    </span>
   )
 }
 

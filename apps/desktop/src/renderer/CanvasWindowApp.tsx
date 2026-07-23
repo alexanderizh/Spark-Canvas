@@ -19,10 +19,12 @@ function CanvasWindowThemeBridge({ children }: { children: React.ReactNode }) {
 }
 
 function CanvasWindowShell({ projectId }: { projectId: string }) {
+  const { t } = useApp()
+  const resolvedTheme = useResolvedTheme()
   return (
     <ErrorBoundary level="global" name="CanvasWindow">
       <div
-        className={`app window canvas-window-standalone theme-dark density-regular ${getCanvasWindowPlatformClass()} sidebar-hidden`}
+        className={`app window canvas-window-standalone theme-${resolvedTheme} density-${t.density} ${getCanvasWindowPlatformClass()} sidebar-hidden`}
       >
         <CanvasWorkspaceView
           projectId={projectId}

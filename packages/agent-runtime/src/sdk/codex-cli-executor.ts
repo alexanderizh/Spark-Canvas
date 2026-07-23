@@ -1,4 +1,4 @@
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import path from 'node:path'
@@ -242,13 +242,14 @@ export class CodexCliExecutor {
     }
   }
 
-  private runCodex(
+  private async runCodex(
     args: string[],
     prompt: string,
     makeBase: () => EventBase,
     cwd: string,
     config: SDKExecutorConfig,
   ): Promise<CodexRunResult> {
+    const candidates = await getCodexCliCandidates()
     return new Promise((resolve, reject) => {
       let stdout = ''
       let stderr = ''
@@ -260,7 +261,6 @@ export class CodexCliExecutor {
       let lineBuffer = ''
       let settled = false
       let candidateIndex = 0
-      const candidates = getCodexCliCandidates()
       const streamState: CodexStreamState = {
         content: '',
         thinking: '',
@@ -544,10 +544,34 @@ function mapCodexReasoningEffort(
   return toCodexReasoningEffort(effort) ?? null
 }
 
-function getCodexCliCandidates(): string[] {
-  return process.platform === 'win32'
-    ? ['codex.exe', 'codex', 'codex.cmd', 'codex.bat', 'codex.ps1']
-    : ['codex']
+async function getCodexCliCandidates(): Promise<string[]> {
+  if (process.platform === 'win32') {
+    return ['codex.exe', 'codex', 'codex.cmd', 'codex.bat', 'codex.ps1']
+  }
+
+  // GUI apps inherit a launchd/system PATH that can resolve a different Codex
+  // than the user's terminal. Resolve through a login shell first so execution
+  // uses the same nvm/Volta/Homebrew installation that provider detection found.
+  const shells = [...new Set([process.env.SHELL, '/bin/zsh', '/bin/bash'].filter(Boolean))] as string[]
+  for (const shell of shells) {
+    const resolved = await new Promise<string | null>((resolve) => {
+      execFile(
+        shell,
+        ['-lc', 'command -v codex'],
+        { encoding: 'utf8', timeout: 4_000, windowsHide: true },
+        (error, stdout) => {
+          if (error != null) {
+            resolve(null)
+            return
+          }
+          const first = stdout.split(/\r?\n/).find((line) => line.trim().length > 0)
+          resolve(first?.trim() || null)
+        },
+      )
+    })
+    if (resolved != null) return [resolved, 'codex']
+  }
+  return ['codex']
 }
 
 function shouldSpawnWithShell(command: string): boolean {

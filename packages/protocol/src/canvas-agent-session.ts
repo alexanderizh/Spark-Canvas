@@ -1,6 +1,7 @@
 import { z } from 'zod'
 
 import type {
+  CommandExecuteResponse,
   ManagedAgent,
   SessionAnswerQuestionResponse,
   SessionAttachment,
@@ -83,6 +84,12 @@ export const CanvasAgentSessionCancelRequestSchema = z
     sessionId: CanvasAgentSessionIdSchema,
   })
   .strict()
+export const CanvasAgentSessionExecuteCommandRequestSchema = z
+  .object({
+    sessionId: CanvasAgentSessionIdSchema,
+    message: z.string().min(1).max(100_000),
+  })
+  .strict()
 export const CanvasAgentSessionAnswerQuestionRequestSchema = z
   .object({
     sessionId: CanvasAgentSessionIdSchema,
@@ -110,6 +117,9 @@ export type CanvasAgentSessionGetHistoryRequest = z.infer<
   typeof CanvasAgentSessionGetHistoryRequestSchema
 >
 export type CanvasAgentSessionCancelRequest = z.infer<typeof CanvasAgentSessionCancelRequestSchema>
+export type CanvasAgentSessionExecuteCommandRequest = z.infer<
+  typeof CanvasAgentSessionExecuteCommandRequestSchema
+>
 export type CanvasAgentSessionAnswerQuestionRequest = z.infer<
   typeof CanvasAgentSessionAnswerQuestionRequestSchema
 >
@@ -132,6 +142,10 @@ declare module './ipc/index.js' {
       SessionGetHistoryResponse,
     ]
     'canvas:agent:session:cancel': [CanvasAgentSessionCancelRequest, SessionCancelResponse]
+    'canvas:agent:session:execute-command': [
+      CanvasAgentSessionExecuteCommandRequest,
+      CommandExecuteResponse,
+    ]
     'canvas:agent:session:answer-question': [
       CanvasAgentSessionAnswerQuestionRequest,
       SessionAnswerQuestionResponse,

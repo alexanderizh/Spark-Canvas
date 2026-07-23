@@ -2,6 +2,7 @@ import { createRequire } from 'node:module'
 import { copyFileSync, mkdirSync, readdirSync, rmSync } from 'fs'
 import { dirname, resolve } from 'path'
 import { defineConfig, externalizeDepsPlugin } from 'electron-vite'
+import type { Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 
@@ -27,38 +28,48 @@ const CANVAS_RUNTIME_TOOLS = [
  * database.ts 的 getDefaultMigrationsDir() 会在 out/main/migrations/ 查找 SQL 文件。
  * 此插件确保每次 main process 构建时 SQL 文件都已就位。
  */
-function copyMigrationsPlugin() {
+function copyMigrationsPlugin(): Plugin {
+  const srcDir = resolve(__dirname, '../../packages/storage/migrations')
+  const destDir = resolve(__dirname, 'out/main/migrations')
+  const migrationFiles = () => readdirSync(srcDir).filter((file) => file.endsWith('.sql'))
+
   return {
     name: 'copy-migrations',
-    closeBundle() {
-      const srcDir = resolve(__dirname, '../../packages/storage/migrations')
-      const destDir = resolve(__dirname, 'out/main/migrations')
+    buildStart() {
+      this.addWatchFile(srcDir)
+      for (const file of migrationFiles()) this.addWatchFile(resolve(srcDir, file))
+    },
+    writeBundle() {
       mkdirSync(destDir, { recursive: true })
-      for (const file of readdirSync(srcDir)) {
-        if (file.endsWith('.sql')) {
-          copyFileSync(resolve(srcDir, file), resolve(destDir, file))
-        }
+      for (const file of migrationFiles()) {
+        copyFileSync(resolve(srcDir, file), resolve(destDir, file))
       }
     },
   }
 }
 
-function copyRuntimeToolsPlugin() {
+function copyRuntimeToolsPlugin(): Plugin {
+  const toolsSrcDir = resolve(__dirname, '../../packages/agent-runtime/src/tools')
+  const toolsDestDir = resolve(__dirname, 'out/main/tools')
+  const mediaSrcDir = resolve(__dirname, '../../packages/agent-runtime/src/services/media')
+  const mediaDestDir = resolve(__dirname, 'out/main/services/media')
+  const mediaFiles = ['media-extract.mjs', 'media-request-compiler.mjs'] as const
+
   return {
     name: 'copy-runtime-tools',
-    closeBundle() {
-      const srcDir = resolve(__dirname, '../../packages/agent-runtime/src/tools')
-      const destDir = resolve(__dirname, 'out/main/tools')
-      rmSync(destDir, { recursive: true, force: true })
-      mkdirSync(destDir, { recursive: true })
+    buildStart() {
+      for (const file of CANVAS_RUNTIME_TOOLS) this.addWatchFile(resolve(toolsSrcDir, file))
+      for (const file of mediaFiles) this.addWatchFile(resolve(mediaSrcDir, file))
+    },
+    writeBundle() {
+      rmSync(toolsDestDir, { recursive: true, force: true })
+      mkdirSync(toolsDestDir, { recursive: true })
       for (const file of CANVAS_RUNTIME_TOOLS) {
-        copyFileSync(resolve(srcDir, file), resolve(destDir, file))
+        copyFileSync(resolve(toolsSrcDir, file), resolve(toolsDestDir, file))
       }
 
-      const mediaSrcDir = resolve(__dirname, '../../packages/agent-runtime/src/services/media')
-      const mediaDestDir = resolve(__dirname, 'out/main/services/media')
       mkdirSync(mediaDestDir, { recursive: true })
-      for (const file of ['media-extract.mjs', 'media-request-compiler.mjs']) {
+      for (const file of mediaFiles) {
         copyFileSync(resolve(mediaSrcDir, file), resolve(mediaDestDir, file))
       }
     },

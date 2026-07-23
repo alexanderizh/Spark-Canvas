@@ -257,6 +257,48 @@ describe('mapSDKMessageToEvents', () => {
     ]))
   })
 
+  it('does not surface disabled overage while subscription quota is allowed', () => {
+    const events = mapSDKMessageToEvents({
+      type: 'rate_limit_event',
+      rate_limit_info: {
+        status: 'allowed',
+        rateLimitType: 'five_hour',
+        resetsAt: 1_800_000_000,
+        overageStatus: 'rejected',
+        overageDisabledReason: 'org_level_disabled',
+      },
+      uuid: 'rate-overage-disabled',
+      session_id: 'sdk-session',
+    }, { sessionId: 'session-1', turnId: 'turn-1' })
+
+    expect(events).toEqual([])
+  })
+
+  it('keeps the primary quota warning when paid overage is disabled', () => {
+    const events = mapSDKMessageToEvents({
+      type: 'rate_limit_event',
+      rate_limit_info: {
+        status: 'allowed_warning',
+        overageStatus: 'rejected',
+        overageDisabledReason: 'org_level_disabled',
+      },
+      uuid: 'rate-warning-overage-disabled',
+      session_id: 'sdk-session',
+    }, { sessionId: 'session-1', turnId: 'turn-1' })
+
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'runtime_signal',
+      signal: 'rate_limit',
+      level: 'warning',
+      title: 'Claude 额度即将用尽',
+      code: 'CLAUDE_RATE_LIMIT_WARNING',
+      retryable: false,
+      details: expect.arrayContaining([
+        { label: '主额度状态', value: 'allowed_warning' },
+      ]),
+    }))
+  })
+
   it('uses session idle as the authoritative completion signal', () => {
     const ctx = { sessionId: 'session-1', turnId: 'turn-1' }
     const resultEvents = mapSDKMessageToEvents({

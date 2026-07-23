@@ -1642,15 +1642,7 @@ export function CanvasWorkspaceView({
   const uploadFilesInputRef = useRef<HTMLInputElement>(null)
   const pendingImagePositionRef = useRef<CanvasPoint | null>(null)
   const activeToolRef = useRef<CanvasTool>('pan')
-  const { registerNavGuard, requestConfirm, t, setTweak, setHasUnsavedChanges } = useApp()
-  useEffect(() => {
-    const prevTheme = t.theme
-    if (prevTheme !== 'dark') setTweak('theme', 'dark')
-    return () => {
-      if (prevTheme !== 'dark') setTweak('theme', prevTheme)
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  const { registerNavGuard, requestConfirm, setHasUnsavedChanges } = useApp()
   const [dirty, setDirty] = useState(() => isCanvasDirty(projectId))
   const [saving, setSaving] = useState(false)
   const [arrangingCanvas, setArrangingCanvas] = useState(false)
@@ -3936,9 +3928,7 @@ export function CanvasWorkspaceView({
       (snapshot?.nodes ?? [])
         .filter(
           (n) =>
-            n.type === 'video' &&
-            typeof n.data.url === 'string' &&
-            n.id !== videoWorkbenchNodeId,
+            n.type === 'video' && typeof n.data.url === 'string' && n.id !== videoWorkbenchNodeId,
         )
         .map((n) => ({
           id: n.id,

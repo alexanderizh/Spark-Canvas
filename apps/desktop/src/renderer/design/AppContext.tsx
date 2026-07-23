@@ -407,6 +407,26 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
   }, [])
   useEffect(() => {
+    const syncVisualTweaks = (event: StorageEvent) => {
+      let patch: PersistedVisualTweaks
+      if (event.key === APPEARANCE_SETTINGS_STORAGE_KEY) {
+        patch = pickVisualTweaks(readLocalAppearanceSettings())
+      } else if (
+        event.key === THEME_STORAGE_KEY &&
+        (event.newValue === 'light' || event.newValue === 'dark' || event.newValue === 'system')
+      ) {
+        patch = { theme: event.newValue }
+      } else {
+        return
+      }
+      if (Object.keys(patch).length === 0) return
+      hasUserVisualChangeRef.current = true
+      setT((prev) => ({ ...prev, ...patch }))
+    }
+    window.addEventListener('storage', syncVisualTweaks)
+    return () => window.removeEventListener('storage', syncVisualTweaks)
+  }, [])
+  useEffect(() => {
     const handler = (event: BeforeUnloadEvent) => {
       // 只在视图真的有未保存内容时才拦截窗口关闭。之前的实现只判断
       // `navGuardRef.current` 有没有注册，会对 Assistants / Canvas 这类

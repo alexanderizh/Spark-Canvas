@@ -77,6 +77,46 @@ describe('RuntimeSignalCard', () => {
     expect(container.textContent).toContain('CLAUDE_RATE_LIMIT_WARNING')
   })
 
+  it('hides legacy disabled-overage cards that were mislabeled as exhausted quota', () => {
+    const block: RuntimeSignalBlock = {
+      kind: 'runtime_signal',
+      signal: 'rate_limit',
+      level: 'error',
+      title: 'Claude 额度已用尽',
+      message: '当前额度窗口拒绝了新请求。',
+      code: 'CLAUDE_RATE_LIMIT_REJECTED',
+      retryable: true,
+      details: [
+        { label: '额度窗口', value: 'five_hour' },
+        { label: '超额不可用', value: 'org_level_disabled' },
+      ],
+    }
+
+    act(() => root.render(<RuntimeSignalCard block={block} />))
+
+    expect(container.innerHTML).toBe('')
+  })
+
+  it('keeps genuine primary quota rejections visible', () => {
+    const block: RuntimeSignalBlock = {
+      kind: 'runtime_signal',
+      signal: 'rate_limit',
+      level: 'error',
+      title: 'Claude 额度已用尽',
+      message: '当前额度窗口拒绝了新请求。',
+      code: 'CLAUDE_RATE_LIMIT_REJECTED',
+      retryable: true,
+      details: [
+        { label: '主额度状态', value: 'rejected' },
+        { label: '超额不可用', value: 'org_level_disabled' },
+      ],
+    }
+
+    act(() => root.render(<RuntimeSignalCard block={block} />))
+
+    expect(container.querySelector('.runtime-diagnostic-card')).not.toBeNull()
+  })
+
   it('keeps retry details collapsed while showing source and latest progress', () => {
     const block: RuntimeSignalBlock = {
       kind: 'runtime_signal',

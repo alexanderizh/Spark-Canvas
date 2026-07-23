@@ -2718,6 +2718,7 @@ export function registerAllIpcHandlers(): void {
     listSessions: (request) => new SessionReadService(getDatabase()).listSessions(request),
     updateSession: (request) => getSessionService().updateSession(request),
     submitTurn: (request) => getSessionService().submitTurn(request),
+    executeCommand: (request) => getSessionService().executeCommandAsEvents(request),
     getHistory: (request) => new SessionReadService(getDatabase()).getHistory(request),
     cancelTurn: (sessionId) => getSessionService().cancelTurn(sessionId),
     answerQuestion: resolveUserQuestion,

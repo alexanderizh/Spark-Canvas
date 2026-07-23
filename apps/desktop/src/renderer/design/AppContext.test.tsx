@@ -131,6 +131,44 @@ describe('AppContext visual tweak persistence', () => {
     expect(localStorage.getItem('spark-canvas:theme')).toBe('dark')
   })
 
+  it('syncs visual tweaks changed by another application window', async () => {
+    vi.stubGlobal('spark', {
+      invoke: vi.fn().mockResolvedValue({ value: null }),
+      on: vi.fn(() => vi.fn()),
+    })
+
+    function ThemeHarness() {
+      const { t } = useApp()
+      return <span data-testid="theme">{t.theme}</span>
+    }
+
+    await act(async () => {
+      root = createRoot(container)
+      root.render(
+        <AppProvider>
+          <ThemeHarness />
+        </AppProvider>,
+      )
+      await Promise.resolve()
+    })
+
+    await act(async () => {
+      const appearance = JSON.stringify({ theme: 'light', density: 'compact' })
+      localStorage.setItem('spark-canvas:appearance', appearance)
+      window.dispatchEvent(
+        new StorageEvent('storage', {
+          key: 'spark-canvas:appearance',
+          newValue: appearance,
+          storageArea: localStorage,
+        }),
+      )
+    })
+
+    expect(container.querySelector('[data-testid="theme"]')?.textContent).toBe('light')
+    expect(document.documentElement.dataset.theme).toBe('light')
+    expect(document.documentElement.classList).toContain('density-compact')
+  })
+
   it('persists visual tweak changes without dropping existing appearance fields', async () => {
     let getCount = 0
     let resolvePostClickGet: ((value: { value: Record<string, unknown> }) => void) | null = null

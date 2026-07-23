@@ -4,10 +4,12 @@ import type {
   CanvasAgentSessionAnswerQuestionRequest,
   CanvasAgentSessionCancelRequest,
   CanvasAgentSessionCreateRequest,
+  CanvasAgentSessionExecuteCommandRequest,
   CanvasAgentSessionGetHistoryRequest,
   CanvasAgentSessionListRequest,
   CanvasAgentSessionSubmitTurnRequest,
   CanvasAgentSessionUpdateRequest,
+  CommandExecuteResponse,
   ManagedAgent,
   SessionAnswerQuestionResponse,
   SessionCancelResponse,
@@ -28,6 +30,11 @@ import { CANVAS_ASSISTANT_AGENT_ID, SparkError } from '@spark/shared'
 import { typedIpcHandle } from './typed-ipc.js'
 
 const REQUIRED_CANVAS_SKILL_ID = 'builtin:canvas-studio'
+/**
+ * 画布助手是受限沙箱面板，仅放行「清理上下文 / 压缩上下文」两条命令；
+ * 其余命令（/git、/goal、/checkpoint 等）不适用于画布场景，一律拒绝。
+ */
+const CANVAS_ALLOWED_COMMAND_NAMES = new Set(['clear', 'compact'])
 const CANVAS_AGENT_SKILL_IDS = [
   REQUIRED_CANVAS_SKILL_ID,
   'builtin:multimedia-use',
@@ -107,6 +114,10 @@ export interface CanvasAgentSessionDependencies {
   ): Promise<SessionListResponse>
   updateSession(request: SessionUpdateRequest): Promise<SessionUpdateResponse>
   submitTurn(request: SessionSubmitTurnRequest): Promise<SessionSubmitTurnResponse>
+  executeCommand(request: {
+    sessionId: string
+    message: string
+  }): Promise<{ isCommand: boolean; forwardToAgent?: boolean; started?: boolean }>
   getHistory(request: SessionGetHistoryRequest): Promise<SessionGetHistoryResponse>
   cancelTurn(sessionId: string): Promise<SessionCancelResponse>
   answerQuestion(
@@ -249,6 +260,33 @@ export class CanvasAgentSessionFacade {
     })
   }
 
+  async executeCommand(
+    request: CanvasAgentSessionExecuteCommandRequest,
+    sender: unknown,
+  ): Promise<CommandExecuteResponse> {
+    const context = await this.requireContext(sender)
+    this.requireOwnedSession(context, request.sessionId)
+    const commandName = parseCanvasCommandName(request.message)
+    if (commandName == null || !CANVAS_ALLOWED_COMMAND_NAMES.has(commandName)) {
+      throw new SparkError(
+        'VALIDATION_FAILED',
+        `画布助手暂不支持命令 /${commandName ?? ''}，当前仅支持 /clear、/compact。`,
+      )
+    }
+    const result = await this.dependencies.executeCommand({
+      sessionId: request.sessionId,
+      message: request.message,
+    })
+    if (!result.isCommand) {
+      return { success: false }
+    }
+    return {
+      success: true,
+      ...(result.forwardToAgent === true ? { forwardToAgent: true } : {}),
+      ...(result.started !== undefined ? { started: result.started } : {}),
+    }
+  }
+
   async getHistory(
     request: CanvasAgentSessionGetHistoryRequest,
     sender: unknown,
@@ -351,6 +389,14 @@ export class CanvasAgentSessionFacade {
   }
 }
 
+/** 取斜杠命令的命令名（首个 token，去掉前导 `/` 并小写）；非命令返回 null。 */
+function parseCanvasCommandName(message: string): string | null {
+  const trimmed = message.trim()
+  if (!trimmed.startsWith('/')) return null
+  const name = trimmed.slice(1).split(/\s+/)[0]?.toLowerCase()
+  return name != null && name.length > 0 ? name : null
+}
+
 function normalizeCanvasAgentAdapter(
   adapter: 'claude' | 'claude-sdk' | 'codex',
 ): 'claude-sdk' | 'codex' {
@@ -379,6 +425,9 @@ export function registerCanvasAgentSessionIpc(
   )
   typedIpcHandle('canvas:agent:session:submit-turn', (request, event) =>
     facade.submitTurn(request, event.sender),
+  )
+  typedIpcHandle('canvas:agent:session:execute-command', (request, event) =>
+    facade.executeCommand(request, event.sender),
   )
   typedIpcHandle('canvas:agent:session:get-history', (request, event) =>
     facade.getHistory(request, event.sender),

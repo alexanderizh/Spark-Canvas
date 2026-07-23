@@ -925,9 +925,17 @@ function mapAuthStatusMessage(msg: SDKAuthStatusMessage, ctx: EventContext): Age
 
 function mapRateLimitMessage(msg: SDKRateLimitEvent, ctx: EventContext): AgentEvent[] {
   const info = msg.rate_limit_info
-  const rejected = info.status === 'rejected' || info.overageStatus === 'rejected'
-  const warning = info.status === 'allowed_warning' || info.overageStatus === 'allowed_warning'
+  // `status` describes whether the subscription quota can serve requests.
+  // `overageStatus` only describes paid extra usage. A rejected overage with
+  // `org_level_disabled` is normal for subscriptions without extra usage and
+  // must not be presented as exhausted quota while the primary status allows.
+  const rejected = info.status === 'rejected'
+  const warning = info.status === 'allowed_warning'
+  // Allowed quota is routine telemetry, not an actionable chat event.
+  if (!rejected && !warning) return []
+
   const details = [
+    { label: '主额度状态', value: info.status },
     ...(info.rateLimitType != null ? [{ label: '额度窗口', value: info.rateLimitType }] : []),
     ...(info.utilization != null
       ? [

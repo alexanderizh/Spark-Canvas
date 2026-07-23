@@ -3638,7 +3638,7 @@ export function ProviderEditPanel({
       open={visible}
       onClose={onClose}
       maskClosable={!saving}
-      width={800}
+      size={800}
       title={profileId ? '编辑 Provider' : '添加 Provider'}
       footer={
         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>

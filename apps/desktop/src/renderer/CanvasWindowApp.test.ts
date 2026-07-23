@@ -28,4 +28,17 @@ describe('Canvas window runtime boundary', () => {
 
     expect(source).not.toContain('SessionSidebarProvider')
   })
+
+  it('follows the shared application theme instead of forcing dark mode', () => {
+    const source = readFileSync(join(__dirname, 'CanvasWindowApp.tsx'), 'utf8')
+    const workspace = readFileSync(
+      join(__dirname, 'design/views/canvas/CanvasWorkspaceView.tsx'),
+      'utf8',
+    )
+
+    expect(source).toContain('theme-${resolvedTheme}')
+    expect(source).toContain('density-${t.density}')
+    expect(source).not.toContain('canvas-window-standalone theme-dark density-regular')
+    expect(workspace).not.toContain("setTweak('theme', 'dark')")
+  })
 })

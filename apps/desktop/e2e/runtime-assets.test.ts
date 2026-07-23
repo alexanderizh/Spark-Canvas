@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest'
 import electronViteConfig from '../electron.vite.config'
 
 const ROOT = join(__dirname, '..')
+const MIGRATIONS_DIR = join(ROOT, '../../packages/storage/migrations')
 const OUTPUT_TOOLS_DIR = join(ROOT, 'out/main/tools')
 const OUTPUT_MEDIA_DIR = join(ROOT, 'out/main/services/media')
 const MEDIA_HELPERS = ['media-extract.mjs', 'media-request-compiler.mjs']
@@ -18,6 +19,27 @@ const CANVAS_RUNTIME_TOOLS = [
 ]
 
 describe('desktop runtime assets', () => {
+  it('watches the migrations directory so newly added migrations trigger a rebuild', () => {
+    const config = electronViteConfig as {
+      main?: {
+        plugins?: Array<{
+          name?: string
+          buildStart?: (this: { addWatchFile: (path: string) => void }) => void
+        }>
+      }
+    }
+    const migrationsPlugin = config.main?.plugins?.find(
+      (plugin) => plugin.name === 'copy-migrations',
+    )
+    const watchedFiles: string[] = []
+
+    expect(migrationsPlugin?.buildStart).toBeTypeOf('function')
+    migrationsPlugin?.buildStart?.call({ addWatchFile: (path) => watchedFiles.push(path) })
+
+    expect(watchedFiles).toContain(MIGRATIONS_DIR)
+    expect(watchedFiles.some((path) => path.endsWith('.sql'))).toBe(true)
+  })
+
   it('copies the spark_media import closure and starts the built MCP server', () => {
     mkdirSync(OUTPUT_TOOLS_DIR, { recursive: true })
     writeFileSync(join(OUTPUT_TOOLS_DIR, 'web-search-mcp-server.mjs'), 'stale')
@@ -29,7 +51,8 @@ describe('desktop runtime assets', () => {
       main?: {
         plugins?: Array<{
           name?: string
-          closeBundle?: () => void
+          buildStart?: (this: { addWatchFile: (path: string) => void }) => void
+          writeBundle?: () => void
         }>
       }
     }
@@ -37,8 +60,15 @@ describe('desktop runtime assets', () => {
       (plugin) => plugin.name === 'copy-runtime-tools',
     )
 
-    expect(runtimeToolsPlugin?.closeBundle).toBeTypeOf('function')
-    runtimeToolsPlugin?.closeBundle?.()
+    const watchedFiles: string[] = []
+    expect(runtimeToolsPlugin?.buildStart).toBeTypeOf('function')
+    runtimeToolsPlugin?.buildStart?.call({ addWatchFile: (path) => watchedFiles.push(path) })
+    expect(watchedFiles.map((path) => path.split('/').pop()).sort()).toEqual(
+      [...CANVAS_RUNTIME_TOOLS, ...MEDIA_HELPERS].sort(),
+    )
+
+    expect(runtimeToolsPlugin?.writeBundle).toBeTypeOf('function')
+    runtimeToolsPlugin?.writeBundle?.()
 
     expect(
       readdirSync(OUTPUT_TOOLS_DIR)

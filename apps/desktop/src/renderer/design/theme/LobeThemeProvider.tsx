@@ -128,20 +128,7 @@ export function LobeThemeProvider({
     AntdConfigProvider.config({
       holderRender: (holder: React.ReactNode) => (
         <AntdConfigProvider theme={{ token }}>
-          <AntdApp component={false}>{holder}</AntdApp>
-        </AntdConfigProvider>
-      ),
-    })
-  }, [token])
-
-  React.useEffect(() => {
-    // Static message/notification APIs render outside the component tree.
-    // Give them the same App context so antd does not fall back to its
-    // context-less static holder (and emit the dynamic-theme warning).
-    AntdConfigProvider.config({
-      holderRender: (holder: React.ReactNode) => (
-        <AntdConfigProvider theme={{ token }}>
-          <AntdApp component={false}>{holder}</AntdApp>
+          <AntdApp>{holder}</AntdApp>
         </AntdConfigProvider>
       ),
     })
