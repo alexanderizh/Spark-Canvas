@@ -32,7 +32,7 @@ describe('canvasTaskDefaults', () => {
     expect(canvasTaskDefaultKindForOperation('audio_transcribe')).toBeNull()
   })
 
-  it('stores only normalized runtime selections', () => {
+  it('stores normalized model selections and drops legacy Agent-platform fields', () => {
     writeCanvasTaskDefault('text', {
       agentId: ' agent:writer ',
       providerProfileId: ' provider:text ',
@@ -42,10 +42,9 @@ describe('canvasTaskDefaults', () => {
     } as never)
 
     expect(readCanvasTaskDefault('text')).toEqual({
-      agentId: 'agent:writer',
       providerProfileId: 'provider:text',
       modelId: 'gpt-5',
-      skillIds: ['skill:outline', 'skill:style'],
+      skillIds: [],
     })
     expect(hasCanvasTaskDefault('text')).toBe(true)
   })

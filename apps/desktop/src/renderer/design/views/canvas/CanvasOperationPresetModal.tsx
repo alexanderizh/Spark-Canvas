@@ -4,14 +4,11 @@ import { Button } from '@lobehub/ui'
 import {
   capabilityForOperation,
   type CanvasMediaModelSummary,
-  type ManagedAgent,
   type ProviderProfile,
-  type SkillItem,
 } from '@spark/protocol'
 
 import { Icons } from '../../Icons'
-import { AgentPickerInline, ProviderModelPickerInline } from './CanvasAgentModal'
-import { filterCanvasAssistantAgents, pickCanvasAssistantAgent } from './canvasAgentPolicy'
+import { ProviderModelPickerInline } from './CanvasAgentModal'
 import { CanvasOperationParameterControls } from './CanvasOperationParameterControls'
 import { CanvasPresetNodeOverrides } from './CanvasPresetNodeOverrides'
 import { CanvasPresetTaskCards } from './CanvasPresetTaskCards'
@@ -71,7 +68,7 @@ import type { CanvasOperationType } from './canvas.types'
 import { useCanvasUnsavedChangesGuard } from './useCanvasUnsavedChangesGuard'
 import './CanvasPresetCenter.less'
 
-type RuntimePickerMenu = 'agent' | 'model' | null
+type RuntimePickerMenu = 'model' | null
 type PresetCenterMode = 'tasks' | 'nodes'
 
 const INITIAL_TARGET: CanvasPresetTargetId = 'text_generate'
@@ -106,16 +103,12 @@ export function CanvasOperationPresetModal({
   const [taskDrafts, setTaskDrafts] = useState(readTaskDefaultDrafts)
   const [prompt, setPrompt] = useState('')
   const [negativePrompt, setNegativePrompt] = useState('')
-  const [selectedAgentId, setSelectedAgentId] = useState('')
   const [selectedTextProviderId, setSelectedTextProviderId] = useState('')
   const [selectedTextModelId, setSelectedTextModelId] = useState('')
-  const [selectedSkillIds, setSelectedSkillIds] = useState<string[]>([])
   const [selectedModelKey, setSelectedModelKey] = useState('')
   const [modelParamDraft, setModelParamDraft] = useState<Record<string, string>>({})
   const [customParams, setCustomParams] = useState<CustomParamDraft[]>([])
-  const [agents, setAgents] = useState<ManagedAgent[]>([])
   const [providers, setProviders] = useState<ProviderProfile[]>([])
-  const [skills, setSkills] = useState<SkillItem[]>([])
   const [mediaModels, setMediaModels] = useState<CanvasMediaModelSummary[]>([])
   const [runtimeLoading, setRuntimeLoading] = useState(false)
   const [modelsLoading, setModelsLoading] = useState(false)
@@ -197,28 +190,16 @@ export function CanvasOperationPresetModal({
     if (!open) return
     let cancelled = false
     setRuntimeLoading(true)
-    void Promise.all([
-      window.spark.invoke('agent:list', { includeDisabled: false }),
-      window.spark.invoke('provider:list', {}),
-      window.spark.invoke('skill:list', {}),
-    ])
-      .then(([agentRes, providerRes, skillRes]) => {
+    void window.spark
+      .invoke('provider:list', {})
+      .then((providerRes) => {
         if (cancelled) return
-        const nextAgents = filterCanvasAssistantAgents(
-          (agentRes as { agents?: ManagedAgent[] }).agents ?? [],
-        )
         const nextProviders = (providerRes as { profiles?: ProviderProfile[] }).profiles ?? []
-        setAgents(nextAgents)
         setProviders(nextProviders)
-        setSkills(
-          (skillRes as { skills?: SkillItem[] }).skills?.filter((skill) => skill.enabled) ?? [],
-        )
       })
       .catch(() => {
         if (cancelled) return
-        setAgents([])
         setProviders([])
-        setSkills([])
       })
       .finally(() => {
         if (!cancelled) setRuntimeLoading(false)
@@ -270,10 +251,6 @@ export function CanvasOperationPresetModal({
     () => providers.filter((provider) => isTextProviderProfile(provider)),
     [providers],
   )
-  const selectedAgent = useMemo(
-    () => agents.find((agent) => agent.id === selectedAgentId) ?? null,
-    [agents, selectedAgentId],
-  )
   const selectedTextProvider = useMemo(
     () => textProviders.find((provider) => provider.id === selectedTextProviderId) ?? null,
     [selectedTextProviderId, textProviders],
@@ -295,10 +272,8 @@ export function CanvasOperationPresetModal({
     setNodeRuntimeTouched(false)
     setPrompt(draft.prompt)
     setNegativePrompt(draft.negativePrompt)
-    setSelectedAgentId(draft.agentId ?? '')
     setSelectedTextProviderId(draft.providerProfileId ?? '')
     setSelectedTextModelId(draft.modelId ?? '')
-    setSelectedSkillIds(draft.skillIds)
     setSelectedModelKey('')
   }, [])
 
@@ -309,18 +284,9 @@ export function CanvasOperationPresetModal({
 
   useEffect(() => {
     if (!open || !isTextOperation || runtimeLoading) return
-    const preferredAgent =
-      (activeStoredPreset.agentId
-        ? (agents.find((agent) => agent.id === activeStoredPreset.agentId) ?? null)
-        : null) ?? pickDefaultTextAgent(agents)
     const preferredProvider = pickDefaultTextProvider(
       textProviders,
-      activeStoredPreset.providerProfileId ?? preferredAgent?.providerProfileId,
-    )
-    setSelectedAgentId((current) =>
-      current && agents.some((agent) => agent.id === current)
-        ? current
-        : (preferredAgent?.id ?? ''),
+      activeStoredPreset.providerProfileId,
     )
     setSelectedTextProviderId((current) =>
       current && textProviders.some((provider) => provider.id === current)
@@ -329,16 +295,11 @@ export function CanvasOperationPresetModal({
     )
     setSelectedTextModelId((current) => {
       if (current && getProviderTextModels(preferredProvider).includes(current)) return current
-      return pickDefaultTextModel(
-        preferredProvider,
-        activeStoredPreset.modelId ?? preferredAgent?.modelId,
-      )
+      return pickDefaultTextModel(preferredProvider, activeStoredPreset.modelId)
     })
   }, [
-    activeStoredPreset.agentId,
     activeStoredPreset.modelId,
     activeStoredPreset.providerProfileId,
-    agents,
     isTextOperation,
     open,
     runtimeLoading,
@@ -434,7 +395,6 @@ export function CanvasOperationPresetModal({
     const modelParams = buildCurrentModelParams()
     const preservedRuntime = !nodeRuntimeTouched
       ? {
-          ...(activeStoredPreset.agentId ? { agentId: activeStoredPreset.agentId } : {}),
           ...(activeStoredPreset.providerProfileId
             ? { providerProfileId: activeStoredPreset.providerProfileId }
             : {}),
@@ -446,9 +406,6 @@ export function CanvasOperationPresetModal({
       prompt,
       negativePrompt,
       ...preservedRuntime,
-      ...(nodeRuntimeTouched && isTextOperation && selectedAgentId
-        ? { agentId: selectedAgentId }
-        : {}),
       ...(nodeRuntimeTouched && isTextOperation && selectedTextProviderId
         ? { providerProfileId: selectedTextProviderId }
         : nodeRuntimeTouched && selectedModel?.providerProfileId
@@ -462,11 +419,10 @@ export function CanvasOperationPresetModal({
         : nodeRuntimeTouched && selectedModel?.effectiveModelId
           ? { modelId: selectedModel.effectiveModelId }
           : {}),
-      ...(isTextOperation ? { skillIds: selectedSkillIds } : { skillIds: [] }),
+      skillIds: [],
       modelParams,
     }
   }, [
-    activeStoredPreset.agentId,
     activeStoredPreset.manifestId,
     activeStoredPreset.modelId,
     activeStoredPreset.providerProfileId,
@@ -475,9 +431,7 @@ export function CanvasOperationPresetModal({
     negativePrompt,
     nodeRuntimeTouched,
     prompt,
-    selectedAgentId,
     selectedModel,
-    selectedSkillIds,
     selectedTextModelId,
     selectedTextProviderId,
   ])
@@ -498,23 +452,6 @@ export function CanvasOperationPresetModal({
       setActiveTargetId(targetId)
     },
     [composeNextDrafts],
-  )
-
-  const handleTextAgentChange = useCallback(
-    (agentId: string) => {
-      const nextAgent = agents.find((agent) => agent.id === agentId)
-      if (!nextAgent) return
-      setNodeFormTouched(true)
-      setNodeRuntimeTouched(true)
-      const nextProvider = pickDefaultTextProvider(
-        textProviders,
-        nextAgent.providerProfileId ?? selectedTextProvider?.id,
-      )
-      setSelectedAgentId(agentId)
-      setSelectedTextProviderId(nextProvider?.id ?? '')
-      setSelectedTextModelId(pickDefaultTextModel(nextProvider, nextAgent.modelId))
-    },
-    [agents, selectedTextProvider?.id, textProviders],
   )
 
   const handleTextProviderModelChange = useCallback((providerId: string, modelId: string) => {
@@ -641,22 +578,16 @@ export function CanvasOperationPresetModal({
       }
       return '未指定固定模型，将沿用预设 / 平台默认配置'
     }
-    if (runtimeLoading) return '正在读取应用 Agent / Provider / Skills 配置...'
-    const skillSummary = selectedSkillIds.length > 0 ? ` · ${selectedSkillIds.length} Skills` : ''
-    if (selectedAgent && selectedTextProvider) {
-      return `${selectedAgent.name} · ${selectedTextProvider.name}${selectedTextModelId ? ` · ${selectedTextModelId}` : ''}${skillSummary}`
-    }
+    if (runtimeLoading) return '正在读取模型服务配置...'
     if (selectedTextProvider) {
-      return `${selectedTextProvider.name}${selectedTextModelId ? ` · ${selectedTextModelId}` : ''}${skillSummary}`
+      return `${selectedTextProvider.name}${selectedTextModelId ? ` · ${selectedTextModelId}` : ''}`
     }
-    return '未固定 Agent / Provider，节点将使用平台默认值'
+    return '未固定文本模型，节点将使用推荐配置'
   }, [
     isTextOperation,
     modelsLoading,
     runtimeLoading,
-    selectedAgent,
     selectedModel,
-    selectedSkillIds.length,
     selectedTextModelId,
     selectedTextProvider,
   ])
@@ -664,8 +595,6 @@ export function CanvasOperationPresetModal({
   const summaryForTarget = useCallback(
     (target: (typeof CANVAS_PRESET_TARGETS)[number]) => {
       const preset = drafts[target.id] ?? readCanvasResolvedPresetTarget(target.id)
-      const agent = preset.agentId ? agents.find((item) => item.id === preset.agentId) : null
-      if (agent) return agent.name
       const model = mediaModels.find(
         (item) =>
           (!preset.providerProfileId || item.providerProfileId === preset.providerProfileId) &&
@@ -680,7 +609,7 @@ export function CanvasOperationPresetModal({
       const taskKind = canvasTaskDefaultKindForOperation(target.operation)
       return taskKind ? '继承对应任务默认' : '使用平台默认'
     },
-    [agents, drafts, mediaModels, providers],
+    [drafts, mediaModels, providers],
   )
 
   // 字段来源：标记当前 resolved 配置里哪些字段来自「已保存预设」 vs 「平台默认」。
@@ -699,12 +628,7 @@ export function CanvasOperationPresetModal({
     return {
       hasPrompt: has('prompt'),
       hasNegativePrompt: has('negativePrompt'),
-      hasRuntime:
-        has('agentId') ||
-        has('providerProfileId') ||
-        has('modelId') ||
-        has('skillIds') ||
-        has('manifestId'),
+      hasRuntime: has('providerProfileId') || has('modelId') || has('manifestId'),
       hasModelParams: has('modelParams'),
     }
   }, [activePresetOnly])
@@ -897,7 +821,6 @@ export function CanvasOperationPresetModal({
               </div>
               <CanvasPresetTaskCards
                 value={taskDrafts}
-                agents={agents}
                 providers={providers}
                 imageModels={imageTaskModels}
                 videoModels={videoTaskModels}
@@ -922,9 +845,7 @@ export function CanvasOperationPresetModal({
                 <div className="canvas-operation-preset-banner">
                   <div>
                     <h3>{targetLabel(activeTarget)}</h3>
-                    <p>
-                      只有这个节点功能需要不同的 Agent、模型、提示词或参数时，才在这里单独设置。
-                    </p>
+                    <p>只有这个节点功能需要不同的模型、提示词或参数时，才在这里单独设置。</p>
                   </div>
                   <span
                     className={`canvas-preset-detail-status${
@@ -938,19 +859,11 @@ export function CanvasOperationPresetModal({
                 <section className="canvas-operation-preset-section">
                   <div className="canvas-operation-preset-section-head">
                     <strong>执行方式</strong>
-                    <span>Agent、模型与 Skills</span>
+                    <span>模型服务</span>
                   </div>
                   {isTextOperation ? (
                     <div className="canvas-operation-preset-runtime">
                       <div className="canvas-operation-preset-runtime-pair">
-                        <AgentPickerInline
-                          agents={agents}
-                          selectedId={selectedAgentId}
-                          disabled={runtimeLoading || agents.length === 0}
-                          open={openRuntimeMenu === 'agent'}
-                          onOpenChange={(nextOpen) => setOpenRuntimeMenu(nextOpen ? 'agent' : null)}
-                          onChange={handleTextAgentChange}
-                        />
                         <ProviderModelPickerInline
                           providers={textProviders}
                           selectedProviderId={selectedTextProvider?.id ?? ''}
@@ -961,27 +874,10 @@ export function CanvasOperationPresetModal({
                           onChange={handleTextProviderModelChange}
                         />
                       </div>
-                      <Select
-                        mode="multiple"
-                        size="middle"
-                        allowClear
-                        showSearch
-                        className="canvas-operation-preset-runtime-skill canvas-operation-preset-skill-select"
-                        value={selectedSkillIds}
-                        placeholder="选择默认 Skills"
-                        optionFilterProp="label"
-                        maxTagCount="responsive"
-                        options={skills.map((skill) => ({ value: skill.id, label: skill.name }))}
-                        disabled={runtimeLoading || skills.length === 0}
-                        onChange={(value) => {
-                          setNodeFormTouched(true)
-                          setSelectedSkillIds(value.map(String))
-                        }}
-                      />
                     </div>
                   ) : null}
                   <div className="canvas-operation-preset-summary">
-                    <Icons.Bot size={13} />
+                    <Icons.Sparkles size={13} />
                     <span>{runtimeSummary}</span>
                     <div className="canvas-operation-preset-summary-tags">
                       {presetCoverage.hasRuntime ? (
@@ -1148,10 +1044,6 @@ function isTextProviderProfile(provider: ProviderProfile): boolean {
     provider.modelType === 'text' ||
     provider.modelType === 'multimodal'
   )
-}
-
-function pickDefaultTextAgent(agents: ManagedAgent[]): ManagedAgent | null {
-  return pickCanvasAssistantAgent(agents, null)
 }
 
 function pickDefaultTextProvider(

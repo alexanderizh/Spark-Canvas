@@ -9,8 +9,6 @@ import { CanvasPresetTaskCards } from './CanvasPresetTaskCards'
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
 vi.mock('./CanvasAgentModal', () => ({
-  AgentPickerInline: () =>
-    React.createElement('div', { className: 'agent-picker' }, 'Agent picker'),
   ProviderModelPickerInline: () =>
     React.createElement('div', { className: 'provider-model-picker' }, 'Model picker'),
 }))
@@ -46,7 +44,6 @@ describe('CanvasPresetTaskCards', () => {
             image_generation: { skillIds: [] },
             video_generation: { skillIds: [] },
           }}
-          agents={[]}
           providers={[]}
           imageModels={[]}
           videoModels={[]}
@@ -64,8 +61,7 @@ describe('CanvasPresetTaskCards', () => {
     expect(container.querySelectorAll('.canvas-preset-task-icon')).toHaveLength(4)
   })
 
-  it('switches text processing from Agent to direct model without changing other cards', () => {
-    const onChange = vi.fn()
+  it('shows only the text model picker when legacy Agent defaults exist', () => {
     act(() => {
       root = createRoot(container)
       root.render(
@@ -81,26 +77,19 @@ describe('CanvasPresetTaskCards', () => {
             image_generation: { skillIds: [] },
             video_generation: { skillIds: [] },
           }}
-          agents={[]}
           providers={[]}
           imageModels={[]}
           videoModels={[]}
           loading={false}
-          onChange={onChange}
+          onChange={vi.fn()}
         />,
       )
     })
 
-    const directModel = Array.from(container.querySelectorAll<HTMLButtonElement>('button')).find(
-      (button) => button.textContent === '直接用模型',
-    )
-    act(() => directModel?.click())
-
-    expect(onChange).toHaveBeenCalledWith('text', {
-      providerProfileId: 'provider:text',
-      modelId: 'gpt-5',
-      skillIds: [],
-    })
+    const textCard = container.querySelector<HTMLElement>('[data-task-kind="text"]')
+    expect(textCard?.querySelector('.provider-model-picker')).not.toBeNull()
+    expect(textCard?.querySelector('.agent-picker')).toBeNull()
+    expect(textCard?.textContent).not.toContain('交给 Agent')
   })
 
   it('lets users return one task card to the platform recommendation', () => {
@@ -119,7 +108,6 @@ describe('CanvasPresetTaskCards', () => {
             image_generation: { skillIds: [] },
             video_generation: { skillIds: [] },
           }}
-          agents={[]}
           providers={[]}
           imageModels={[]}
           videoModels={[]}

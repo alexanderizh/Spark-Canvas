@@ -63,26 +63,17 @@ function normalizeTaskDefault(value: unknown): CanvasTaskRuntimeDefault {
   const providerProfileId = normalizeOptionalId(input.providerProfileId)
   const manifestId = normalizeOptionalId(input.manifestId)
   const modelId = normalizeOptionalId(input.modelId)
-  const agentId = normalizeOptionalId(input.agentId)
   return {
     ...(providerProfileId ? { providerProfileId } : {}),
     ...(manifestId ? { manifestId } : {}),
     ...(modelId ? { modelId } : {}),
-    ...(agentId ? { agentId } : {}),
-    skillIds: Array.isArray(input.skillIds)
-      ? input.skillIds.filter((item): item is string => typeof item === 'string')
-      : [],
+    // Agent 与 Skills 由 Canvas 运行时固定管理；旧存储值不再进入任务默认配置。
+    skillIds: [],
   }
 }
 
 function hasRuntimeValue(value: CanvasTaskRuntimeDefault): boolean {
-  return Boolean(
-    value.providerProfileId ||
-    value.manifestId ||
-    value.modelId ||
-    value.agentId ||
-    value.skillIds.length > 0,
-  )
+  return Boolean(value.providerProfileId || value.manifestId || value.modelId)
 }
 
 function readStore(): CanvasTaskDefaultStore {

@@ -1523,7 +1523,7 @@ export function AgentPickerInline({
   agents,
   selectedId,
   disabled,
-  fallbackLabel = '平台管理',
+  fallbackLabel = '画布助手',
   open,
   openOnHover = false,
   onOpenChange,

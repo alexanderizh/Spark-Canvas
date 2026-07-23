@@ -63,7 +63,7 @@ function entityDraft(
     operation: 'text_generate',
     title,
     systemPrompt: buildEntityExtractionPrompt(kind, input.sourceText, input.styleBible),
-    message: `确认${title} Prompt、Agent 与模型后点击开始任务`,
+    message: `确认${title}提示词与模型后点击开始任务`,
     taskPipelineRole: kind,
     outputPipelineRole: kind,
     modelParams: { workflow: `extract_${kind}`, responseFormat: 'json' },
@@ -82,7 +82,7 @@ export function buildCanvasPipelineOperationDraft(
         operation: 'text_rewrite',
         title: '转剧本',
         systemPrompt: buildChapterToScreenplayInstruction(input.sourceText),
-        message: '确认 Prompt、Agent 与模型后点击开始任务',
+        message: '确认提示词与模型后点击开始任务',
         taskPipelineRole: 'screenplay',
         outputPipelineRole: 'screenplay',
       }
@@ -99,7 +99,7 @@ export function buildCanvasPipelineOperationDraft(
           }),
           'screenplay.to_shot_script',
         ),
-        message: '确认分镜脚本 Prompt、Agent 与模型后点击开始任务',
+        message: '确认分镜脚本提示词与模型后点击开始任务',
         taskPipelineRole: 'shot',
         outputPipelineRole: 'shot',
         modelParams: { workflow: 'shot_script', responseFormat: 'json' },
@@ -111,7 +111,7 @@ export function buildCanvasPipelineOperationDraft(
         operation: 'text_generate',
         title: '按剧情分集',
         systemPrompt: `请把下面的长剧本按剧情冲突、悬念节奏和合理时长完成分集。每集必须包含集号、标题、开场钩子、主要冲突、结尾悬念，并使用现有场次剧本格式输出完整正文；不要只给剧情摘要。\n\n${input.sourceText}`,
-        message: '确认分集 Prompt、Agent 与模型后点击开始任务',
+        message: '确认分集提示词与模型后点击开始任务',
         taskPipelineRole: 'screenplay',
         outputPipelineRole: 'screenplay',
         modelParams: { workflow: 'split_episodes' },
@@ -123,7 +123,7 @@ export function buildCanvasPipelineOperationDraft(
         title: '生成分镜关键帧图',
         systemPrompt:
           '请根据输入的分镜脚本文本，生成一张分镜关键帧宫格图，保持镜头顺序、人物一致性与场景连续性。',
-        message: '确认故事板 Prompt、Agent 与模型后点击开始任务',
+        message: '确认故事板提示词与模型后点击开始任务',
         taskPipelineRole: 'shot',
         outputPipelineRole: 'keyframe',
       }
@@ -138,7 +138,7 @@ export function buildCanvasPipelineOperationDraft(
         ]
           .filter(Boolean)
           .join('\n\n'),
-        message: '确认 Prompt、Agent 与模型后点击开始任务',
+        message: '确认提示词与模型后点击开始任务',
         taskPipelineRole: 'design_card',
         outputPipelineRole: 'design_card',
         modelParams: { aspect_ratio: '16:9' },
@@ -158,7 +158,7 @@ export function buildCanvasPipelineOperationDraft(
           input.actionId === 'scene.scene_image'
             ? `${SCENE_NO_PEOPLE_PROMPT}\n\n${input.sourceText}`
             : input.sourceText,
-        message: '确认 Prompt、Agent 与模型后点击开始任务',
+        message: '确认提示词与模型后点击开始任务',
         taskPipelineRole: 'design_card',
         outputPipelineRole: 'design_card',
       }
@@ -167,7 +167,7 @@ export function buildCanvasPipelineOperationDraft(
         operation: 'panorama_360',
         title: '生成重点场景 360 全景图',
         systemPrompt: `请根据以下场景设定生成 2:1 equirectangular 等距柱状投影全景图。保持水平线稳定、左右边缘无缝衔接，并完整表现前后左右空间关系。\n\n${input.sourceText}`,
-        message: '确认全景图 Prompt、Agent 与模型后点击开始任务',
+        message: '确认全景图提示词与模型后点击开始任务',
         taskPipelineRole: 'scene',
         outputPipelineRole: 'design_card',
         modelParams: { aspect_ratio: '2:1' },
@@ -178,7 +178,7 @@ export function buildCanvasPipelineOperationDraft(
         operation: input.actionId === 'keyframe.to_video' ? 'image_to_video' : 'text_to_video',
         title: '生成视频',
         systemPrompt: input.sourceText,
-        message: '确认视频 Prompt、Agent 与模型后点击开始任务',
+        message: '确认视频提示词与模型后点击开始任务',
         taskPipelineRole: input.actionId === 'keyframe.to_video' ? 'keyframe' : 'shot',
         outputPipelineRole: 'clip',
       }

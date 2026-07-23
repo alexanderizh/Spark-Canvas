@@ -4847,7 +4847,7 @@ export function CanvasWorkspaceView({
 
   /**
    * 资产中心快捷 AI 操作：在画布视口中央创建一个待执行的操作节点（operation node），
-   * 不直接发起任务；用户可在操作面板内调整 Prompt / Agent / 模型后手动开始。
+   * 不直接发起任务；用户可在操作面板内调整提示词与模型后手动开始。
    *
    * 与 `handleCreateOperationAtPosition` 的差异：预填 source asset、Prompt 与角色，
    * 节点创建后自动打开操作面板；用于"资产中心 → 一键产生任务节点"的入口。
@@ -4888,7 +4888,7 @@ export function CanvasWorkspaceView({
       y: Math.round(placement.y),
       title: params.title,
       systemPrompt: params.prompt,
-      message: params.message ?? '请在操作面板确认 Prompt / Agent / 模型后点击开始任务',
+      message: params.message ?? '请在操作面板确认提示词与模型后点击开始任务',
       ...(inputBindings.length > 0 ? { inputBindings } : {}),
       ...(params.modelParams ? { modelParams: params.modelParams } : {}),
       ...(params.taskPipelineRole ? { taskPipelineRole: params.taskPipelineRole } : {}),
@@ -5136,12 +5136,12 @@ export function CanvasWorkspaceView({
       text: chapterText,
       tags: [`来源:${asset.title ?? '章节'}`],
     })
-    // 不直接发起任务：在画布上创建「转剧本」操作节点，用户在操作面板确认 Prompt / Agent / 模型后手动开始
+    // 不直接发起任务：在画布上创建「转剧本」操作节点，用户在操作面板确认提示词与模型后手动开始
     await addFilmAssetTaskNode({
       operation: 'text_rewrite',
       title: `转剧本 · ${asset.title ?? '章节'}`,
       prompt: buildChapterToScreenplayInstruction(chapterText),
-      message: `已在资源库创建剧本「${scriptAsset.title}」。请在操作面板确认 Prompt / Agent / 模型后点击开始任务；产出剧本节点可右键继续编排`,
+      message: `已在资源库创建剧本「${scriptAsset.title}」。请在操作面板确认提示词与模型后点击开始任务；产出剧本节点可右键继续编排`,
       taskPipelineRole: 'screenplay',
       outputPipelineRole: 'screenplay',
     })
@@ -5336,7 +5336,7 @@ export function CanvasWorkspaceView({
             title: '生成分镜关键帧图',
             prompt:
               '请根据输入的分镜脚本文本，生成一张分镜关键帧宫格图，保持镜头顺序、人物一致性与场景连续性。',
-            nodeMessage: '确认故事板 Prompt、Agent 与模型后点击开始任务',
+            nodeMessage: '确认故事板提示词与模型后点击开始任务',
             taskPipelineRole: 'shot',
             outputPipelineRole: 'keyframe',
           })
@@ -5495,7 +5495,7 @@ export function CanvasWorkspaceView({
             }),
             // 角色身份板默认 16:9（综合卡横版构图），仅此面向默认
             modelParams: { aspect_ratio: '16:9' },
-            nodeMessage: '确认 Prompt、Agent 与模型后点击开始任务',
+            nodeMessage: '确认提示词与模型后点击开始任务',
             taskPipelineRole: 'design_card',
             outputPipelineRole: 'design_card',
             outputTitle: targetAsset.title ?? '角色',
@@ -5537,7 +5537,7 @@ export function CanvasWorkspaceView({
             operation: 'text_to_image',
             title,
             prompt: buildFilmAssetReferencePrompt(targetAsset, styleBible),
-            nodeMessage: '确认 Prompt、Agent 与模型后点击开始任务',
+            nodeMessage: '确认提示词与模型后点击开始任务',
             taskPipelineRole: 'design_card',
             outputPipelineRole: 'design_card',
             outputFilmAssetId: targetAsset.id,
@@ -5770,7 +5770,7 @@ export function CanvasWorkspaceView({
       // 避免长剧本在 system/user 两侧各出现一次而挤占上下文。
       prompt: stripCanvasFunctionalPromptInput(storyboardSystemPrompt, 'screenplay.to_shot_script'),
       title: '生成分镜脚本',
-      nodeMessage: '确认分镜脚本 Prompt、Agent 与模型后点击开始任务',
+      nodeMessage: '确认分镜脚本提示词与模型后点击开始任务',
       taskPipelineRole: 'shot',
       outputPipelineRole: 'shot',
       modelParams: { workflow: 'shot_script', responseFormat: 'json' },
@@ -5792,7 +5792,7 @@ export function CanvasWorkspaceView({
       operation: 'text_rewrite',
       prompt: buildChapterToScreenplayInstruction(sourceText),
       title: '转剧本',
-      nodeMessage: '确认 Prompt、Agent 与模型后点击开始任务',
+      nodeMessage: '确认提示词与模型后点击开始任务',
       taskPipelineRole: 'screenplay',
       outputPipelineRole: 'screenplay',
     })
@@ -5816,7 +5816,7 @@ export function CanvasWorkspaceView({
       operation: 'text_generate',
       title: label,
       prompt: buildEntityExtractionPrompt(kind, sourceText, styleBible),
-      nodeMessage: `确认${label} Prompt、Agent 与模型后点击开始任务`,
+      nodeMessage: `确认${label}提示词与模型后点击开始任务`,
       modelParams: { workflow: `extract_${kind}`, responseFormat: 'json' },
       taskPipelineRole: kind,
       outputPipelineRole: kind,
@@ -5835,7 +5835,7 @@ export function CanvasWorkspaceView({
           title: '生成分镜关键帧图',
           prompt:
             '请根据输入的分镜脚本文本，生成一张分镜关键帧宫格图，保持镜头顺序、人物一致性与场景连续性。',
-          nodeMessage: '确认故事板 Prompt、Agent 与模型后点击开始任务',
+          nodeMessage: '确认故事板提示词与模型后点击开始任务',
           taskPipelineRole: 'shot',
           outputPipelineRole: 'keyframe',
         })
@@ -7980,7 +7980,7 @@ export function CanvasWorkspaceView({
               deleteFilmAsset,
               getFilmAssetUsage,
               onOptimizeAsset: (asset) => {
-                // AI 优化：在画布上创建一个待执行的操作节点，用户确认 Prompt / Agent / 模型后开始
+                // AI 优化：在画布上创建一个待执行的操作节点，用户确认提示词与模型后开始
                 const sourceText = asset.contentText ?? asset.title ?? ''
                 void addFilmAssetTaskNode({
                   operation: 'text_rewrite',

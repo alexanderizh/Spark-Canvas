@@ -20,7 +20,6 @@ import {
 import type {
   CanvasMediaModelSummary,
   CanvasMediaTaskInputFile,
-  ManagedAgent,
   MediaInputRolePolicy,
 } from '@spark/protocol'
 import {
@@ -47,7 +46,6 @@ import {
   resolveCanvasPresetTarget,
   writeCanvasLastUsedPresetTarget,
 } from './canvasOperationPresets'
-import { filterCanvasAssistantAgents, pickCanvasAssistantAgent } from './canvasAgentPolicy'
 import { CanvasPromptEditor } from './CanvasPromptEditor'
 import { CanvasMediaInputHint } from './CanvasMediaInputHint'
 import { buildReferenceImageInputRoles } from './canvasTaskInputFiles'
@@ -107,8 +105,6 @@ export function CanvasInlineAiComposer({
     skipParameterValidation?: boolean
     inputTransport?: CanvasInputTransport
     inputRoles?: Record<string, CanvasTaskInputRoleSelection>
-    /** 文本类操作可指定专属 agent（应用内 agent 管理配置的 ManagedAgent） */
-    agentId?: string
     /** Contract V2 裁剪产物：被丢弃的字段及原因，供任务详情展示。 */
     droppedModelParams?: Array<{ name: string; reason: string; valuePreview?: string | undefined }>
     /** Contract V2 裁剪产物：非阻断性提示（如 missing_param_policy、compat_passthrough）。 */
@@ -141,9 +137,6 @@ export function CanvasInlineAiComposer({
    * ref 在赋值后立即可见，能可靠拦截跨 tick 的重复点击。
    */
   const submittingRef = useRef(false)
-  /** 文本类操作可选的专属 agent（应用内 agent 管理） */
-  const [agents, setAgents] = useState<ManagedAgent[]>([])
-  const [selectedAgentId, setSelectedAgentId] = useState<string>('')
   const panelRef = useRef<HTMLElement | null>(null)
   const lastOpenRef = useRef(false)
   /** 参数草稿兜底 key（operation::model，保留旧行为） */
@@ -177,28 +170,6 @@ export function CanvasInlineAiComposer({
       })
       .finally(() => {
         if (!cancelled) setModelsLoading(false)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [open])
-
-  // 加载应用内 agent 列表（供文本类操作指定专属 agent）
-  useEffect(() => {
-    if (!open) return
-    let cancelled = false
-    void window.spark
-      .invoke('agent:list', { includeDisabled: false })
-      .then((res) => {
-        if (cancelled) return
-        const nextAgents = filterCanvasAssistantAgents(
-          (res as { agents?: ManagedAgent[] }).agents ?? [],
-        )
-        setAgents(nextAgents)
-        setSelectedAgentId((current) => pickCanvasAssistantAgent(nextAgents, current)?.id ?? '')
-      })
-      .catch(() => {
-        if (!cancelled) setAgents([])
       })
     return () => {
       cancelled = true
@@ -281,14 +252,7 @@ export function CanvasInlineAiComposer({
   }, [capabilities, nodePromptContext, open, nodeCacheKey])
 
   const mediaCapabilityIds = useMemo(() => capabilityForOperation(operation), [operation])
-  /** 当前 operation 对应的「节点预设」resolved 值（lastUsed > preset > builtin），
-   *  用来补齐 InlineAiComposer UI 没暴露的字段（如 skillIds），写入 lastUsed 时不丢失。 */
-  const resolvedPreset = useMemo(
-    () => readCanvasResolvedPresetTarget(resolveCanvasPresetTarget({ operation })),
-    [operation],
-  )
-  const resolvedPresetSkillIds = useMemo(() => resolvedPreset.skillIds ?? [], [resolvedPreset])
-  /** 文本类操作（剧本/分镜/导演/动作 等专属 agent 适用）：走真实文本模型，可指定 agent */
+  /** 文本类操作走真实文本模型，Agent 由 Canvas 运行时固定为内置助手。 */
   const isTextOperation =
     operation === 'text_generate' || operation === 'text_rewrite' || operation === 'prompt_optimize'
   const supportedMediaModels = useMemo(() => {
@@ -600,8 +564,8 @@ export function CanvasInlineAiComposer({
   }, [])
 
   /**
-   * 套用内置角色预设：把写好的提示词（含上游内容）填入提示词框，切到该角色默认操作，
-   * 并在未指定 agent 时尝试自动匹配同名的应用内 agent。
+   * 套用内置创作角色预设：把写好的提示词（含上游内容）填入提示词框，
+   * 并切到该角色默认操作。
    */
   const applyAgentPreset = useCallback(
     (role: CanvasAgentRoleId) => {
@@ -616,16 +580,8 @@ export function CanvasInlineAiComposer({
           ? applyShotScriptConfigToPrompt(presetPrompt, DEFAULT_SHOT_SCRIPT_CONFIG)
           : presetPrompt,
       )
-      if (!selectedAgentId) {
-        const match = agents.find(
-          (agent) =>
-            agent.name.includes(preset.label.replace(/\s*agent$/i, '').trim()) ||
-            (agent.description ?? '').includes(preset.label),
-        )
-        if (match) setSelectedAgentId(match.id)
-      }
     },
-    [agents, nodePromptContext, selectedAgentId],
+    [nodePromptContext],
   )
 
   const handleAdvancedToggle = () => {
@@ -707,7 +663,6 @@ export function CanvasInlineAiComposer({
         skipParameterValidation?: boolean
         inputTransport?: CanvasInputTransport
         inputRoles?: Record<string, CanvasTaskInputRoleSelection>
-        agentId?: string
         droppedModelParams?: Array<{ name: string; reason: string; valuePreview?: string }>
         modelParamWarnings?: Array<{ code: string; message: string }>
       } = {
@@ -715,7 +670,6 @@ export function CanvasInlineAiComposer({
         prompt: effectivePrompt,
         ...(readSkipCanvasParameterValidation() ? { skipParameterValidation: true } : {}),
       }
-      if (isTextOperation && selectedAgentId) payload.agentId = selectedAgentId
       if (effectiveNegativePrompt) payload.negativePrompt = effectiveNegativePrompt
       if (selectedModel?.providerProfileId)
         payload.providerProfileId = selectedModel.providerProfileId
@@ -748,10 +702,6 @@ export function CanvasInlineAiComposer({
           : {}),
         ...(selectedModel?.manifestId ? { manifestId: selectedModel.manifestId } : {}),
         ...(selectedModel?.effectiveModelId ? { modelId: selectedModel.effectiveModelId } : {}),
-        ...(selectedAgentId ? { agentId: selectedAgentId } : {}),
-        // 新节点没在 InlineAiComposer 里选 skills，但 preset 里可能已经预设了；
-        // 这里把 preset 默认值一起写进 lastUsed，避免后续新建节点拿不到 skill 覆盖。
-        ...(resolvedPresetSkillIds.length > 0 ? { skillIds: resolvedPresetSkillIds } : {}),
         ...(Object.keys(modelParams).length > 0 ? { modelParams } : {}),
       })
       try {
@@ -980,44 +930,24 @@ export function CanvasInlineAiComposer({
           </div>
         )}
         {isTextOperation && (
-          <>
-            <div className="canvas-form-row">
-              <label>专属 Agent</label>
-              <LobeSelect
-                value={selectedAgentId || undefined}
-                placeholder="使用通用文本模型（不指定 agent）"
-                onChange={(value) => setSelectedAgentId(String(value ?? ''))}
-                options={agents.map((agent) => ({
-                  value: agent.id,
-                  label: agent.builtIn ? `${agent.name}（内置）` : agent.name,
-                }))}
-                allowClear
-              />
-              <div className="canvas-model-hint">
-                {agents.length > 0
-                  ? '选中后用该 agent 的人设与绑定模型执行；不选则用通用影视创作助手。'
-                  : '未配置专属 Agent，可继续使用通用文本模型；模型请在主窗口「模型服务」配置。'}
-              </div>
+          <div className="canvas-form-row">
+            <label>创作模板</label>
+            <div className="canvas-creative-actions">
+              {CANVAS_AGENT_PRESETS.map((preset) => (
+                <Button
+                  key={preset.role}
+                  size="middle"
+                  title={preset.description}
+                  onClick={() => applyAgentPreset(preset.role)}
+                >
+                  {preset.label}
+                </Button>
+              ))}
             </div>
-            <div className="canvas-form-row">
-              <label>内置角色</label>
-              <div className="canvas-creative-actions">
-                {CANVAS_AGENT_PRESETS.map((preset) => (
-                  <Button
-                    key={preset.role}
-                    size="middle"
-                    title={preset.description}
-                    onClick={() => applyAgentPreset(preset.role)}
-                  >
-                    {preset.label}
-                  </Button>
-                ))}
-              </div>
-              <div className="canvas-model-hint">
-                一键填入该角色的内置提示词（含上游内容），可继续编辑后发起。
-              </div>
+            <div className="canvas-model-hint">
+              一键填入该模板的内置提示词（含上游内容），可继续编辑后发起。
             </div>
-          </>
+          </div>
         )}
         <CanvasPromptEditor
           prompt={prompt}
@@ -1565,17 +1495,8 @@ export function resolveInitialModelParamDraftValue({
   const presetValue = readCompatibleModelParamDraftValue(presetParams, fieldName, field)
   const existingValue = readCompatibleModelParamDraftValue(existingParams, fieldName, field)
   const defaultValue = readCompatibleModelParamDraftValue(defaultParams, fieldName, field)
-  if (
-    operation === 'panorama_360' &&
-    (isAspectRatioParam(fieldName) || fieldName === 'size')
-  ) {
-    return (
-      compatiblePanoramaFieldValue ??
-      presetValue ??
-      existingValue ??
-      defaultValue ??
-      ''
-    )
+  if (operation === 'panorama_360' && (isAspectRatioParam(fieldName) || fieldName === 'size')) {
+    return compatiblePanoramaFieldValue ?? presetValue ?? existingValue ?? defaultValue ?? ''
   }
   return existingValue ?? compatiblePanoramaFieldValue ?? presetValue ?? defaultValue ?? ''
 }
@@ -1636,8 +1557,7 @@ function derivePanoramaFieldValue(
   field: Pick<SchemaField, 'name' | 'enumValues'>,
   presetParams: Record<string, unknown>,
 ): string | undefined {
-  const presetAspect =
-    readModelParamDraftValue(presetParams, 'aspectRatio')
+  const presetAspect = readModelParamDraftValue(presetParams, 'aspectRatio')
   if (!presetAspect) return undefined
   if (isAspectRatioParam(field.name)) return presetAspect
   if (field.name !== 'size') return undefined
@@ -1960,16 +1880,12 @@ function imageDimensionFieldPolicy(fields: SchemaField[]): {
   accepted: Set<string>
 } {
   const accepted = new Set(
-    fields
-      .map((field) => field.name)
-      .filter((name) => name === 'size' || isAspectRatioParam(name)),
+    fields.map((field) => field.name).filter((name) => name === 'size' || isAspectRatioParam(name)),
   )
   return {
     accepted,
     allows: (name) =>
-      accepted.size === 0 ||
-      (name !== 'size' && !isAspectRatioParam(name)) ||
-      accepted.has(name),
+      accepted.size === 0 || (name !== 'size' && !isAspectRatioParam(name)) || accepted.has(name),
   }
 }
 

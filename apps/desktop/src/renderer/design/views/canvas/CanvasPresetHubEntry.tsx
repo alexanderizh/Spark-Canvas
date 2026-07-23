@@ -32,7 +32,7 @@ export function CanvasPresetHubEntry({
         </span>
         <span className="canvas-preset-hub-quick-entry-body">
           <strong>预设中心</strong>
-          <span>统一节点默认 Agent / 模型 / Skills</span>
+          <span>统一节点默认模型与参数</span>
         </span>
         <span className="canvas-preset-hub-quick-entry-status">{statusText}</span>
       </button>
@@ -53,7 +53,7 @@ export function CanvasPresetHubEntry({
                 功能中心
               </Tag>
             </div>
-            <span>统一配置后续新建任务节点的默认 Prompt、Agent、模型、Skills 与参数</span>
+            <span>统一配置后续新建任务节点的默认提示词、模型与参数</span>
           </div>
         </div>
         <Tag bordered color={configured ? 'gold' : 'default'}>

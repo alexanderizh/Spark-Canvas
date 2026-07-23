@@ -74,7 +74,7 @@ describe('Canvas Agent product policy', () => {
     expect(filterCanvasAssistantAgents([platform, legacyCanvas])).toEqual([legacyCanvas])
   })
 
-  it('keeps every Canvas text entrypoint on the shared Canvas Agent policy', () => {
+  it('keeps Canvas task configuration entrypoints model-only', () => {
     const entrypoints = [
       'CanvasOperationPanel.tsx',
       'CanvasOperationPresetModal.tsx',
@@ -82,8 +82,9 @@ describe('Canvas Agent product policy', () => {
     ].map((file) => readFileSync(join(__dirname, file), 'utf8'))
 
     for (const source of entrypoints) {
-      expect(source).toContain('filterCanvasAssistantAgents')
-      expect(source).not.toContain("agent.id === 'platform-manager-agent'")
+      expect(source).not.toContain('AgentPickerInline')
+      expect(source).not.toContain("'agent:list'")
+      expect(source).not.toContain("'skill:list'")
     }
   })
 
@@ -108,6 +109,7 @@ describe('Canvas Agent product policy', () => {
     expect(sources[0]).toContain("'canvas:agent:session:get-history'")
     expect(sources[0]).toContain("'canvas:agent:session:cancel'")
     expect(sources[0]).toContain("'canvas:agent:session:answer-question'")
+    expect(sources[0]).not.toContain("fallbackLabel = '平台管理'")
   })
 
   it('exposes only the frozen Canvas Agent skill ids', () => {

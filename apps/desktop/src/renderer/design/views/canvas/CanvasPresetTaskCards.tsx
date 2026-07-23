@@ -1,8 +1,8 @@
 import { useState } from 'react'
-import type { CanvasMediaModelSummary, ManagedAgent, ProviderProfile } from '@spark/protocol'
+import type { CanvasMediaModelSummary, ProviderProfile } from '@spark/protocol'
 
 import { Icons } from '../../Icons'
-import { AgentPickerInline, ProviderModelPickerInline } from './CanvasAgentModal'
+import { ProviderModelPickerInline } from './CanvasAgentModal'
 import { CanvasModelPicker } from './CanvasModelPicker'
 import {
   CANVAS_PRESET_TASK_CARDS,
@@ -13,11 +13,10 @@ import { type CanvasTaskDefaultKind, type CanvasTaskRuntimeDefault } from './can
 import { mediaModelKey } from './canvasModelPickerModel'
 
 type TaskDefaultsValue = Record<CanvasTaskDefaultKind, CanvasTaskRuntimeDefault>
-type OpenPicker = 'text-agent' | 'text-model' | 'vision-model' | null
+type OpenPicker = 'text-model' | 'vision-model' | null
 
 export type CanvasPresetTaskCardsProps = {
   value: TaskDefaultsValue
-  agents: ManagedAgent[]
   providers: ProviderProfile[]
   imageModels: CanvasMediaModelSummary[]
   videoModels: CanvasMediaModelSummary[]
@@ -27,7 +26,6 @@ export type CanvasPresetTaskCardsProps = {
 
 export function CanvasPresetTaskCards({
   value,
-  agents,
   providers,
   imageModels,
   videoModels,
@@ -40,32 +38,6 @@ export function CanvasPresetTaskCards({
   )
   const visionProviders = providers.filter(isImageUnderstandingProvider)
   const textDefault = value.text
-  const textMode: 'agent' | 'model' =
-    textDefault.agentId || !textDefault.modelId ? 'agent' : 'model'
-
-  const changeTextMode = (mode: 'agent' | 'model') => {
-    if (mode === textMode) return
-    if (mode === 'model') {
-      const { agentId: _agentId, ...runtime } = textDefault
-      onChange('text', runtime)
-      return
-    }
-    const agent = agents[0]
-    onChange('text', {
-      ...(agent?.id ? { agentId: agent.id } : {}),
-      ...(agent?.providerProfileId
-        ? { providerProfileId: agent.providerProfileId }
-        : textDefault.providerProfileId
-          ? { providerProfileId: textDefault.providerProfileId }
-          : {}),
-      ...(agent?.modelId
-        ? { modelId: agent.modelId }
-        : textDefault.modelId
-          ? { modelId: textDefault.modelId }
-          : {}),
-      skillIds: [...textDefault.skillIds],
-    })
-  }
 
   return (
     <div className="canvas-preset-task-grid">
@@ -91,73 +63,25 @@ export function CanvasPresetTaskCards({
 
             {card.kind === 'text' ? (
               <>
-                <span className="canvas-preset-task-field-label">处理方式</span>
-                <div
-                  className="canvas-preset-execution-switch"
-                  role="group"
-                  aria-label="文本处理方式"
-                >
-                  <button
-                    type="button"
-                    className={textMode === 'agent' ? 'is-active' : ''}
-                    aria-pressed={textMode === 'agent'}
-                    onClick={() => changeTextMode('agent')}
-                  >
-                    交给 Agent
-                  </button>
-                  <button
-                    type="button"
-                    className={textMode === 'model' ? 'is-active' : ''}
-                    aria-pressed={textMode === 'model'}
-                    onClick={() => changeTextMode('model')}
-                  >
-                    直接用模型
-                  </button>
-                </div>
+                <span className="canvas-preset-task-field-label">默认模型</span>
                 <div className="canvas-preset-task-picker">
-                  {textMode === 'agent' ? (
-                    <AgentPickerInline
-                      agents={agents}
-                      selectedId={textDefault.agentId ?? ''}
-                      fallbackLabel="选择 Agent"
-                      disabled={loading || agents.length === 0}
-                      open={openPicker === 'text-agent'}
-                      onOpenChange={(open) => setOpenPicker(open ? 'text-agent' : null)}
-                      onChange={(agentId) => {
-                        const agent = agents.find((item) => item.id === agentId)
-                        onChange('text', {
-                          agentId,
-                          ...(agent?.providerProfileId
-                            ? { providerProfileId: agent.providerProfileId }
-                            : {}),
-                          ...(agent?.modelId ? { modelId: agent.modelId } : {}),
-                          skillIds: [...textDefault.skillIds],
-                        })
-                      }}
-                    />
-                  ) : (
-                    <ProviderModelPickerInline
-                      providers={textProviders}
-                      selectedProviderId={textDefault.providerProfileId ?? ''}
-                      selectedModelId={textDefault.modelId ?? ''}
-                      disabled={loading || textProviders.length === 0}
-                      open={openPicker === 'text-model'}
-                      onOpenChange={(open) => setOpenPicker(open ? 'text-model' : null)}
-                      onChange={(providerProfileId, modelId) =>
-                        onChange('text', {
-                          providerProfileId,
-                          modelId,
-                          skillIds: [...textDefault.skillIds],
-                        })
-                      }
-                    />
-                  )}
+                  <ProviderModelPickerInline
+                    providers={textProviders}
+                    selectedProviderId={textDefault.providerProfileId ?? ''}
+                    selectedModelId={textDefault.modelId ?? ''}
+                    disabled={loading || textProviders.length === 0}
+                    open={openPicker === 'text-model'}
+                    onOpenChange={(open) => setOpenPicker(open ? 'text-model' : null)}
+                    onChange={(providerProfileId, modelId) =>
+                      onChange('text', {
+                        providerProfileId,
+                        modelId,
+                        skillIds: [],
+                      })
+                    }
+                  />
                 </div>
-                <p className="canvas-preset-task-note">
-                  {textMode === 'agent'
-                    ? agentRuntimeNote(agents, textDefault)
-                    : '适合只需要固定模型、不需要 Agent 工作流的任务'}
-                </p>
+                <p className="canvas-preset-task-note">设置文本任务默认使用的模型</p>
               </>
             ) : card.kind === 'image_understanding' ? (
               <>
@@ -240,20 +164,7 @@ function taskIcon(card: CanvasPresetTaskCardDefinition) {
 }
 
 function hasRuntimeSelection(runtime: CanvasTaskRuntimeDefault): boolean {
-  return Boolean(
-    runtime.agentId ||
-    runtime.providerProfileId ||
-    runtime.manifestId ||
-    runtime.modelId ||
-    runtime.skillIds.length > 0,
-  )
-}
-
-function agentRuntimeNote(agents: ManagedAgent[], runtime: CanvasTaskRuntimeDefault): string {
-  const agent = agents.find((item) => item.id === runtime.agentId)
-  if (!agent) return agents.length === 0 ? '尚未配置可用 Agent' : '请选择负责文本任务的 Agent'
-  const model = runtime.modelId ?? agent.modelId
-  return model ? `该 Agent 当前使用 ${model}` : '模型跟随 Agent 自身设置'
+  return Boolean(runtime.providerProfileId || runtime.manifestId || runtime.modelId)
 }
 
 function resolveMediaModelValue(

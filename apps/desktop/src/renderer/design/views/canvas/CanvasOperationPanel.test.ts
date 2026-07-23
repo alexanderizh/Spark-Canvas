@@ -60,6 +60,7 @@ import {
   buildVideoFrameInputRoles,
   mergeDefaultReferenceFrameNodeIds,
   mergeOperationPanelPromptWithInputContext,
+  normalizeCanvasOperationMessage,
   readCanvasOperationPanelTextInputContent,
   readActiveOperationPromptNodeIds,
   resolveOperationPanelActualInputNodes,
@@ -71,6 +72,15 @@ import { mergeSeededModelParamDraft } from './canvasModelParamDraftState'
 import type { CanvasNode, CanvasSnapshot } from './canvas.types'
 
 describe('CanvasOperationPanel negative prompt inheritance', () => {
+  it('migrates legacy Agent-platform task guidance for existing nodes', () => {
+    expect(normalizeCanvasOperationMessage('确认 Prompt、Agent 与模型后点击开始任务')).toBe(
+      '确认提示词与模型后点击开始任务',
+    )
+    expect(
+      normalizeCanvasOperationMessage('请在操作面板确认 Prompt / Agent / 模型后点击开始任务'),
+    ).toBe('请在操作面板确认提示词与模型后点击开始任务')
+  })
+
   it('merges project-level and operation preset negative prompts', () => {
     expect(
       resolveCanvasOperationPanelNegativePrompt({

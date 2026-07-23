@@ -106,7 +106,6 @@ vi.mock('antd', async () => {
 })
 
 vi.mock('./CanvasAgentModal', () => ({
-  AgentPickerInline: () => React.createElement('div', { className: 'agent-picker-stub' }, 'Agent'),
   ProviderModelPickerInline: () =>
     React.createElement('div', { className: 'provider-picker-stub' }, 'Provider'),
 }))
@@ -142,9 +141,7 @@ describe('CanvasOperationPresetModal', () => {
     document.body.appendChild(container)
     const spark = {
       invoke: vi.fn().mockImplementation((channel: string) => {
-        if (channel === 'agent:list') return Promise.resolve({ agents: [] })
         if (channel === 'provider:list') return Promise.resolve({ profiles: [] })
-        if (channel === 'skill:list') return Promise.resolve({ skills: [] })
         return Promise.resolve({})
       }),
       on: vi.fn(),
@@ -231,10 +228,6 @@ describe('CanvasOperationPresetModal', () => {
       root.render(<CanvasOperationPresetModal open onClose={vi.fn()} />)
     })
 
-    const directModel = Array.from(container.querySelectorAll<HTMLButtonElement>('button')).find(
-      (button) => button.textContent === '直接用模型',
-    )
-    await act(async () => directModel?.click())
     const save = Array.from(container.querySelectorAll<HTMLButtonElement>('button')).find(
       (button) => button.textContent === '保存默认设置',
     )
@@ -279,7 +272,7 @@ describe('CanvasOperationPresetModal', () => {
     expect(storedNodeOverrides.text_generate).toMatchObject(storedOverride)
   })
 
-  it('preserves unavailable runtime values when only the node prompt is edited', async () => {
+  it('drops legacy Agent-platform fields when a node override is edited', async () => {
     const storedOverride = {
       prompt: '原节点提示词',
       agentId: 'agent:offline',
@@ -324,8 +317,11 @@ describe('CanvasOperationPresetModal', () => {
       window.localStorage.getItem('spark-canvas:operation-presets:v1') ?? '{}',
     ) as Record<string, Record<string, unknown>>
     expect(storedNodeOverrides.text_generate).toMatchObject({
-      ...storedOverride,
       prompt: '更新后的节点提示词',
+      providerProfileId: 'provider:offline',
+      modelId: 'model:offline',
+      skillIds: [],
     })
+    expect(storedNodeOverrides.text_generate?.agentId).toBeUndefined()
   })
 })
